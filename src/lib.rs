@@ -382,4 +382,25 @@ mod test {
         });
     }
 
+
+    #[test]
+    fn test_removing_verified_record_updates_stats() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+            TrustBridgeContract::remove(env.clone(), user.clone(), username(&env, "octocat"))
+                .unwrap();
+
+            let stats = TrustBridgeContract::get_stats(env.clone());
+            assert_eq!(stats.total, 0);
+            assert_eq!(stats.verified, 0);
+        });
+    }
+
 }
