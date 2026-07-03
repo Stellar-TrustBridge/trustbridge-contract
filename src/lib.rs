@@ -403,4 +403,26 @@ mod test {
         });
     }
 
+
+    #[test]
+    fn test_reregister_same_address_keeps_verification() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+
+            let record =
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
+            assert!(record.verified);
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).verified, 1);
+        });
+    }
+
 }
