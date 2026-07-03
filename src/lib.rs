@@ -322,4 +322,23 @@ mod test {
             assert_eq!(result, Err(ContractError::AlreadyInitialized));
         });
     }
+
+    #[test]
+    fn test_register_requires_initialization() {
+        let env = Env::default();
+        let user = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.mock_all_auths();
+
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+            );
+            assert_eq!(result, Err(ContractError::NotInitialized));
+        });
+    }
+
 }
