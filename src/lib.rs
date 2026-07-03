@@ -361,4 +361,25 @@ mod test {
         });
     }
 
+
+    #[test]
+    fn test_get_all_registered_returns_indexed_records() {
+        let env = Env::default();
+        let (_admin, user1, user2, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "alice"), user1.clone())
+                .unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "bob"), user2.clone())
+                .unwrap();
+
+            let all = TrustBridgeContract::get_all_registered(env.clone()).unwrap();
+            assert_eq!(all.len(), 2);
+            assert_eq!(all.get(0).unwrap(), (username(&env, "alice"), user1));
+            assert_eq!(all.get(1).unwrap(), (username(&env, "bob"), user2));
+        });
+    }
+
 }
