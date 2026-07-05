@@ -477,4 +477,19 @@ mod test {
         });
     }
 
+
+    #[test]
+    fn test_register_two_users_keeps_addresses() {
+        let env = Env::default();
+        let (_admin, user1, user2, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "alice"), user1.clone()).unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "bob"), user2.clone()).unwrap();
+            assert_eq!(TrustBridgeContract::get_address(env.clone(), username(&env, "alice")).unwrap().stellar_address, user1);
+            assert_eq!(TrustBridgeContract::get_address(env.clone(), username(&env, "bob")).unwrap().stellar_address, user2);
+        });
+    }
+
 }
