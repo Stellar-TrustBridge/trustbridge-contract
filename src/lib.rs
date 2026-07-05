@@ -538,4 +538,17 @@ mod test {
         });
     }
 
+
+    #[test]
+    fn test_stats_empty_after_setup() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            let stats = TrustBridgeContract::get_stats(env.clone());
+            assert_eq!(stats.total, 0);
+            assert_eq!(stats.verified, 0);
+        });
+    }
+
 }
