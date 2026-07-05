@@ -506,4 +506,19 @@ mod test {
         });
     }
 
+
+    #[test]
+    fn test_readding_removed_user_increments_count() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            TrustBridgeContract::remove(env.clone(), user.clone(), username(&env, "octocat")).unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 1);
+        });
+    }
+
 }
