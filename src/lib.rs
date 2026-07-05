@@ -389,11 +389,18 @@ mod test {
         let (_admin, user, _other, contract_id) = setup(&env);
 
         env.mock_all_auths();
-
         env.as_contract(&contract_id, || {
             TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
                 .unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
             TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
             TrustBridgeContract::remove(env.clone(), user.clone(), username(&env, "octocat"))
                 .unwrap();
 
@@ -410,11 +417,18 @@ mod test {
         let (_admin, user, _other, contract_id) = setup(&env);
 
         env.mock_all_auths();
-
         env.as_contract(&contract_id, || {
             TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
                 .unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
             TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
             TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
                 .unwrap();
 
@@ -471,7 +485,15 @@ mod test {
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
             TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
             TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
             let result = TrustBridgeContract::verify(env.clone(), username(&env, "octocat"));
             assert_eq!(result, Err(ContractError::AlreadyVerified));
         });
@@ -501,6 +523,10 @@ mod test {
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
             TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
             TrustBridgeContract::remove(env.clone(), user.clone(), username(&env, "octocat")).unwrap();
             assert!(TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).is_none());
         });
@@ -515,7 +541,15 @@ mod test {
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
             TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
             TrustBridgeContract::remove(env.clone(), user.clone(), username(&env, "octocat")).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
             TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
             assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 1);
         });
@@ -531,6 +565,10 @@ mod test {
         env.as_contract(&contract_id, || {
             TrustBridgeContract::register(env.clone(), username(&env, "alice"), user1.clone()).unwrap();
             TrustBridgeContract::register(env.clone(), username(&env, "bob"), user2.clone()).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
             TrustBridgeContract::remove(env.clone(), user1.clone(), username(&env, "alice")).unwrap();
             let all = TrustBridgeContract::get_all_registered(env.clone()).unwrap();
             assert_eq!(all.len(), 1);
@@ -548,6 +586,35 @@ mod test {
             let stats = TrustBridgeContract::get_stats(env.clone());
             assert_eq!(stats.total, 0);
             assert_eq!(stats.verified, 0);
+        });
+    }
+
+
+    #[test]
+    fn test_removed_verified_user_can_register_unverified() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::remove(env.clone(), user.clone(), username(&env, "octocat")).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            let record = TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
+            assert!(!record.verified);
         });
     }
 
