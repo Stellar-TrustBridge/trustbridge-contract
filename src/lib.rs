@@ -462,4 +462,19 @@ mod test {
         });
     }
 
+
+    #[test]
+    fn test_double_verify_fails() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+            let result = TrustBridgeContract::verify(env.clone(), username(&env, "octocat"));
+            assert_eq!(result, Err(ContractError::AlreadyVerified));
+        });
+    }
+
 }
