@@ -436,4 +436,17 @@ mod test {
         });
     }
 
+
+    #[test]
+    fn test_verify_missing_registration_fails() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::verify(env.clone(), username(&env, "missing"));
+            assert_eq!(result, Err(ContractError::NotRegistered));
+        });
+    }
+
 }
