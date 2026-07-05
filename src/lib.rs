@@ -425,4 +425,15 @@ mod test {
         });
     }
 
+
+    #[test]
+    fn test_get_address_missing_returns_none() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            assert!(TrustBridgeContract::get_address(env.clone(), username(&env, "missing")).is_none());
+        });
+    }
+
 }
