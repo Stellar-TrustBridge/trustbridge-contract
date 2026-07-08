@@ -108,3 +108,7 @@ pub fn get_stats(env: &Env) -> Stats {
         verified: get_verified_count(env),
     }
 }
+
+pub fn has_record(env: &Env, github_username: &String) -> bool {
+    get_record(env, github_username).is_some()
+}
