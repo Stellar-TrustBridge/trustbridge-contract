@@ -10,3 +10,9 @@ pub enum ContractError {
     NotRegistered = 4,
     AlreadyVerified = 5,
 }
+
+impl ContractError {
+    pub fn code(self) -> u32 {
+        self as u32
+    }
+}
