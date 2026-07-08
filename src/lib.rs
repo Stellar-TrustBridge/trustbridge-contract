@@ -717,4 +717,17 @@ mod test {
         });
     }
 
+
+    #[test]
+    fn test_admin_export_empty_registry() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let all = TrustBridgeContract::get_all_registered(env.clone()).unwrap();
+            assert_eq!(all.len(), 0);
+        });
+    }
+
 }
