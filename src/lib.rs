@@ -730,4 +730,25 @@ mod test {
         });
     }
 
+
+    #[test]
+    fn test_removing_one_of_two_keeps_remaining_stats() {
+        let env = Env::default();
+        let (_admin, user1, user2, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "alice"), user1.clone()).unwrap();
+            TrustBridgeContract::register(env.clone(), username(&env, "bob"), user2.clone()).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::remove(env.clone(), user1.clone(), username(&env, "alice")).unwrap();
+            let stats = TrustBridgeContract::get_stats(env.clone());
+            assert_eq!(stats.total, 1);
+            assert_eq!(stats.verified, 0);
+        });
+    }
+
 }
