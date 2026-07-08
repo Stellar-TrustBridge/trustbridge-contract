@@ -102,11 +102,12 @@ pub fn remove_from_index(env: &Env, github_username: &String) {
     set_index(env, &next);
 }
 
+pub fn build_stats(total: u32, verified: u32) -> Stats {
+    Stats { total, verified }
+}
+
 pub fn get_stats(env: &Env) -> Stats {
-    Stats {
-        total: get_count(env),
-        verified: get_verified_count(env),
-    }
+    build_stats(get_count(env), get_verified_count(env))
 }
 
 pub fn has_record(env: &Env, github_username: &String) -> bool {
