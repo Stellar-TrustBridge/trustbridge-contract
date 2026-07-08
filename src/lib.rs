@@ -11,7 +11,7 @@ pub use storage::{ContributorRecord, Stats};
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
 use crate::storage::{
-    add_to_index, get_admin, get_count, get_index, get_record, get_stats as read_stats,
+    add_to_index, get_admin, get_count, get_index, get_record, get_stats as read_stats, has_record,
     get_verified_count, remove_from_index, remove_record, require_initialized, set_count,
     set_record, set_verified_count, ADMIN_KEY,
 };
@@ -79,7 +79,11 @@ impl TrustBridgeContract {
 
     /// Read-only lookup. Returns `None` if the username is not registered.
     pub fn get_address(env: Env, github_username: String) -> Option<ContributorRecord> {
-        get_record(&env, &github_username)
+        if has_record(&env, &github_username) {
+            get_record(&env, &github_username)
+        } else {
+            None
+        }
     }
 
     /// Removes a registration. Callable by the registrant or the admin.
