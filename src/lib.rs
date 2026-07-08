@@ -770,4 +770,27 @@ mod test {
         });
     }
 
+
+    #[test]
+    fn test_verify_after_reregister_new_address() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), other.clone()).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+            assert!(TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap().verified);
+        });
+    }
+
 }
