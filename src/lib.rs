@@ -793,4 +793,16 @@ mod test {
         });
     }
 
+
+    #[test]
+    fn test_repeated_missing_lookups_are_stable() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            assert!(TrustBridgeContract::get_address(env.clone(), username(&env, "missing")).is_none());
+            assert!(TrustBridgeContract::get_address(env.clone(), username(&env, "missing")).is_none());
+        });
+    }
+
 }
