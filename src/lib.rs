@@ -622,4 +622,14 @@ mod test {
         });
     }
 
+
+    #[test]
+    fn test_error_codes_match_repr() {
+        assert_eq!(ContractError::AlreadyInitialized.code(), 1);
+        assert_eq!(ContractError::NotInitialized.code(), 2);
+        assert_eq!(ContractError::NotAuthorized.code(), 3);
+        assert_eq!(ContractError::NotRegistered.code(), 4);
+        assert_eq!(ContractError::AlreadyVerified.code(), 5);
+    }
+
 }
