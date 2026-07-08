@@ -694,4 +694,27 @@ mod test {
         });
     }
 
+
+    #[test]
+    fn test_verified_address_change_decrements_verified_count() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), other.clone()).unwrap();
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).verified, 0);
+        });
+    }
+
 }
