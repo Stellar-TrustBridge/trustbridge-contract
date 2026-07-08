@@ -805,4 +805,22 @@ mod test {
         });
     }
 
+
+    #[test]
+    fn test_register_after_empty_export() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::get_all_registered(env.clone()).unwrap().len(), 0);
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            assert_eq!(TrustBridgeContract::get_all_registered(env.clone()).unwrap().len(), 1);
+        });
+    }
+
 }
