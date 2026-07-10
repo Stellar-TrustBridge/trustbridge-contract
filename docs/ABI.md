@@ -36,6 +36,7 @@ struct Stats {
 | 3 | `NotAuthorized` | Caller lacks permission |
 | 4 | `NotRegistered` | Username not in registry |
 | 5 | `AlreadyVerified` | Username already verified |
+| 6 | `NotVerified` | Cannot revoke verification because the username is not verified |
 
 ---
 
@@ -151,6 +152,40 @@ Mark a contributor as verified after off-chain GitHub identity confirmation.
 ```bash
 stellar contract invoke --id $ID --source admin --network testnet --send=yes \
   -- verify --github-username octocat
+```
+
+---
+
+### `revoke_verification(github_username: String) -> Result<(), ContractError>`
+
+Revoke verification for a registered contributor. Admin-only.
+
+| | |
+|---|---|
+| **Auth** | Admin |
+| **Mutates** | Yes |
+| **Errors** | `NotInitialized`, `NotRegistered`, `NotVerified` |
+| **Events** | `VerificationRevokedEvent` |
+
+```bash
+stellar contract invoke --id $ID --source admin --network testnet --send=yes \
+  -- revoke_verification --github-username octocat
+```
+
+---
+
+### `get_verified_count() -> u32`
+
+Returns the number of verified registrations.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+```bash
+stellar contract invoke --id $ID --source deployer --network testnet \
+  -- get_verified_count
 ```
 
 ---

@@ -5,6 +5,7 @@ The admin role exists for off-chain GitHub verification and operational recovery
 ## Routine actions
 
 - Verify contributors only after confirming the GitHub identity off-chain.
+- Revoke verification cleanly when contributor identities change or a registration is invalidated.
 - Export registered records before large dashboard migrations.
 - Keep the admin account in a secure wallet or multisig flow.
 
