@@ -5,14 +5,14 @@ mod events;
 mod storage;
 
 pub use error::ContractError;
-pub use events::{RegisteredEvent, RemovedEvent, VerifiedEvent};
+pub use events::{RegisteredEvent, RemovedEvent, VerifiedEvent, VerificationRevokedEvent};
 pub use storage::{ContributorRecord, Stats};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
 use crate::storage::{
     add_to_index, get_admin, get_count, get_index, get_record, get_stats as read_stats, has_record,
-    get_verified_count, remove_from_index, remove_record, require_initialized, set_count,
+    get_verified_count as storage_get_verified_count, remove_from_index, remove_record, require_initialized, set_count,
     set_record, set_verified_count, ADMIN_KEY,
 };
 
@@ -61,7 +61,7 @@ impl TrustBridgeContract {
             add_to_index(&env, &github_username);
         } else if let Some(old) = existing {
             if old.stellar_address != stellar_address && old.verified {
-                set_verified_count(&env, get_verified_count(&env).saturating_sub(1));
+                set_verified_count(&env, storage_get_verified_count(&env).saturating_sub(1));
             }
         }
 
@@ -109,7 +109,7 @@ impl TrustBridgeContract {
         set_count(&env, get_count(&env).saturating_sub(1));
 
         if record.verified {
-            set_verified_count(&env, get_verified_count(&env).saturating_sub(1));
+            set_verified_count(&env, storage_get_verified_count(&env).saturating_sub(1));
         }
 
         RemovedEvent {
@@ -155,7 +155,7 @@ impl TrustBridgeContract {
 
         record.verified = true;
         set_record(&env, &github_username, &record);
-        set_verified_count(&env, get_verified_count(&env).saturating_add(1));
+        set_verified_count(&env, storage_get_verified_count(&env).saturating_add(1));
 
         let timestamp = env.ledger().timestamp();
         VerifiedEvent {
@@ -166,6 +166,38 @@ impl TrustBridgeContract {
         .publish(&env);
 
         Ok(())
+    }
+
+    /// Revokes verification for a registered contributor. Admin-only.
+    pub fn revoke_verification(env: Env, github_username: String) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
+
+        if !record.verified {
+            return Err(ContractError::NotVerified);
+        }
+
+        record.verified = false;
+        set_record(&env, &github_username, &record);
+        set_verified_count(&env, storage_get_verified_count(&env).saturating_sub(1));
+
+        let timestamp = env.ledger().timestamp();
+        VerificationRevokedEvent {
+            github_username: github_username.clone(),
+            stellar_address: record.stellar_address.clone(),
+            timestamp,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Returns the verified registration count.
+    pub fn get_verified_count(env: Env) -> u32 {
+        storage_get_verified_count(&env)
     }
 
     /// Returns aggregate registration statistics.
@@ -500,6 +532,43 @@ mod test {
         env.as_contract(&contract_id, || {
             let result = TrustBridgeContract::verify(env.clone(), username(&env, "octocat"));
             assert_eq!(result, Err(ContractError::AlreadyVerified));
+        });
+    }
+
+    #[test]
+    fn test_revoke_verification_decrements_verified_count() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::revoke_verification(env.clone(), username(&env, "octocat")).unwrap();
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0);
+            let record = TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
+            assert!(!record.verified);
+        });
+    }
+
+    #[test]
+    fn test_revoke_verification_nonverified_fails() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::revoke_verification(env.clone(), username(&env, "octocat"));
+            assert_eq!(result, Err(ContractError::NotVerified));
         });
     }
 
