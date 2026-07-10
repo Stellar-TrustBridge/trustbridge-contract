@@ -26,3 +26,12 @@ pub struct VerifiedEvent {
     pub stellar_address: Address,
     pub timestamp: u64,
 }
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerificationRevokedEvent {
+    #[topic]
+    pub github_username: String,
+    pub stellar_address: Address,
+    pub timestamp: u64,
+}

@@ -9,6 +9,7 @@ pub enum ContractError {
     NotAuthorized = 3,
     NotRegistered = 4,
     AlreadyVerified = 5,
+    NotVerified = 6,
 }
 
 impl ContractError {
