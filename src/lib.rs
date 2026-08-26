@@ -6,14 +6,15 @@ mod storage;
 
 pub use error::ContractError;
 pub use events::{RegisteredEvent, RemovedEvent, VerifiedEvent};
-pub use storage::{ContributorRecord, Stats};
+pub use storage::{ContributorRecord, EntityType, Stats};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
 use crate::storage::{
-    add_to_index, get_admin, get_count, get_index, get_record, get_stats as read_stats,
-    get_verified_count, remove_from_index, remove_record, require_initialized, set_count,
-    set_record, set_verified_count, ADMIN_KEY,
+    add_to_index, add_to_org_index, add_to_team_index, get_admin, get_count, get_index,
+    get_record, get_stats as read_stats, get_verified_count, remove_from_index,
+    remove_from_org_index, remove_from_team_index, remove_record, require_initialized, set_count,
+    set_record, set_verified_count, team_key, ADMIN_KEY,
 };
 
 #[contract]
@@ -36,13 +37,28 @@ impl TrustBridgeContract {
 
     /// Registers or updates a GitHub username → Stellar address mapping.
     /// The caller must authenticate as `stellar_address`.
+    /// `entity_type`: 0 = Personal, 1 = Org, 2 = Team.
+    /// For teams, `org_name` must be provided.
     pub fn register(
         env: Env,
         github_username: String,
         stellar_address: Address,
+        entity_type: u32,
+        org_name: Option<String>,
     ) -> Result<(), ContractError> {
         require_initialized(&env)?;
         stellar_address.require_auth();
+
+        let etype = match entity_type {
+            0 => EntityType::Personal,
+            1 => EntityType::Org,
+            2 => EntityType::Team,
+            _ => return Err(ContractError::InvalidEntityType),
+        };
+
+        if etype == EntityType::Team && org_name.is_none() {
+            return Err(ContractError::OrgNameRequired);
+        }
 
         let timestamp = env.ledger().timestamp();
         let existing = get_record(&env, &github_username);
@@ -54,11 +70,27 @@ impl TrustBridgeContract {
                 .as_ref()
                 .map(|r| r.stellar_address == stellar_address && r.verified)
                 .unwrap_or(false),
+            entity_type: etype,
+            org_name: org_name.clone(),
         };
 
         if existing.is_none() {
             set_count(&env, get_count(&env).saturating_add(1));
             add_to_index(&env, &github_username);
+            match etype {
+                EntityType::Org => {
+                    if let Some(ref oname) = org_name {
+                        add_to_org_index(&env, oname);
+                    }
+                }
+                EntityType::Team => {
+                    if let Some(ref oname) = org_name {
+                        let tk = team_key(&env, oname, &github_username);
+                        add_to_team_index(&env, &tk);
+                    }
+                }
+                _ => {}
+            }
         } else if let Some(old) = existing {
             if old.stellar_address != stellar_address && old.verified {
                 set_verified_count(&env, get_verified_count(&env).saturating_sub(1));
@@ -103,6 +135,21 @@ impl TrustBridgeContract {
         remove_record(&env, &github_username);
         remove_from_index(&env, &github_username);
         set_count(&env, get_count(&env).saturating_sub(1));
+
+        match record.entity_type {
+            EntityType::Org => {
+                if let Some(ref oname) = record.org_name {
+                    remove_from_org_index(&env, oname);
+                }
+            }
+            EntityType::Team => {
+                if let Some(ref oname) = record.org_name {
+                    let tk = team_key(&env, oname, &github_username);
+                    remove_from_team_index(&env, &tk);
+                }
+            }
+            _ => {}
+        }
 
         if record.verified {
             set_verified_count(&env, get_verified_count(&env).saturating_sub(1));
@@ -190,6 +237,51 @@ mod test {
         String::from_str(env, name)
     }
 
+    fn register_personal(env: &Env, contract_id: &soroban_sdk::Address, name: &str, addr: &Address) {
+        TrustBridgeContract::register(
+            env.clone(),
+            username(env, name),
+            addr.clone(),
+            0,
+            None,
+        )
+        .unwrap();
+    }
+
+    fn register_org(
+        env: &Env,
+        contract_id: &soroban_sdk::Address,
+        name: &str,
+        addr: &Address,
+        org: &str,
+    ) {
+        TrustBridgeContract::register(
+            env.clone(),
+            username(env, name),
+            addr.clone(),
+            1,
+            Some(username(env, org)),
+        )
+        .unwrap();
+    }
+
+    fn register_team(
+        env: &Env,
+        contract_id: &soroban_sdk::Address,
+        name: &str,
+        addr: &Address,
+        org: &str,
+    ) {
+        TrustBridgeContract::register(
+            env.clone(),
+            username(env, name),
+            addr.clone(),
+            2,
+            Some(username(env, org)),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn test_register_and_get_address_roundtrip() {
         let env = Env::default();
@@ -198,13 +290,13 @@ mod test {
         env.mock_all_auths();
 
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
-                .unwrap();
+            register_personal(&env, &contract_id, "octocat", &user);
 
             let record =
                 TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
             assert_eq!(record.stellar_address, user);
             assert!(!record.verified);
+            assert_eq!(record.entity_type, EntityType::Personal);
         });
     }
 
@@ -216,8 +308,7 @@ mod test {
         env.mock_all_auths();
 
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
-                .unwrap();
+            register_personal(&env, &contract_id, "octocat", &user);
 
             let result =
                 TrustBridgeContract::remove(env.clone(), other.clone(), username(&env, "octocat"));
@@ -234,8 +325,7 @@ mod test {
         env.mock_all_auths();
 
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
-                .unwrap();
+            register_personal(&env, &contract_id, "octocat", &user);
         });
 
         env.set_auths(&[]);
@@ -253,13 +343,9 @@ mod test {
         env.mock_all_auths();
 
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
-                .unwrap();
-
+            register_personal(&env, &contract_id, "octocat", &user);
             TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
-
-            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), new_user.clone())
-                .unwrap();
+            register_personal(&env, &contract_id, "octocat", &new_user);
 
             let record =
                 TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
@@ -284,10 +370,8 @@ mod test {
             assert_eq!(stats.total, 0);
             assert_eq!(stats.verified, 0);
 
-            TrustBridgeContract::register(env.clone(), username(&env, "alice"), user1.clone())
-                .unwrap();
-            TrustBridgeContract::register(env.clone(), username(&env, "bob"), user2.clone())
-                .unwrap();
+            register_personal(&env, &contract_id, "alice", &user1);
+            register_personal(&env, &contract_id, "bob", &user2);
 
             let stats = TrustBridgeContract::get_stats(env.clone());
             assert_eq!(stats.total, 2);
@@ -320,6 +404,113 @@ mod test {
             TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
             let result = TrustBridgeContract::initialize(env.clone(), admin);
             assert_eq!(result, Err(ContractError::AlreadyInitialized));
+        });
+    }
+
+    #[test]
+    fn test_register_org_entry() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+
+        env.as_contract(&contract_id, || {
+            register_org(&env, &contract_id, "stellar-org", &user, "stellar-org");
+
+            let record =
+                TrustBridgeContract::get_address(env.clone(), username(&env, "stellar-org"))
+                    .unwrap();
+            assert_eq!(record.entity_type, EntityType::Org);
+            assert_eq!(
+                record.org_name,
+                Some(username(&env, "stellar-org"))
+            );
+        });
+    }
+
+    #[test]
+    fn test_register_team_entry() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+
+        env.as_contract(&contract_id, || {
+            register_team(
+                &env,
+                &contract_id,
+                "engineering-team",
+                &user,
+                "stellar-org",
+            );
+
+            let record =
+                TrustBridgeContract::get_address(env.clone(), username(&env, "engineering-team"))
+                    .unwrap();
+            assert_eq!(record.entity_type, EntityType::Team);
+            assert_eq!(record.org_name, Some(username(&env, "stellar-org")));
+        });
+    }
+
+    #[test]
+    fn test_team_requires_org_name() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "my-team"),
+                user.clone(),
+                2,
+                None,
+            );
+            assert_eq!(result, Err(ContractError::OrgNameRequired));
+        });
+    }
+
+    #[test]
+    fn test_invalid_entity_type() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "someone"),
+                user.clone(),
+                99,
+                None,
+            );
+            assert_eq!(result, Err(ContractError::InvalidEntityType));
+        });
+    }
+
+    #[test]
+    fn test_remove_org_cleans_up_index() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+
+        env.as_contract(&contract_id, || {
+            register_org(&env, &contract_id, "my-org", &user, "my-org");
+            let stats = TrustBridgeContract::get_stats(env.clone());
+            assert_eq!(stats.total, 1);
+
+            TrustBridgeContract::remove(
+                env.clone(),
+                user.clone(),
+                username(&env, "my-org"),
+            )
+            .unwrap();
+
+            let stats = TrustBridgeContract::get_stats(env.clone());
+            assert_eq!(stats.total, 0);
         });
     }
 }

@@ -15,6 +15,18 @@ struct ContributorRecord {
     stellar_address: Address,
     registered_at: u64,
     verified: bool,
+    entity_type: EntityType,
+    org_name: Option<String>,
+}
+```
+
+### EntityType
+
+```rust
+enum EntityType {
+    Personal = 0,
+    Org = 1,
+    Team = 2,
 }
 ```
 
@@ -36,6 +48,8 @@ struct Stats {
 | 3 | `NotAuthorized` | Caller lacks permission |
 | 4 | `NotRegistered` | Username not in registry |
 | 5 | `AlreadyVerified` | Username already verified |
+| 6 | `InvalidEntityType` | Unknown entity type value |
+| 7 | `OrgNameRequired` | Team registration requires org_name |
 
 ---
 
@@ -58,15 +72,15 @@ stellar contract invoke --id $ID --source deployer --network testnet --send=yes 
 
 ---
 
-### `register(github_username: String, stellar_address: Address) -> Result<(), ContractError>`
+### `register(github_username: String, stellar_address: Address, entity_type: u32, org_name: Option<String>) -> Result<(), ContractError>`
 
-Register or update a GitHub username mapping.
+Register or update a GitHub username mapping. `entity_type` distinguishes personal users (0), orgs (1), and teams (2). Teams require `org_name`.
 
 | | |
 |---|---|
 | **Auth** | `stellar_address` must sign |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized` |
+| **Errors** | `NotInitialized`, `InvalidEntityType`, `OrgNameRequired` |
 | **Events** | `RegisteredEvent` |
 
 Behavior:
@@ -75,8 +89,17 @@ Behavior:
 - Existing username → update record; reset `verified` if address changed
 
 ```bash
+# Register personal account
 stellar contract invoke --id $ID --source deployer --network testnet --send=yes \
-  -- register --github-username octocat --stellar-address G...
+  -- register --github-username octocat --stellar-address G... --entity-type 0
+
+# Register org
+stellar contract invoke --id $ID --source deployer --network testnet --send=yes \
+  -- register --github-username my-org --stellar-address G... --entity-type 1 --org-name my-org
+
+# Register team
+stellar contract invoke --id $ID --source deployer --network testnet --send=yes \
+  -- register --github-username my-team --stellar-address G... --entity-type 2 --org-name my-org
 ```
 
 ---
