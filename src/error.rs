@@ -75,6 +75,8 @@ pub enum ContractError {
     /// Operation is blocked because a challenge is active on this username
     /// (Issue #214).
     ChallengeActive = 20,
+    /// The fallback address list exceeds `MAX_FALLBACK_ADDRESSES` (Issue #238).
+    FallbackListFull = 21,
 }
 
 impl ContractError {
@@ -110,6 +112,7 @@ impl ContractError {
             18 => Some(ContractError::NoChallengeActive),
             19 => Some(ContractError::ChallengeNotResolvable),
             20 => Some(ContractError::ChallengeActive),
+            21 => Some(ContractError::FallbackListFull),
             _ => None,
         }
     }

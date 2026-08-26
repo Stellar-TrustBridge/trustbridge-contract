@@ -15,6 +15,7 @@ struct ContributorRecord {
     stellar_address: Address,
     registered_at: u32,  // u32 saves 4 bytes vs u64; sufficient until ~2106
     verified: bool,
+    fallback_addresses: Vec<Address>, // capped at MAX_FALLBACK_ADDRESSES (5)
 }
 ```
 
@@ -174,15 +175,15 @@ stellar contract invoke --id $ID --source deployer --network testnet --send=yes 
 
 ---
 
-### `register(github_username: String, stellar_address: Address) -> Result<(), ContractError>`
+### `register(github_username: String, stellar_address: Address, fallback_addresses: Vec<Address>) -> Result<(), ContractError>`
 
 Register or update a GitHub username mapping.
 
 | | |
 |---|---|
-| **Auth** | `stellar_address` must sign; if the username is already registered to a *different* address, that address must sign too |
+| **Auth** | `stellar_address` must sign; if the username is already registered to a *different* address, that address must sign too; each fallback address must also sign |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `Paused`, `InvalidUsername`, `ZeroAddress` |
+| **Errors** | `NotInitialized`, `Paused`, `InvalidUsername`, `ZeroAddress`, `FallbackListFull` |
 | **Events** | `RegisteredEvent` |
 
 **Zero-address rejection:**
