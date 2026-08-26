@@ -141,6 +141,7 @@ struct ChallengeRecord {
 | 18 | `NoChallengeActive` | `cancel_challenge` or `complete_challenge` called with no active challenge |
 | 19 | `ChallengeNotResolvable` | `complete_challenge` called before the delay has elapsed |
 | 20 | `ChallengeActive` | `register` attempted while a challenge is active on the username |
+| 21 | `NetworkMismatch` | Instance state was initialized on a different network than the one executing (Issue #231) |
 
 `ContractError::from_code(u32)` maps every code in this table back to the typed
 variant and returns `None` for any unrecognized code. Every code round-trips
@@ -148,6 +149,66 @@ through `from_code(variant.code()) == Some(variant)` — verified by the unit
 tests in `src/lib.rs` (`test_error_from_code_is_inverse_of_code`).
 
 ---
+
+### RoleHolder (Issue #228)
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `address` | `Address` | Address holding the role |
+| `role` | `Role` | Role held, as the `Role` discriminant |
+
+### EventDomain (Issue #226)
+
+Attached as the `domain` field of **every** event this contract emits.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `contract_id` | `Address` | Emitting contract instance |
+| `network_id` | `BytesN<32>` | SHA-256 of the network passphrase |
+| `contract_version` | `(u32, u32, u32)` | Contract version at emit time |
+| `domain_version` | `u32` | Envelope schema version — currently `1` |
+
+Indexers should scope deduplication to `(contract_id, network_id)`. See
+[EVENT_INDEXING.md](./EVENT_INDEXING.md#event-domain-separation-issue-226).
+
+This is an additive change to all 12 events: no field was renamed, retyped, or
+removed, and topic assignments are unchanged. Consumers that decode events
+positionally must be updated; consumers that ignore unknown fields need no
+change.
+
+## Batch size limits (Issue #227)
+
+`batch_verify` and `batch_remove` are capped at **`MAX_WRITE_BATCH` = 25**
+entries, not the generic `BatchConfig::default().max_batch_size` of 100.
+
+The 100 was a shape check that was never derived from what a batch costs. Each
+accepted entry pays a persistent read, a persistent write, a TTL extension, an
+event publish, and an audit-log append; the worst case is a full batch of
+39-character usernames that all need writing. Soroban exposes no host function
+for querying remaining instruction budget, so a contract cannot check its
+headroom mid-loop — a batch that overruns simply traps, with no partial success
+to fall back on. The cap therefore has to be conservative and measured rather
+than checked at runtime.
+
+Passing more than 25 entries returns `InvalidBatchSize` (code 14) **before any
+state is written**.
+
+### Fail-before-write
+
+`batch_verify` runs in two phases. Phase 1 resolves every entry and collects
+only those that will actually change, writing nothing; phase 2 applies them.
+A rejected batch therefore touches no state at all.
+
+Both entry points now write each counter **once per batch** instead of a
+read-modify-write per entry — 2 storage operations rather than 2N, and `count`
+and `vcount` move exactly once, with no intermediate state in which one has been
+advanced for some entries but not others.
+
+Duplicate usernames within a single batch are collapsed in phase 1, so a
+repeated entry is counted once against `vcount`.
+
+**Raising `MAX_WRITE_BATCH` requires re-running `test_bench_batch_verify_max`
+and `test_bench_batch_remove_max`, not just editing the constant.**
 
 ## Functions
 
@@ -1630,3 +1691,55 @@ Returns the active challenge record, or `None`.
 |---|---|
 | **Auth** | None |
 | **Mutates** | No |
+
+---
+
+## Role enumeration (Issue #228)
+
+### `get_role_holders(offset: u32, limit: u32) -> Vec<RoleHolder>`
+
+Read-only; no auth. One page of `(address, role)` pairs, ordered by grant time
+(oldest first).
+
+- `limit` is capped at `MAX_ROLE_PAGE_LIMIT` (50). `0` or any larger value
+  yields the cap.
+- An `offset` past the end returns an empty page rather than an error.
+- **The admin is included** — `initialize` grants `Role::Admin` through the same
+  path that maintains the index.
+- Revoking a role compacts the index, shifting later entries down one. A caller
+  paging with a stored offset should restart if `get_role_holder_count()`
+  changed mid-walk.
+
+### `get_role_holder_count() -> u32`
+
+Read-only; no auth. Number of addresses currently holding a role. Lets a caller
+size its pagination loop, and gives a dashboard a cheap drift check.
+
+## Network tagging (Issue #231)
+
+### `get_network_tag() -> Option<BytesN<32>>`
+
+Read-only; no auth. The `network_id` recorded at `initialize`, or `None` for an
+instance initialized before network tagging existed.
+
+### `adopt_network_tag() -> Result<(), ContractError>`
+
+Admin-only. Tags an untagged instance with the network it is running on, for
+instances deployed before this field existed.
+
+Deliberately **not** a re-tagging entry point: if a tag is already present and
+disagrees with the live network, this returns `NetworkMismatch` (code 21) rather
+than overwriting it. An entry point that could rewrite the tag would defeat the
+check entirely. Re-adopting the *same* network is a no-op and succeeds, so a
+migration script can call it unconditionally.
+
+### Enforcement
+
+`require_initialized` — which every gated entry point already calls — now also
+compares the recorded network id against `env.ledger().network_id()`. A
+mismatch returns `NetworkMismatch` (code 21) from **every** gated function,
+read or write.
+
+An instance with no recorded tag is allowed through, so contracts deployed
+before this change keep working. Once a tag is present it is compared on every
+call and never rewritten.

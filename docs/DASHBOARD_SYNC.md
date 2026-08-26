@@ -203,3 +203,59 @@ remove(username)               →  record deleted (flag irrelevant)
 The flag is **write-once per address-change cycle** — re-calling `register`
 with the same new address (e.g. to extend TTL) does not re-set the flag if
 it was already cleared by `verify`.
+
+---
+
+## Domain-scoped idempotency (Issue #226)
+
+The idempotency guidance elsewhere in this document assumes a dashboard can
+recognise an event it has already applied. That assumption did not hold across
+a redeploy: nothing in an event said which contract instance or network produced
+it, so a replayed history could not be told apart from new activity.
+
+Every event now carries a `domain` — `contract_id`, `network_id`,
+`contract_version`, `domain_version`. **Scope every idempotency record to
+`(domain.contract_id, domain.network_id)`.** See
+[EVENT_INDEXING.md](./EVENT_INDEXING.md#event-domain-separation-issue-226) for
+the field definitions and the recommended dedup key.
+
+Practically, for a dashboard:
+
+- Store the domain alongside each mirrored row. A row whose domain no longer
+  matches the deployment you are reading from is stale, not merely old.
+- On seeing an unfamiliar `contract_id` for a network you already track, do not
+  merge — a redeploy is a new stream, and silently merging it produces exactly
+  the duplicate-user artefacts this was meant to prevent.
+- `get_network_tag()` returns the deployment's own network id, so a dashboard
+  can confirm it is talking to the deployment it thinks it is before syncing a
+  single row.
+
+## RBAC mirror (Issue #228)
+
+`get_role(address)` is a point lookup, so mirroring roles previously meant
+guessing which addresses to ask about — and a mirror built that way drifts from
+the chain the moment a role is granted to an address the dashboard has never
+seen.
+
+Two read-only entry points make the set enumerable:
+
+| Call | Returns |
+|------|---------|
+| `get_role_holder_count()` | Number of addresses currently holding a role |
+| `get_role_holders(offset, limit)` | One page of `RoleHolder { address, role }` |
+
+- `limit` is capped at `MAX_ROLE_PAGE_LIMIT` (50); passing `0` or a larger value
+  yields the cap rather than an error.
+- An `offset` past the end returns an empty page.
+- Ordering is by grant time, oldest first.
+- **The admin is included.** `initialize` grants `Role::Admin` through the same
+  path that maintains the index, so the admin appears as a holder like any other
+  — a mirror that assumes otherwise will show one fewer holder than the chain.
+
+### Pagination and concurrent revocation
+
+Revoking a role **compacts** the index, shifting every later entry down one. A
+dashboard paging through with a stored offset can therefore skip an entry if a
+revocation lands mid-walk. Compare `get_role_holder_count()` before and after a
+full walk and restart if it changed; for a set this small, re-reading is cheaper
+than reconciling a partial walk.

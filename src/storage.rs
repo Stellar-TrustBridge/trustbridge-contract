@@ -32,7 +32,26 @@ pub const EMERGENCY_PAUSE_TS_KEY: Symbol = symbol_short!("emerg_ts");
 pub const GUARDIAN_KEY: Symbol = symbol_short!("guardian");
 pub const LAST_UPG_KEY: Symbol = symbol_short!("lastupg");
 pub const VER_KEY: Symbol = symbol_short!("ver");
+/// Key for the network id recorded at `initialize` (Issue #231).
+///
+/// Holds `env.ledger().network_id()` — the SHA-256 of the network passphrase —
+/// as observed when the instance was initialized. Instances initialized before
+/// this key existed have no value, which is treated as "untagged" and allowed
+/// through; see [`require_matching_network`].
+pub const NETWORK_KEY: Symbol = symbol_short!("network");
+
 pub const ROLE_KEY: Symbol = symbol_short!("role");
+
+/// Key for the enumerable index of addresses that currently hold a role
+/// (Issue #228). Maintained by [`set_role`] and [`remove_role`] so it can
+/// never drift from the per-address `ROLE_KEY` entries.
+pub const ROLE_IDX_KEY: Symbol = symbol_short!("role_idx");
+
+/// Maximum entries returned by one `get_role_holders` page (Issue #228).
+///
+/// Role holders are privileged addresses, so the population is small by
+/// design; this exists to bound the response, not to paginate a large set.
+pub const MAX_ROLE_PAGE_LIMIT: u32 = 50;
 
 /// Key prefix for chunked username index entries.
 pub const CHUNK_KEY: Symbol = symbol_short!("chunk");
@@ -369,12 +388,24 @@ pub fn has_challenge(env: &Env, github_username: &String) -> bool {
         .has(&(CHALLENGE_KEY, github_username.clone()))
 }
 
+/// Fails unless the contract is initialized **and** running on the network it
+/// was initialized on.
+///
+/// The network check rides along here rather than at each entry point because
+/// this is the one call every gated function already makes — putting it here
+/// means a new entry point cannot forget it. See
+/// [`require_matching_network`] for the policy and its migration behaviour.
+///
+/// # Errors
+///
+/// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+/// - [`ContractError::NetworkMismatch`] if the recorded network id differs from
+///   the executing one.
 pub fn require_initialized(env: &Env) -> Result<(), ContractError> {
-    if env.storage().instance().has(&ADMIN_KEY) {
-        Ok(())
-    } else {
-        Err(ContractError::NotInitialized)
+    if !env.storage().instance().has(&ADMIN_KEY) {
+        return Err(ContractError::NotInitialized);
     }
+    require_matching_network(env)
 }
 
 pub fn get_admin(env: &Env) -> Result<Address, ContractError> {
@@ -892,16 +923,119 @@ pub fn get_role(env: &Env, address: &Address) -> Option<Role> {
     env.storage().persistent().get(&(ROLE_KEY, address.clone()))
 }
 
+/// Grants `role` to `address` and keeps the enumeration index in step.
+///
+/// Re-granting to an address that already holds a role overwrites the role but
+/// must **not** append a second index entry, or the address would be reported
+/// twice by `get_role_holders`.
 pub fn set_role(env: &Env, address: &Address, role: &Role) {
+    let is_new = get_role(env, address).is_none();
     env.storage()
         .persistent()
         .set(&(ROLE_KEY, address.clone()), role);
+    if is_new {
+        add_to_role_index(env, address);
+    }
 }
 
+/// Revokes `address`'s role and drops it from the enumeration index.
 pub fn remove_role(env: &Env, address: &Address) {
     env.storage()
         .persistent()
         .remove(&(ROLE_KEY, address.clone()));
+    remove_from_role_index(env, address);
+}
+
+/// An `(address, role)` pair as returned by `get_role_holders` (Issue #228).
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+pub struct RoleHolder {
+    pub address: Address,
+    pub role: Role,
+}
+
+/// Raw enumeration index: every address that currently holds a role.
+#[must_use]
+pub fn get_role_index(env: &Env) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&ROLE_IDX_KEY)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+fn set_role_index(env: &Env, index: &Vec<Address>) {
+    env.storage().persistent().set(&ROLE_IDX_KEY, index);
+    env.storage()
+        .persistent()
+        .extend_ttl(&ROLE_IDX_KEY, TTL_THRESHOLD, TTL_BUMP);
+}
+
+fn add_to_role_index(env: &Env, address: &Address) {
+    let mut index = get_role_index(env);
+    // Guard against a double entry even though `set_role` already checks for
+    // an existing role: the two must agree, and this is the cheaper place to
+    // be certain of it.
+    if index.iter().any(|a| a == *address) {
+        return;
+    }
+    index.push_back(address.clone());
+    set_role_index(env, &index);
+}
+
+fn remove_from_role_index(env: &Env, address: &Address) {
+    let index = get_role_index(env);
+    let mut compacted = Vec::new(env);
+    let mut found = false;
+    for entry in index.iter() {
+        if entry == *address {
+            found = true;
+        } else {
+            compacted.push_back(entry);
+        }
+    }
+    // Skip the write when nothing changed — `remove_role` is callable against
+    // an address that never held a role, and that must not cost a storage write
+    // or bump the index TTL.
+    if found {
+        set_role_index(env, &compacted);
+    }
+}
+
+/// One page of `(address, role)` pairs, ordered by grant time.
+///
+/// Entries whose `ROLE_KEY` lookup comes back empty are skipped rather than
+/// reported with a placeholder role: the index is maintained in lockstep with
+/// the role entries, so a miss means the two have drifted, and inventing a
+/// role for a stale index entry would hand the dashboard a privileged address
+/// that does not exist on chain.
+#[must_use]
+pub fn get_role_holders_internal(env: &Env, offset: u32, limit: u32) -> Vec<RoleHolder> {
+    let capped = if limit == 0 || limit > MAX_ROLE_PAGE_LIMIT {
+        MAX_ROLE_PAGE_LIMIT
+    } else {
+        limit
+    };
+
+    let index = get_role_index(env);
+    let mut page = Vec::new(env);
+    if offset >= index.len() {
+        return page;
+    }
+
+    let end = offset.saturating_add(capped).min(index.len());
+    for i in offset..end {
+        let Some(address) = index.get(i) else { continue };
+        if let Some(role) = get_role(env, &address) {
+            page.push_back(RoleHolder { address, role });
+        }
+    }
+    page
+}
+
+/// Number of addresses currently holding a role.
+#[must_use]
+pub fn get_role_holder_count(env: &Env) -> u32 {
+    get_role_index(env).len()
 }
 
 /// True when `address` is the contract admin.
@@ -1058,4 +1192,52 @@ pub fn run_migration_steps(
     }
 
     applied
+}
+
+
+// ── Network tagging (Issue #231) ─────────────────────────────────────────────
+
+/// Network id recorded at `initialize`, or `None` for an instance initialized
+/// before network tagging existed.
+#[must_use]
+pub fn get_network_id(env: &Env) -> Option<BytesN<32>> {
+    env.storage().instance().get(&NETWORK_KEY)
+}
+
+/// Records the live network id. Called once from `initialize`.
+pub fn set_network_id(env: &Env, network_id: &BytesN<32>) {
+    env.storage().instance().set(&NETWORK_KEY, network_id);
+}
+
+/// Fails when the recorded network does not match the one being executed on
+/// (Issue #231).
+///
+/// A Stellar G-address is valid on every network, so nothing about a stored
+/// `ContributorRecord` reveals which network its registration was meant for.
+/// If an instance's state is restored onto a different network — a mainnet
+/// snapshot stood up on Futurenet for testing, say — every record in it silently
+/// becomes a claim about the wrong ledger, and a consumer computing payouts has
+/// no way to notice.
+///
+/// # Migration
+///
+/// An instance with **no** recorded network predates this check and is allowed
+/// through: refusing it would brick every contract deployed before the tag
+/// existed, and the constraint on this change is not to break existing records.
+/// Such an instance can be tagged in place with `adopt_network_tag`. Once a tag
+/// is present it is compared on every mutation and never rewritten, so a
+/// mismatch fails closed rather than being "fixed" by overwriting the tag with
+/// whatever network the caller happens to be on.
+///
+/// # Errors
+///
+/// [`ContractError::NetworkMismatch`] when a recorded tag disagrees with
+/// `env.ledger().network_id()`.
+pub fn require_matching_network(env: &Env) -> Result<(), ContractError> {
+    match get_network_id(env) {
+        Some(recorded) if recorded != env.ledger().network_id() => {
+            Err(ContractError::NetworkMismatch)
+        }
+        _ => Ok(()),
+    }
 }
