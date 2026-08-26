@@ -1,0 +1,132 @@
+{
+  "estimator_inputs_version": 1,
+  "title": "TrustBridge on-chain storage rent estimator inputs",
+  "derived_from": {
+    "storage_module": "src/storage.rs",
+    "ttl_policy": "Wave #7 (LEDGERS_PER_DAY * 30 / * 90)",
+    "chunked_index": "Issue #2 / docs/DASHBOARD_SYNC.md (CHUNK_SIZE = 50)",
+    "economics_doc_issue": 98,
+    "economics_doc_path": null,
+    "economics_doc_note": "No dedicated #98 economics document is checked in yet; link it here when published."
+  },
+  "on_chain": {
+    "ttl": {
+      "ledgers_per_day": 17280,
+      "threshold_ledgers": 518400,
+      "bump_ledgers": 1555200,
+      "threshold_days_approx": 30,
+      "bump_days_approx": 90,
+      "extension_sites": [
+        "get_record / set_record",
+        "get_chunk / set_chunk",
+        "extend_record_ttl / extend_registry_ttl"
+      ]
+    },
+    "layout": {
+      "chunk_size": 50,
+      "per_user_persistent_keys": [
+        {
+          "symbol": "reg",
+          "key_shape": "(Symbol(\"reg\"), github_username)",
+          "value": "ContributorRecord",
+          "count_formula": "N"
+        }
+      ],
+      "optional_per_user_persistent_keys": [
+        {
+          "symbol": "lastact",
+          "key_shape": "(Symbol(\"lastact\"), github_username)",
+          "value": "u64 timestamp",
+          "count_formula": "0..N",
+          "note": "Present after cooldown-tracking writes only"
+        }
+      ],
+      "per_address_persistent_keys": [
+        {
+          "symbol": "role",
+          "key_shape": "(Symbol(\"role\"), Address)",
+          "value": "Role",
+          "count_formula": "R",
+          "note": "R = role holders; independent of contributor count N"
+        }
+      ],
+      "instance_keys": [
+        { "symbol": "admin", "scales_with_n": false },
+        { "symbol": "count", "scales_with_n": false },
+        { "symbol": "vcount", "scales_with_n": false },
+        {
+          "symbol": "idx",
+          "scales_with_n": true,
+          "note": "Legacy flat Vec<String> of usernames; payload grows with N"
+        },
+        { "symbol": "pause", "scales_with_n": false },
+        { "symbol": "cdown", "scales_with_n": false },
+        { "symbol": "lastupg", "scales_with_n": false },
+        { "symbol": "ver", "scales_with_n": false },
+        {
+          "symbol": "chunkcnt",
+          "scales_with_n": false,
+          "note": "Count of chunk entries; value changes with N but entry count is 1"
+        }
+      ],
+      "persistent_index_chunks": {
+        "key_shape": "(Symbol(\"chunk\"), chunk_idx)",
+        "count_formula": "ceil(N / chunk_size)"
+      }
+    },
+    "cost_drivers_vs_n": [
+      { "n": 1, "reg_entries": 1, "chunk_entries": 1, "approx_persistent_ex_roles_lastact": 2 },
+      { "n": 10, "reg_entries": 10, "chunk_entries": 1, "approx_persistent_ex_roles_lastact": 11 },
+      { "n": 100, "reg_entries": 100, "chunk_entries": 2, "approx_persistent_ex_roles_lastact": 102 },
+      { "n": 500, "reg_entries": 500, "chunk_entries": 10, "approx_persistent_ex_roles_lastact": 510 },
+      { "n": 1000, "reg_entries": 1000, "chunk_entries": 20, "approx_persistent_ex_roles_lastact": 1020 }
+    ]
+  },
+  "off_chain_indexer": {
+    "included_in_on_chain_rent": false,
+    "estimate_separately": true,
+    "guidance_doc": "docs/EVENT_INDEXING.md",
+    "examples": [
+      "Horizon event cursors and lag metadata",
+      "Denormalized contributor tables",
+      "Raw event archives"
+    ]
+  },
+  "network_rent_params": {
+    "source": "operator_supplied",
+    "fields_expected_by_ui": [
+      "write_fee_per_entry",
+      "rent_rate_per_ledger_byte",
+      "protocol_version"
+    ],
+    "note": "Protocol rent parameters are not stored in the contract WASM; inject at estimation time."
+  },
+  "assumptions": [
+    {
+      "id": "ledger_close",
+      "text": "Ledger close is approximately 5 seconds (17280 ledgers/day)."
+    },
+    {
+      "id": "keeper_cadence",
+      "text": "Operators run extend_registry_ttl (or equivalent) often enough that cold records are bumped before archival (~every 25–30 days)."
+    },
+    {
+      "id": "lastact_worst_case",
+      "text": "Worst-case lastact count equals N; many deployments will be far lower."
+    },
+    {
+      "id": "roles_independent",
+      "text": "Role entry count R is independent of contributor count N and usually small."
+    },
+    {
+      "id": "prices_external",
+      "text": "XLM rent conversion requires operator-supplied network_rent_params; this JSON only counts entries and TTL policy."
+    }
+  ],
+  "recompute_when": [
+    "src/storage.rs key layout changes",
+    "CHUNK_SIZE changes",
+    "TTL_THRESHOLD / TTL_BUMP / LEDGERS_PER_DAY change",
+    "Instance vs persistent classification of a key changes"
+  ]
+}

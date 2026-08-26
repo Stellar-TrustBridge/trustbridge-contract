@@ -9,6 +9,20 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
+  # WASM size budget (bytes).
+  #
+  # Current optimised release size is ~85 KB. The hard limit is set at 200 KB
+  # to leave generous headroom for intentional feature growth while still
+  # catching accidental binary bloat (e.g. pulling in an unintended dependency
+  # or disabling LTO).
+  #
+  # To raise the limit after an intentional feature addition:
+  #   1. Measure the new size with `make wasm-size` locally.
+  #   2. Update WASM_SIZE_LIMIT below with the new ceiling (round up to the
+  #      nearest 10 KB and add ~20 KB headroom).
+  #   3. Update the "WASM size budget" section in docs/DEPLOYMENT.md.
+  #   4. Include the before/after sizes in the PR description.
+  WASM_SIZE_LIMIT: 204800  # 200 KB hard limit
 
 jobs:
   quality:
@@ -25,6 +39,15 @@ jobs:
 
       - name: Install wasm targets
         run: rustup target add wasm32v1-none wasm32-unknown-unknown
+
+      # stellar-cli native deps:
+      # - libdbus-1-dev: libdbus-sys (keyring)
+      # - libudev-dev: hidapi (hardware wallet support)
+      # - pkg-config: locates both via .pc files
+      - name: Install system deps for Stellar CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
 
       - name: Install Stellar CLI
         run: cargo install --locked stellar-cli@26.1.0
@@ -52,5 +75,76 @@ jobs:
       - name: stellar contract build
         run: stellar contract build
 
+      # Cargo emits underscores for hyphenated crate names (trustbridge-contract → trustbridge_contract.wasm)
       - name: Verify WASM artifact exists
-        run: test -f target/wasm32v1-none/release/trustbridge-contract.wasm || test -f target/wasm32-unknown-unknown/release/trustbridge-contract.wasm
+        run: test -f target/wasm32v1-none/release/trustbridge_contract.wasm || test -f target/wasm32-unknown-unknown/release/trustbridge_contract.wasm
+
+      - name: Compute and verify WASM hash pin
+        run: |
+          if [ -f target/wasm32v1-none/release/trustbridge_contract.wasm ]; then
+            WASM=target/wasm32v1-none/release/trustbridge_contract.wasm
+          else
+            WASM=target/wasm32-unknown-unknown/release/trustbridge_contract.wasm
+          fi
+          ACTUAL=$(sha256sum "$WASM" | awk '{print $1}')
+          echo "WASM SHA-256: $ACTUAL"
+          PINNED=$(grep -v '^#' wasm-hash.pin | grep -v '^$' | tr -d '[:space:]')
+          if [ "$PINNED" = "PLACEHOLDER" ]; then
+            echo "WARNING: wasm-hash.pin contains PLACEHOLDER — skipping hash comparison."
+            echo "Run 'make wasm-hash-update' after building to pin the current hash."
+          elif [ "$ACTUAL" != "$PINNED" ]; then
+            echo "ERROR: WASM hash mismatch!"
+            echo "  Expected (pinned): $PINNED"
+            echo "  Actual:            $ACTUAL"
+            echo "If this change is intentional, run 'make wasm-hash-update' locally,"
+            echo "commit the updated wasm-hash.pin, and open a PR with the new hash."
+            exit 1
+          else
+            echo "OK: WASM hash matches pin ($ACTUAL)"
+          fi
+
+      - name: cargo doc (public API)
+        run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  wasm-integration-test:
+    name: WASM Upgrade Integration Tests
+    runs-on: ubuntu-latest
+    needs: quality
+    if: always() && !cancelled()
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install wasm targets
+        run: rustup target add wasm32v1-none wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build WASM artifact
+        run: |
+          cargo build --target wasm32v1-none --release
+
+      - name: Run WASM upgrade integration tests
+        run: |
+          cargo test --features wasm-test --test integration -- \
+            test_integration_wasm_upgrade_cooldown --nocapture --exact
+
+      - name: Verify WASM test ran
+        run: |
+          cargo test --features wasm-test --test integration -- \
+            test_integration_wasm_upgrade_cooldown -- --list | grep "test_integration_wasm_upgrade_cooldown"

@@ -15,7 +15,11 @@ crate-type = ["cdylib", "rlib"]
 doctest = false
 
 [dependencies]
-soroban-sdk = "26.0.1"
+soroban-sdk = { version = "26.0.1", features = ["alloc"] }
+
+[features]
+# Optional gate for WASM-backed integration tests (see tests/integration.rs).
+wasm-test = []
 
 [dev-dependencies]
 soroban-sdk = { version = "26.0.1", features = ["testutils"] }

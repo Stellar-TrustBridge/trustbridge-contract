@@ -1,0 +1,15 @@
+# TrustBridge Contract WASM hash pin
+#
+# This file pins the expected SHA-256 hash of the release WASM artifact.
+# CI fails when the artifact hash does not match this value.
+#
+# To update this pin after an intentional WASM change:
+#   1. Build the WASM: make build
+#   2. Run: make wasm-hash-update
+#      (or manually: sha256sum target/wasm32v1-none/release/trustbridge-contract.wasm)
+#   3. Copy the new hash here, replacing the line below.
+#   4. Commit the updated pin alongside the WASM-changing commit.
+#
+# Never update the pin without a corresponding intentional code change.
+# See docs/DEPLOYMENT.md#wasm-hash-verification for operator verification steps.
+PLACEHOLDER
