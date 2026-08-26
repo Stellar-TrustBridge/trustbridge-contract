@@ -169,8 +169,12 @@ impl PauseReason {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[soroban_sdk::contracttype]
 pub struct ContributorRecord {
-    /// The Stellar G-address that owns this registration.
+    /// The Stellar G-address that owns this registration (identity address).
     pub stellar_address: Address,
+    /// The Stellar address where payouts should be sent. Defaults to
+    /// `stellar_address` if not explicitly set, allowing contributors to
+    /// separate their identity from their payment destination.
+    pub payout_address: Address,
     /// Ledger timestamp when this record was last written.
     ///
     /// Stored as `u32` instead of `u64` to save 4 bytes per record. Soroban
