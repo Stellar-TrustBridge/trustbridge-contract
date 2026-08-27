@@ -2947,6 +2947,114 @@ mod test {
         });
     }
 
+    // ── Issue #229: monotonic ever-verified counter ──────────────────────────
+
+    /// A verify/revoke/verify cycle: the live count moves with the flag, the
+    /// historical count only ever climbs.
+    #[test]
+    fn test_ever_verified_count_survives_a_revoke_cycle() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::get_ever_verified_count(env.clone()), 0);
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 1);
+            assert_eq!(TrustBridgeContract::get_ever_verified_count(env.clone()), 1);
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::revoke_verification(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+                1,
+            )
+            .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_verified_count(env.clone()),
+                0,
+                "live count must drop on revoke"
+            );
+            assert_eq!(
+                TrustBridgeContract::get_ever_verified_count(env.clone()),
+                1,
+                "historical count must not drop on revoke"
+            );
+        });
+
+        // Verifying the same contributor again counts as a second verification.
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 1);
+            assert_eq!(TrustBridgeContract::get_ever_verified_count(env.clone()), 2);
+        });
+    }
+
+    /// `get_stats` reports the live and historical counts side by side.
+    #[test]
+    fn test_stats_reports_live_and_ever_verified() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::revoke_verification(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+                1,
+            )
+            .unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            let stats = TrustBridgeContract::get_stats(env.clone());
+            assert_eq!(stats.total, 1);
+            assert_eq!(stats.verified, 0, "verified is the live figure");
+            assert_eq!(stats.ever_verified, 1, "ever_verified keeps the history");
+        });
+    }
+
+    /// A fresh instance starts both counters at zero.
+    #[test]
+    fn test_ever_verified_count_starts_at_zero() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::get_ever_verified_count(env.clone()), 0);
+        });
+    }
+
     #[test]
     fn test_revoke_verification_clears_flag_and_decrements_vcount() {
         let env = Env::default();

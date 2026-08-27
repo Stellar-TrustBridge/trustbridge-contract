@@ -748,7 +748,9 @@ after the record has already been through one full cycle. Covered by
 
 ### `get_verified_count() -> u32`
 
-Returns the number of verified registrations.
+Returns the number of **currently** verified registrations. This figure drops
+when a verification is revoked. For "how many were ever verified", read
+[`get_ever_verified_count`](#get_ever_verified_count---u32) instead.
 
 | | |
 |---|---|
@@ -771,9 +773,39 @@ stellar contract invoke --id $ID --source deployer --network testnet \
 
 ---
 
+### `get_ever_verified_count() -> u32`
+
+Returns how many verifications have ever been granted, including any since
+revoked (Issue #229). Monotonic: it never decreases.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+`get_verified_count()` answers "who is verified right now" and moves in both
+directions; this answers "how many did we ever verify" and only climbs. A
+contributor verified, revoked, and verified again counts twice here — the
+counter records verification events, not distinct contributors.
+
+Instances deployed before this counter existed have no stored value and report
+the live verified count instead of zero, which is the tightest lower bound the
+contract can still prove after the fact.
+
+```bash
+stellar contract invoke --id $ID --source deployer --network testnet \
+  -- get_ever_verified_count
+```
+
+---
+
 ### `get_stats() -> Stats`
 
-Returns `{ total, verified }` registration counts.
+Returns `{ total, verified, ever_verified }` registration counts.
+
+`verified` is the live count and falls on revoke; `ever_verified` is the
+monotonic historical count described above. `total` is the number of
+registered contributors.
 
 | | |
 |---|---|
