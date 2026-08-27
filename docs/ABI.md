@@ -1386,9 +1386,11 @@ admin or any registrant to invoke them:
 |---|---|---|
 | `get_address(github_username)` | `Option<ContributorRecord>` | Core identity lookup |
 | `has_record(github_username)` | `bool` | Cheap existence check, avoids decoding the full record |
+| `get_record_proof(github_username)` | `RecordProof` | Existence proof for light clients: verified bit, storage key, TTL policy |
 | `get_public_paginated(cursor, limit)` | `Result<ExportPage, ContractError>` | Paginated read; fails with `Paused` while the registry is paused |
-| `get_stats()` | `Stats` | `{ total, verified }` |
-| `get_verified_count()` | `u32` | |
+| `get_stats()` | `Stats` | `{ total, verified, ever_verified }` |
+| `get_verified_count()` | `u32` | Live count; drops on revoke |
+| `get_ever_verified_count()` | `u32` | Monotonic; never drops |
 | `get_role(address)` | `Option<Role>` | RBAC lookup, e.g. to gate a payout on `Role::Verifier` |
 | `is_paused()` / `is_contract_paused()` | `bool` | Check before a call that would otherwise fail on `Paused` |
 | `is_registration_in_cooldown(github_username)` | `bool` | |

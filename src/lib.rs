@@ -29,7 +29,8 @@ pub use events::{
     UpgradeAttestedEvent, UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
 };
 pub use storage::{
-    ChallengeRecord, ContributorRecord, ExportPage, HealthSnapshot, PauseReason, Role, Stats,
+    ChallengeRecord, ContributorRecord, ExportPage, HealthSnapshot, PauseReason, RecordProof, Role,
+    Stats,
     VerificationConfig, WasmAttestation, WasmProvenance,
 };
 pub use version::Version;
@@ -46,7 +47,8 @@ use crate::storage::{
     is_attestation_required, is_guardian, remove_guardian as storage_remove_guardian,
     set_emergency_pause, set_emergency_pause_ts, set_guardian_address,
     get_version as storage_get_version, get_wasm_attestation, get_wasm_provenance, has_challenge,
-    has_record, is_admin_caller, is_in_cooldown, is_paused as storage_is_paused, push_audit_entry,
+    build_record_proof, has_record, is_admin_caller, is_in_cooldown, is_paused as storage_is_paused,
+    push_audit_entry,
     remove_challenge, remove_from_index, remove_record, remove_role as storage_remove_role,
     remove_wasm_attestation, require_initialized, require_not_paused,
     run_migration_steps, set_challenge, set_cooldown as storage_set_cooldown, set_count,
@@ -1223,6 +1225,28 @@ impl TrustBridgeContract {
     #[must_use]
     pub fn has_record(env: Env, github_username: String) -> bool {
         has_record(&env, &github_username)
+    }
+
+    /// Returns a light-client existence proof for `github_username` (Issue #230).
+    ///
+    /// [`Self::has_record`] answers only yes/no. This carries the verified bit,
+    /// when the record was written, the ledger the answer was taken at, and the
+    /// storage key plus TTL policy needed to read or revive the ledger entry —
+    /// enough for an indexer or the GitHub action to confirm one registration
+    /// without paging the whole registry.
+    ///
+    /// A missing username is not an error: the proof comes back with
+    /// `exists: false`, which is itself the answer a light client needs.
+    ///
+    /// The exact `liveUntilLedgerSeq` is **not** included, because a contract
+    /// cannot read its own entry's TTL on-chain. Read it from the ledger entry
+    /// at `(key_prefix, github_username)`; see
+    /// [`docs/STORAGE_RENT.md`](../docs/STORAGE_RENT.md).
+    ///
+    /// Read-only; no auth required; works while paused.
+    #[must_use]
+    pub fn get_record_proof(env: Env, github_username: String) -> RecordProof {
+        build_record_proof(&env, &github_username)
     }
 
     /// Removes the registration for `github_username`. Callable by the registrant or the admin.
@@ -2944,6 +2968,105 @@ mod test {
             let result =
                 TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"));
             assert_eq!(result, Err(ContractError::AlreadyVerified));
+        });
+    }
+
+    // ── Issue #230: light-client record proof ────────────────────────────────
+
+    #[test]
+    fn test_record_proof_for_registered_username() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            let proof = TrustBridgeContract::get_record_proof(env.clone(), username(&env, "octocat"));
+            assert!(proof.exists);
+            assert!(!proof.verified, "a fresh registration is unverified");
+            assert_eq!(proof.as_of_ledger, env.ledger().sequence());
+            assert_eq!(proof.key_prefix, soroban_sdk::symbol_short!("reg"));
+            assert_eq!(proof.ttl_threshold_ledgers, crate::storage::TTL_THRESHOLD);
+            assert_eq!(proof.ttl_bump_ledgers, crate::storage::TTL_BUMP);
+        });
+    }
+
+    #[test]
+    fn test_record_proof_reports_verified_bit() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            let proof = TrustBridgeContract::get_record_proof(env.clone(), username(&env, "octocat"));
+            assert!(proof.exists);
+            assert!(proof.verified);
+        });
+    }
+
+    /// A missing username is an answer, not an error.
+    #[test]
+    fn test_record_proof_for_missing_username() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.as_contract(&contract_id, || {
+            let proof = TrustBridgeContract::get_record_proof(env.clone(), username(&env, "ghost"));
+            assert!(!proof.exists);
+            assert!(!proof.verified);
+            assert_eq!(proof.registered_at, 0);
+            // The key and policy still come back so a client can look for the
+            // entry — including an archived one — itself.
+            assert_eq!(proof.key_prefix, soroban_sdk::symbol_short!("reg"));
+            assert_eq!(proof.ttl_bump_ledgers, crate::storage::TTL_BUMP);
+        });
+    }
+
+    #[test]
+    fn test_record_proof_agrees_with_has_record() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            for name in ["octocat", "ghost"] {
+                assert_eq!(
+                    TrustBridgeContract::get_record_proof(env.clone(), username(&env, name)).exists,
+                    TrustBridgeContract::has_record(env.clone(), username(&env, name)),
+                    "proof.exists must agree with has_record for '{name}'"
+                );
+            }
+        });
+    }
+
+    /// The proof is a read: it must work while the contract is paused.
+    #[test]
+    fn test_record_proof_works_while_paused() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::pause(env.clone(), 1).unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            assert!(TrustBridgeContract::get_record_proof(env.clone(), username(&env, "octocat")).exists);
         });
     }
 

@@ -276,6 +276,31 @@ pub struct AdminTransferProposal {
     pub executable_at: u64,
 }
 
+/// Existence proof for a single record, shaped for light clients (Issue #230).
+///
+/// Lets an indexer or the GitHub action confirm one registration without
+/// paging the whole registry, and carries what it needs to fetch or revive the
+/// underlying ledger entry itself.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+pub struct RecordProof {
+    /// Whether a record is currently stored for this username.
+    pub exists: bool,
+    /// The record's verified flag. Always `false` when `exists` is `false`.
+    pub verified: bool,
+    /// Ledger timestamp the record was last written, or 0 when absent.
+    pub registered_at: u32,
+    /// Ledger sequence this proof was taken at.
+    pub as_of_ledger: u32,
+    /// Remaining-TTL threshold below which the entry is bumped, in ledgers.
+    pub ttl_threshold_ledgers: u32,
+    /// How far ahead of the current ledger a bump extends the entry.
+    pub ttl_bump_ledgers: u32,
+    /// Symbol half of the record's storage key. The full key is
+    /// `(key_prefix, github_username)` — see `docs/STORAGE_RENT.md`.
+    pub key_prefix: Symbol,
+}
+
 /// Aggregate registry statistics returned by `get_stats`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[soroban_sdk::contracttype]
@@ -439,6 +464,41 @@ pub fn remove_record(env: &Env, github_username: &String) {
 
 pub fn has_record(env: &Env, github_username: &String) -> bool {
     get_record(env, github_username).is_some()
+}
+
+/// Build the light-client existence proof for `github_username` (Issue #230).
+///
+/// Deliberately reads through `get_record`, so an existing record gets the same
+/// TTL bump any other read would give it and a proof cannot be used to sidestep
+/// keeping a live record alive.
+///
+/// The exact `liveUntilLedgerSeq` is not returned: a contract cannot read its
+/// own entry's TTL on-chain. The key and the TTL policy are returned instead so
+/// a client can read `liveUntilLedgerSeq` straight from the ledger entry — see
+/// `docs/STORAGE_RENT.md`.
+pub fn build_record_proof(env: &Env, github_username: &String) -> RecordProof {
+    let record = get_record(env, github_username);
+    let as_of_ledger = env.ledger().sequence();
+    match record {
+        Some(record) => RecordProof {
+            exists: true,
+            verified: record.verified,
+            registered_at: record.registered_at,
+            as_of_ledger,
+            ttl_threshold_ledgers: TTL_THRESHOLD,
+            ttl_bump_ledgers: TTL_BUMP,
+            key_prefix: REG_KEY,
+        },
+        None => RecordProof {
+            exists: false,
+            verified: false,
+            registered_at: 0,
+            as_of_ledger,
+            ttl_threshold_ledgers: TTL_THRESHOLD,
+            ttl_bump_ledgers: TTL_BUMP,
+            key_prefix: REG_KEY,
+        },
+    }
 }
 
 // ── Counters ─────────────────────────────────────────────────────────────────
