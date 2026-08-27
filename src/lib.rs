@@ -4792,12 +4792,13 @@ mod test {
             ContractError::RotationPending,
             ContractError::NoRotationPending,
             ContractError::RotationNotReady,
+            ContractError::UsernameTaken,
         ] {
             assert_eq!(ContractError::from_code(variant.code()), Some(variant));
         }
         assert_eq!(ContractError::from_code(0), None);
-        // 31 is one past the highest assigned variant (RotationNotReady = 30):
-        assert_eq!(ContractError::from_code(31), None);
+        // 32 is one past the highest assigned variant (UsernameTaken = 31):
+        assert_eq!(ContractError::from_code(32), None);
     }
 
     // --- Issue #69: max username length guard ---
@@ -5406,7 +5407,7 @@ mod test {
     #[test]
     fn test_from_code_unknown_returns_none() {
         assert_eq!(ContractError::from_code(0), None);
-        assert_eq!(ContractError::from_code(31), None);
+        assert_eq!(ContractError::from_code(32), None);
         assert_eq!(ContractError::from_code(u32::MAX), None);
     }
 
