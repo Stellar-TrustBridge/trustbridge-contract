@@ -231,3 +231,17 @@ pub struct RotationCancelledEvent {
     pub cancelled_by: Address,
     pub timestamp: u64,
 }
+
+/// Emitted when a registration is renamed to a new GitHub username (Issue #233).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenamedEvent {
+    #[topic]
+    pub old_username: String,
+    #[topic]
+    pub new_username: String,
+    pub stellar_address: Address,
+    /// Whether the verified flag was cleared by the rename.
+    pub verification_cleared: bool,
+    pub timestamp: u64,
+}

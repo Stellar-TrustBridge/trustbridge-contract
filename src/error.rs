@@ -96,6 +96,8 @@ pub enum ContractError {
     NoRotationPending = 29,
     /// The rotation's delay window has not elapsed yet.
     RotationNotReady = 30,
+    /// `rename` was called with a target username that is already registered.
+    UsernameTaken = 31,
 }
 
 impl ContractError {
@@ -141,6 +143,7 @@ impl ContractError {
             28 => Some(ContractError::RotationPending),
             29 => Some(ContractError::NoRotationPending),
             30 => Some(ContractError::RotationNotReady),
+            31 => Some(ContractError::UsernameTaken),
             _ => None,
         }
     }

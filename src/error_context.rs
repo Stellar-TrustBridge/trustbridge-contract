@@ -115,6 +115,7 @@ pub fn classify_error(error: ContractError) -> ErrorCategory {
         ContractError::RotationPending => ErrorCategory::Validation,
         ContractError::NoRotationPending => ErrorCategory::Validation,
         ContractError::RotationNotReady => ErrorCategory::Transient,
+        ContractError::UsernameTaken => ErrorCategory::Validation,
     }
 }
 

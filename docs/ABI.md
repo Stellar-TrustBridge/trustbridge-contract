@@ -746,6 +746,63 @@ after the record has already been through one full cycle. Covered by
 
 ---
 
+### `rename(caller, old_username, new_username) -> Result<(), ContractError>`
+
+Moves a registration from `old_username` to `new_username` (Issue #233).
+
+| | |
+|---|---|
+| **Auth** | `caller`, which must be the registered address or the admin |
+| **Mutates** | Yes — blocked while paused |
+
+GitHub users rename. Without this they had to `remove` and re-register, which
+drops the record and leaves the old name free for anyone to take in between.
+
+The move is **atomic**: the new record is written and the old removed in the
+same invocation, so there is no ledger state where the registration exists
+under both names or neither. `get_stats().total` is unchanged — a rename is a
+move, not a new registration. The old name is free to register afterwards.
+
+**Verified-state policy: the flag does not travel.** Verification attests that
+a particular GitHub identity controls the address. The contract cannot confirm
+the new handle is the same GitHub account, and carrying the badge across would
+let a verified throwaway rename onto a valuable handle and arrive pre-trusted.
+So `rename`:
+
+- clears `verified` on the moved record,
+- decrements `get_verified_count()`,
+- marks the new name **pending re-verify**,
+- leaves `get_ever_verified_count()` alone, which still remembers the original
+  verification.
+
+Re-verification is a normal `verify` call against the new name.
+
+Emits `RenamedEvent { old_username, new_username, stellar_address, verification_cleared, timestamp }`,
+with both usernames as topics so an indexer can follow the move from either side.
+
+Rejected with:
+
+| Error | When |
+|---|---|
+| `NotRegistered` | `old_username` is not registered |
+| `NotAuthorized` | `caller` is neither the holder nor the admin |
+| `InvalidUsername` | `new_username` is not a valid GitHub username, or equals `old_username` |
+| `UsernameReserved` | `new_username` is on the reserved list |
+| `UsernameTaken` | `new_username` is already registered |
+| `CooldownActive` | the username is in cooldown |
+| `ChallengeActive` | a challenge is open on either name |
+| `RotationPending` | an address rotation is queued on the old name |
+
+A case-only rename (`octocat` → `OctoCat`) is a real move and is allowed: the
+storage key is the exact string.
+
+```bash
+stellar contract invoke --id $ID --source holder --network testnet \
+  -- rename --caller $HOLDER --old_username octocat --new_username octocat2
+```
+
+---
+
 ### `get_verified_count() -> u32`
 
 Returns the number of **currently** verified registrations. This figure drops

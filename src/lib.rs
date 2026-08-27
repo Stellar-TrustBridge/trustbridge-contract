@@ -23,7 +23,7 @@ pub use audit::{AuditConfig, AuditEventType, AuditLogEntry, AuditStats};
 pub use batch::{BatchConfig, BatchOperationResult, BatchSummary};
 pub use error::ContractError;
 pub use events::{
-    AttestationClearedEvent, ChallengeCancelledEvent, ChallengeCompletedEvent,
+    AttestationClearedEvent, ChallengeCancelledEvent, ChallengeCompletedEvent, RenamedEvent,
     RotationCancelledEvent, RotationExecutedEvent, RotationRequestedEvent,
     ChallengeStartedEvent, EmergencyClearedEvent, EmergencyPausedEvent, PausedEvent,
     RegisteredEvent, RemovedEvent, RoleGrantedEvent, RoleRevokedEvent, UnpausedEvent,
@@ -1720,6 +1720,146 @@ impl TrustBridgeContract {
         storage_get_verified_count(&env)
     }
 
+    /// Moves a registration from `old_username` to `new_username` (Issue #233).
+    ///
+    /// GitHub users rename. Without this they had to `remove` and re-register,
+    /// which drops the record entirely and leaves the old name free for anyone
+    /// to take in between.
+    ///
+    /// The move is atomic: the new record is written and the old one removed in
+    /// the same invocation, so there is no ledger state where the registration
+    /// exists under both names or neither. The total registration count is
+    /// unchanged — this is a move, not a new registration.
+    ///
+    /// # Verified state
+    ///
+    /// **The verified flag does not travel.** Verification attests that a
+    /// particular GitHub identity controls the address; the contract cannot
+    /// confirm that the new handle is the same GitHub account, and carrying the
+    /// badge across would let a verified throwaway rename onto a valuable
+    /// handle and arrive pre-trusted. The record is marked pending re-verify
+    /// instead, and `get_ever_verified_count` still remembers the original
+    /// verification. See `docs/ABI.md`.
+    ///
+    /// Emits [`RenamedEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from `caller`, which must be the registered address or the
+    /// contract admin — the same rule `remove` applies.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotRegistered`] if `old_username` is not registered.
+    /// - [`ContractError::NotAuthorized`] if `caller` is neither holder nor admin.
+    /// - [`ContractError::InvalidUsername`] if `new_username` is not a valid
+    ///   GitHub username, or is the same as `old_username`.
+    /// - [`ContractError::UsernameReserved`] if `new_username` is reserved.
+    /// - [`ContractError::UsernameTaken`] if `new_username` is already registered.
+    /// - [`ContractError::CooldownActive`] if the username is in cooldown.
+    /// - [`ContractError::ChallengeActive`] if a challenge is open on either name.
+    /// - [`ContractError::RotationPending`] if an address rotation is pending.
+    pub fn rename(
+        env: Env,
+        caller: Address,
+        old_username: String,
+        new_username: String,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        let record = get_record(&env, &old_username).ok_or(ContractError::NotRegistered)?;
+        let admin = get_admin(&env)?;
+
+        caller.require_auth();
+        Self::require_remove_auth(&caller, &admin, &record.stellar_address)?;
+
+        if !is_valid_github_username(&new_username) {
+            return Err(ContractError::InvalidUsername);
+        }
+
+        // A rename to the identical string is a no-op dressed as a state
+        // change; reject it rather than emit an event for nothing. A
+        // case-only rename is a real move and stays allowed, since the storage
+        // key is the exact string.
+        if new_username == old_username {
+            return Err(ContractError::InvalidUsername);
+        }
+
+        if crate::storage::is_reserved(&env, &new_username) {
+            return Err(ContractError::UsernameReserved);
+        }
+
+        if has_record(&env, &new_username) {
+            return Err(ContractError::UsernameTaken);
+        }
+
+        // An open challenge on either name is an unresolved ownership question.
+        if has_challenge(&env, &old_username) || has_challenge(&env, &new_username) {
+            return Err(ContractError::ChallengeActive);
+        }
+
+        // A queued address rotation is scoped to the old key; let it settle or
+        // be cancelled before the name moves out from under it.
+        if has_pending_rotation(&env, &old_username) {
+            return Err(ContractError::RotationPending);
+        }
+
+        if is_in_cooldown(&env, &old_username) {
+            return Err(ContractError::CooldownActive);
+        }
+
+        let timestamp = env.ledger().timestamp();
+        let verification_cleared = record.verified;
+
+        // Verification attested the old handle; it does not follow the rename.
+        if verification_cleared {
+            set_verified_count(&env, storage_get_verified_count(&env).saturating_sub(1));
+        }
+
+        let moved = ContributorRecord {
+            stellar_address: record.stellar_address.clone(),
+            registered_at: timestamp as u32,
+            verified: false,
+        };
+
+        // Write the new key and drop the old one in the same invocation: the
+        // registration is never visible under both names, nor missing from both.
+        set_record(&env, &new_username, &moved);
+        add_to_index(&env, &new_username);
+        remove_record(&env, &old_username);
+        remove_from_index(&env, &old_username);
+
+        clear_pending_reverify(&env, &old_username);
+        if verification_cleared {
+            set_pending_reverify(&env, &new_username, true);
+        }
+
+        set_last_action(&env, &new_username, timestamp);
+
+        RenamedEvent {
+            old_username: old_username.clone(),
+            new_username: new_username.clone(),
+            stellar_address: record.stellar_address.clone(),
+            verification_cleared,
+            timestamp,
+        }
+        .publish(&env);
+
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(
+                AuditEventType::UserRegistered,
+                timestamp,
+                Some(record.stellar_address),
+            ),
+        );
+
+        Ok(())
+    }
+
     // ── Address rotation with a delay window (Issue #234) ────────────────────
 
     /// Sets how long a requested address rotation must wait before it can be
@@ -3236,6 +3376,297 @@ mod test {
             let result =
                 TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"));
             assert_eq!(result, Err(ContractError::AlreadyVerified));
+        });
+    }
+
+    // ── Issue #233: username rename ──────────────────────────────────────────
+
+    fn register_as(env: &Env, contract_id: &Address, name: &str, addr: &Address) {
+        env.mock_all_auths();
+        env.as_contract(contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(env, name), addr.clone()).unwrap();
+        });
+    }
+
+    #[test]
+    fn test_rename_moves_the_registration_atomically() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::rename(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+                username(&env, "octocat2"),
+            )
+            .unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            assert!(
+                !TrustBridgeContract::has_record(env.clone(), username(&env, "octocat")),
+                "old name must be gone"
+            );
+            assert_eq!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat2"))
+                    .unwrap()
+                    .stellar_address,
+                user,
+                "new name must hold the same address"
+            );
+            assert_eq!(
+                TrustBridgeContract::get_stats(env.clone()).total,
+                1,
+                "a rename is a move, not a new registration"
+            );
+        });
+    }
+
+    #[test]
+    fn test_rename_updates_the_index() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::rename(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+                username(&env, "octocat2"),
+            )
+            .unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 50).unwrap();
+            let names: alloc::vec::Vec<_> = page
+                .records
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect();
+            assert!(
+                names.contains(&username(&env, "octocat2")),
+                "index must list the new name"
+            );
+            assert!(
+                !names.contains(&username(&env, "octocat")),
+                "index must not still list the old name"
+            );
+        });
+    }
+
+    /// Verification attested the old handle, so it does not follow the rename.
+    #[test]
+    fn test_rename_clears_verification_and_flags_reverify() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::rename(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+                username(&env, "octocat2"),
+            )
+            .unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            assert!(
+                !TrustBridgeContract::get_address(env.clone(), username(&env, "octocat2"))
+                    .unwrap()
+                    .verified,
+                "the badge must not travel to the new handle"
+            );
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0);
+            assert_eq!(
+                TrustBridgeContract::get_ever_verified_count(env.clone()),
+                1,
+                "history still remembers the original verification"
+            );
+        });
+    }
+
+    #[test]
+    fn test_rename_rejects_a_taken_username() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+        register_as(&env, &contract_id, "hubber", &other);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::rename(
+                    env.clone(),
+                    user.clone(),
+                    username(&env, "octocat"),
+                    username(&env, "hubber"),
+                ),
+                Err(ContractError::UsernameTaken)
+            );
+        });
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "hubber"))
+                    .unwrap()
+                    .stellar_address,
+                other,
+                "the existing registration must be untouched"
+            );
+        });
+    }
+
+    #[test]
+    fn test_rename_rejects_a_reserved_username() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::add_reserved(env.clone(), username(&env, "stellar")).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::rename(
+                    env.clone(),
+                    user.clone(),
+                    username(&env, "octocat"),
+                    username(&env, "stellar"),
+                ),
+                Err(ContractError::UsernameReserved)
+            );
+        });
+    }
+
+    #[test]
+    fn test_rename_rejects_an_unregistered_username() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::rename(
+                    env.clone(),
+                    user.clone(),
+                    username(&env, "ghost"),
+                    username(&env, "ghost2"),
+                ),
+                Err(ContractError::NotRegistered)
+            );
+        });
+    }
+
+    #[test]
+    fn test_rename_rejects_renaming_to_the_same_name() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::rename(
+                    env.clone(),
+                    user.clone(),
+                    username(&env, "octocat"),
+                    username(&env, "octocat"),
+                ),
+                Err(ContractError::InvalidUsername)
+            );
+        });
+    }
+
+    #[test]
+    fn test_rename_rejects_a_non_holder() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::rename(
+                    env.clone(),
+                    other.clone(),
+                    username(&env, "octocat"),
+                    username(&env, "octocat2"),
+                ),
+                Err(ContractError::NotAuthorized)
+            );
+        });
+    }
+
+    /// A case-only change is a real move, since the storage key is the exact string.
+    #[test]
+    fn test_rename_allows_a_case_only_change() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::rename(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+                username(&env, "OctoCat"),
+            )
+            .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            assert!(TrustBridgeContract::has_record(env.clone(), username(&env, "OctoCat")));
+            assert!(!TrustBridgeContract::has_record(env.clone(), username(&env, "octocat")));
+        });
+    }
+
+    /// The old name is free again, and taking it does not disturb the moved record.
+    #[test]
+    fn test_old_name_is_registerable_after_a_rename() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::rename(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+                username(&env, "octocat2"),
+            )
+            .unwrap();
+        });
+
+        register_as(&env, &contract_id, "octocat", &other);
+
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                    .unwrap()
+                    .stellar_address,
+                other
+            );
+            assert_eq!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat2"))
+                    .unwrap()
+                    .stellar_address,
+                user
+            );
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 2);
         });
     }
 
