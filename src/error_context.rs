@@ -111,6 +111,10 @@ pub fn classify_error(error: ContractError) -> ErrorCategory {
         ContractError::NotReserved => ErrorCategory::Validation,
         ContractError::ReservedListFull => ErrorCategory::Permanent,
         ContractError::UsernameReserved => ErrorCategory::Validation,
+        ContractError::RotationRequired => ErrorCategory::Validation,
+        ContractError::RotationPending => ErrorCategory::Validation,
+        ContractError::NoRotationPending => ErrorCategory::Validation,
+        ContractError::RotationNotReady => ErrorCategory::Transient,
     }
 }
 

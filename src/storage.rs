@@ -28,6 +28,11 @@ pub const PAUSED_KEY: Symbol = symbol_short!("pause");
 /// Last `PauseReason` recorded by `pause` / `unpause`.
 pub const PAUSE_RSN_KEY: Symbol = symbol_short!("pause_rsn");
 pub const COOLDOWN_KEY: Symbol = symbol_short!("cdown");
+/// Seconds a requested address rotation must wait before it can execute
+/// (Issue #234). 0 disables the delay, matching the cooldown convention.
+pub const ROT_DELAY_KEY: Symbol = symbol_short!("rotdelay");
+/// Key prefix for a username's pending address rotation (Issue #234).
+pub const PENDING_ROT_KEY: Symbol = symbol_short!("pendrot");
 // Pending reverify flag per username
 pub const PENDING_REVERIFY_KEY: Symbol = symbol_short!("pend_rev");
 // Emergency pause flag and timestamp — wired as guardian circuit breaker (Issue #196)
@@ -273,6 +278,18 @@ pub struct AdminTransferProposal {
     /// Ledger timestamp when `propose_admin_transfer` was called.
     pub proposed_at: u64,
     /// Earliest ledger timestamp at which `execute_admin_transfer` may run.
+    pub executable_at: u64,
+}
+
+/// An address rotation that has been requested but not yet executed (Issue #234).
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+pub struct PendingRotation {
+    /// The address the registration will move to once executed.
+    pub new_address: Address,
+    /// Ledger timestamp the rotation was requested.
+    pub requested_at: u64,
+    /// Ledger timestamp from which the rotation may be executed.
     pub executable_at: u64,
 }
 
@@ -1281,4 +1298,47 @@ pub fn compact_chunked_index(env: &Env) -> u32 {
 
     set_chunk_count(env, chunk_idx);
     chunk_idx
+}
+
+// ── Address rotation (Issue #234) ────────────────────────────────────────────
+
+/// Seconds a requested rotation must wait before it can execute. 0 disables the
+/// delay, in which case `register` keeps its direct dual-auth address change.
+pub fn get_rotation_delay(env: &Env) -> u64 {
+    env.storage().instance().get(&ROT_DELAY_KEY).unwrap_or(0)
+}
+
+pub fn set_rotation_delay(env: &Env, seconds: u64) {
+    env.storage().instance().set(&ROT_DELAY_KEY, &seconds);
+}
+
+pub fn get_pending_rotation(env: &Env, github_username: &String) -> Option<PendingRotation> {
+    let key = (PENDING_ROT_KEY, github_username.clone());
+    let pending: Option<PendingRotation> = env.storage().persistent().get(&key);
+    if pending.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+    }
+    pending
+}
+
+pub fn set_pending_rotation(env: &Env, github_username: &String, rotation: &PendingRotation) {
+    let key = (PENDING_ROT_KEY, github_username.clone());
+    env.storage().persistent().set(&key, rotation);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+}
+
+pub fn remove_pending_rotation(env: &Env, github_username: &String) {
+    env.storage()
+        .persistent()
+        .remove(&(PENDING_ROT_KEY, github_username.clone()));
+}
+
+pub fn has_pending_rotation(env: &Env, github_username: &String) -> bool {
+    env.storage()
+        .persistent()
+        .has(&(PENDING_ROT_KEY, github_username.clone()))
 }

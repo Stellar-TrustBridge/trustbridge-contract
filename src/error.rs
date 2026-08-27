@@ -87,6 +87,15 @@ pub enum ContractError {
     ReservedListFull = 25,
     /// `register` was called with a username on the reserved list.
     UsernameReserved = 26,
+    /// A rotation delay is configured, so the address must move through
+    /// `request_address_rotation` rather than a direct `register`.
+    RotationRequired = 27,
+    /// A rotation is already pending for this username.
+    RotationPending = 28,
+    /// No rotation is pending for this username.
+    NoRotationPending = 29,
+    /// The rotation's delay window has not elapsed yet.
+    RotationNotReady = 30,
 }
 
 impl ContractError {
@@ -128,6 +137,10 @@ impl ContractError {
             24 => Some(ContractError::NotReserved),
             25 => Some(ContractError::ReservedListFull),
             26 => Some(ContractError::UsernameReserved),
+            27 => Some(ContractError::RotationRequired),
+            28 => Some(ContractError::RotationPending),
+            29 => Some(ContractError::NoRotationPending),
+            30 => Some(ContractError::RotationNotReady),
             _ => None,
         }
     }

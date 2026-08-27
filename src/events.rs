@@ -197,3 +197,37 @@ pub struct AttestationClearedEvent {
     pub expires_at: u64,
     pub timestamp: u64,
 }
+
+/// Emitted when an address rotation is requested and starts its delay (Issue #234).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RotationRequestedEvent {
+    #[topic]
+    pub github_username: String,
+    pub current_address: Address,
+    pub new_address: Address,
+    /// Ledger timestamp from which the rotation may be executed.
+    pub executable_at: u64,
+    pub timestamp: u64,
+}
+
+/// Emitted when a pending address rotation is executed (Issue #234).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RotationExecutedEvent {
+    #[topic]
+    pub github_username: String,
+    pub old_address: Address,
+    pub new_address: Address,
+    pub timestamp: u64,
+}
+
+/// Emitted when a pending address rotation is cancelled (Issue #234).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RotationCancelledEvent {
+    #[topic]
+    pub github_username: String,
+    pub cancelled_by: Address,
+    pub timestamp: u64,
+}
