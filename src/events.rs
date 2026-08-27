@@ -159,3 +159,41 @@ mod test {
         );
     }
 }
+
+/// Emitted when the guardian trips the emergency circuit breaker (Issue #196).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmergencyPausedEvent {
+    #[topic]
+    pub triggered_by: Address,
+    pub timestamp: u64,
+}
+
+/// Emitted when the admin clears an emergency pause (Issue #196).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmergencyClearedEvent {
+    #[topic]
+    pub admin: Address,
+    pub timestamp: u64,
+}
+
+/// Emitted when a WASM hash is attested ahead of an upgrade.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeAttestedEvent {
+    #[topic]
+    pub wasm_hash: BytesN<32>,
+    pub expires_at: u64,
+    pub timestamp: u64,
+}
+
+/// Emitted when a live attestation is cleared before it was consumed.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttestationClearedEvent {
+    #[topic]
+    pub wasm_hash: BytesN<32>,
+    pub expires_at: u64,
+    pub timestamp: u64,
+}

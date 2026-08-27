@@ -23,12 +23,13 @@ pub use audit::{AuditConfig, AuditEventType, AuditLogEntry, AuditStats};
 pub use batch::{BatchConfig, BatchOperationResult, BatchSummary};
 pub use error::ContractError;
 pub use events::{
-    ChallengeCancelledEvent, ChallengeCompletedEvent, ChallengeStartedEvent, PausedEvent,
+    AttestationClearedEvent, ChallengeCancelledEvent, ChallengeCompletedEvent,
+    ChallengeStartedEvent, EmergencyClearedEvent, EmergencyPausedEvent, PausedEvent,
     RegisteredEvent, RemovedEvent, RoleGrantedEvent, RoleRevokedEvent, UnpausedEvent,
-    UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
+    UpgradeAttestedEvent, UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
 };
 pub use storage::{
-    ChallengeRecord, ContributorRecord, ExportPage, HealthSnapshot, Role, Stats,
+    ChallengeRecord, ContributorRecord, ExportPage, HealthSnapshot, PauseReason, Role, Stats,
     VerificationConfig, WasmAttestation, WasmProvenance,
 };
 pub use version::Version;
@@ -39,14 +40,19 @@ use crate::storage::{
     add_to_index, clear_pending_reverify, get_admin, get_audit_logs, get_audit_stats,
     get_challenge, get_cooldown as storage_get_cooldown, get_count, get_index, get_last_upgrade,
     get_record, get_registered_paginated_internal, get_role as storage_get_role,
+    bump_ever_verified_count, get_emergency_pause, get_emergency_pause_ts,
+    get_ever_verified_count as storage_get_ever_verified_count, get_guardian as storage_get_guardian,
     get_stats as read_stats, get_verification_config, get_verified_count as storage_get_verified_count,
+    is_attestation_required, is_guardian, remove_guardian as storage_remove_guardian,
+    set_emergency_pause, set_emergency_pause_ts, set_guardian_address,
     get_version as storage_get_version, get_wasm_attestation, get_wasm_provenance, has_challenge,
     has_record, is_admin_caller, is_in_cooldown, is_paused as storage_is_paused, push_audit_entry,
     remove_challenge, remove_from_index, remove_record, remove_role as storage_remove_role,
     remove_wasm_attestation, require_initialized, require_not_paused,
     run_migration_steps, set_challenge, set_cooldown as storage_set_cooldown, set_count,
     set_last_action, set_last_upgrade, set_paused as set_paused_state, set_pending_reverify,
-    set_record, set_role as storage_set_role, set_verified_count, set_version,
+    set_ever_verified_count, set_record, set_role as storage_set_role, set_verified_count,
+    set_version,
     set_wasm_attestation, set_wasm_provenance, DEFAULT_CHALLENGE_DELAY_SECS,
     ADMIN_KEY,
 };
@@ -120,6 +126,7 @@ impl TrustBridgeContract {
         env.storage().instance().set(&ADMIN_KEY, &admin);
         set_count(&env, 0);
         set_verified_count(&env, 0);
+        set_ever_verified_count(&env, 0);
         set_paused_state(&env, false);
         storage_set_cooldown(&env, 0);
         set_version(&env, (1, 0, 0));
@@ -978,6 +985,12 @@ impl TrustBridgeContract {
             return Err(ContractError::ZeroAddress);
         }
 
+        // Reserved names are held back for their real owners; the check is
+        // case-insensitive so "Stellar" cannot slip past a reserved "stellar".
+        if crate::storage::is_reserved(&env, &github_username) {
+            return Err(ContractError::UsernameReserved);
+        }
+
         // Block re-registration while a challenge is pending (Issue #214).
         // The registrant's window to prove ownership off-chain must not be
         // bypassed by simply re-registering to a new address.
@@ -1419,24 +1432,32 @@ impl TrustBridgeContract {
         let admin = get_admin(&env)?;
         admin.require_auth();
 
+        if !PauseReason::is_valid(reason_code) {
+            return Err(ContractError::InvalidPauseReason);
+        }
+        let reason = PauseReason::from_code(reason_code).unwrap_or(PauseReason::Other);
+
         // Idempotent: skip event emission if already in the requested state.
         if storage_is_paused(&env) == paused {
             return Ok(());
         }
 
         set_paused_state(&env, paused);
+        crate::storage::set_pause_reason(&env, reason);
         let timestamp = env.ledger().timestamp();
 
         if paused {
             PausedEvent {
                 admin: admin.clone(),
                 timestamp,
+                reason_code,
             }
             .publish(&env);
         } else {
             UnpausedEvent {
                 admin: admin.clone(),
                 timestamp,
+                reason_code,
             }
             .publish(&env);
         }
@@ -1486,6 +1507,7 @@ impl TrustBridgeContract {
         record.verified = true;
         set_record(&env, &github_username, &record);
         set_verified_count(&env, storage_get_verified_count(&env).saturating_add(1));
+        bump_ever_verified_count(&env);
 
         // Clear pending reverify flag upon successful verification
         clear_pending_reverify(&env, &github_username);
@@ -1560,6 +1582,7 @@ impl TrustBridgeContract {
             record.verified = true;
             set_record(&env, &username, &record);
             set_verified_count(&env, storage_get_verified_count(&env).saturating_add(1));
+            bump_ever_verified_count(&env);
             clear_pending_reverify(&env, &username);
 
             VerifiedEvent {
@@ -1658,6 +1681,31 @@ impl TrustBridgeContract {
     #[must_use]
     pub fn get_verified_count(env: Env) -> u32 {
         storage_get_verified_count(&env)
+    }
+
+    /// Returns the reason recorded by the most recent `pause` / `unpause`.
+    ///
+    /// Defaults to [`PauseReason::Other`] on an instance that has never been
+    /// paused, so the read is always answerable.
+    ///
+    /// Read-only; no auth required; works while paused.
+    #[must_use]
+    pub fn get_pause_reason(env: Env) -> PauseReason {
+        crate::storage::get_pause_reason(&env).unwrap_or(PauseReason::Other)
+    }
+
+    /// Returns how many verifications have ever been granted, including any
+    /// since revoked (Issue #229).
+    ///
+    /// Unlike [`Self::get_verified_count`], which reports who is verified
+    /// *right now* and drops when a verification is revoked, this figure only
+    /// ever grows. Reports asking "how many contributors did we ever verify"
+    /// should read this one.
+    ///
+    /// Read-only; no auth required; works while paused.
+    #[must_use]
+    pub fn get_ever_verified_count(env: Env) -> u32 {
+        storage_get_ever_verified_count(&env)
     }
 
     /// Returns aggregate registry statistics: total and verified registration counts.
@@ -2054,6 +2102,8 @@ extern crate std;
 #[cfg(test)]
 mod test {
     use super::*;
+    use alloc::format;
+    use alloc::string::ToString;
     use soroban_sdk::{
         testutils::{Address as _, Events as _, Ledger as _},
         Address, Env, Event as _, String, TryFromVal,
@@ -3477,12 +3527,18 @@ mod test {
             ContractError::NoChallengeActive,
             ContractError::ChallengeNotResolvable,
             ContractError::ChallengeActive,
+            ContractError::InvalidPauseReason,
+            ContractError::AttestationRequired,
+            ContractError::AlreadyReserved,
+            ContractError::NotReserved,
+            ContractError::ReservedListFull,
+            ContractError::UsernameReserved,
         ] {
             assert_eq!(ContractError::from_code(variant.code()), Some(variant));
         }
         assert_eq!(ContractError::from_code(0), None);
-        // 21 is one past the highest assigned variant (ChallengeActive = 20):
-        assert_eq!(ContractError::from_code(21), None);
+        // 27 is one past the highest assigned variant (UsernameReserved = 26):
+        assert_eq!(ContractError::from_code(27), None);
     }
 
     // --- Issue #69: max username length guard ---
@@ -4091,7 +4147,7 @@ mod test {
     #[test]
     fn test_from_code_unknown_returns_none() {
         assert_eq!(ContractError::from_code(0), None);
-        assert_eq!(ContractError::from_code(21), None);
+        assert_eq!(ContractError::from_code(27), None);
         assert_eq!(ContractError::from_code(u32::MAX), None);
     }
 
@@ -5982,7 +6038,7 @@ mod test {
         // 5. Works while paused
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::pause(env.clone()).unwrap();
+            TrustBridgeContract::pause(env.clone(), 1).unwrap();
             let usernames = soroban_sdk::vec![&env, username(&env, "octocat")];
             let extended = TrustBridgeContract::extend_registry_ttl(env.clone(), usernames).unwrap();
             assert_eq!(extended, 1);
@@ -6129,16 +6185,14 @@ mod test {
         let (admin, _user, _other, contract_id) = setup(&env);
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::set_paused(env.clone(), true).unwrap();
+            TrustBridgeContract::set_paused(env.clone(), true, 1).unwrap();
             let events = env.events().all();
+            let expected_topic = soroban_sdk::xdr::ScVal::Symbol(
+                soroban_sdk::xdr::ScSymbol("paused_event".try_into().unwrap()),
+            );
             let found = events.events().iter().any(|e| {
-                let topics = e.topics;
-                if topics.len() >= 2 {
-                    if let Ok(s) = soroban_sdk::Symbol::try_from_val(&env, &topics.get_unchecked(1)) {
-                        return s == soroban_sdk::Symbol::new(&env, "paused_event");
-                    }
-                }
-                false
+                let soroban_sdk::xdr::ContractEventBody::V0(body) = &e.body;
+                body.topics.iter().any(|t| t == &expected_topic)
             });
             assert!(found, "set_paused(true) must emit PausedEvent");
         });
@@ -6151,18 +6205,16 @@ mod test {
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
             // First pause, then unpause via set_paused
-            TrustBridgeContract::pause(env.clone()).unwrap();
+            TrustBridgeContract::pause(env.clone(), 1).unwrap();
             env.events().all(); // consume
-            TrustBridgeContract::set_paused(env.clone(), false).unwrap();
+            TrustBridgeContract::set_paused(env.clone(), false, 4).unwrap();
             let events = env.events().all();
+            let expected_topic = soroban_sdk::xdr::ScVal::Symbol(
+                soroban_sdk::xdr::ScSymbol("unpaused_event".try_into().unwrap()),
+            );
             let found = events.events().iter().any(|e| {
-                let topics = e.topics;
-                if topics.len() >= 2 {
-                    if let Ok(s) = soroban_sdk::Symbol::try_from_val(&env, &topics.get_unchecked(1)) {
-                        return s == soroban_sdk::Symbol::new(&env, "unpaused_event");
-                    }
-                }
-                false
+                let soroban_sdk::xdr::ContractEventBody::V0(body) = &e.body;
+                body.topics.iter().any(|t| t == &expected_topic)
             });
             assert!(found, "set_paused(false) must emit UnpausedEvent");
         });
@@ -6176,7 +6228,7 @@ mod test {
         env.as_contract(&contract_id, || {
             // Already unpaused — calling set_paused(false) again should be a no-op
             let count_before = env.events().all().events().len();
-            TrustBridgeContract::set_paused(env.clone(), false).unwrap();
+            TrustBridgeContract::set_paused(env.clone(), false, 4).unwrap();
             let count_after = env.events().all().events().len();
             assert_eq!(
                 count_before, count_after,
@@ -6184,9 +6236,9 @@ mod test {
             );
 
             // Pause, then call set_paused(true) again — still a no-op
-            TrustBridgeContract::set_paused(env.clone(), true).unwrap();
+            TrustBridgeContract::set_paused(env.clone(), true, 1).unwrap();
             let count_before2 = env.events().all().events().len();
-            TrustBridgeContract::set_paused(env.clone(), true).unwrap();
+            TrustBridgeContract::set_paused(env.clone(), true, 1).unwrap();
             let count_after2 = env.events().all().events().len();
             assert_eq!(
                 count_before2, count_after2,
@@ -6205,7 +6257,7 @@ mod test {
             // We mock all auths so this tests the logical path — the admin key is
             // the only one that satisfies the check.
             assert!(
-                TrustBridgeContract::set_paused(env.clone(), true).is_ok(),
+                TrustBridgeContract::set_paused(env.clone(), true, 1).is_ok(),
                 "mock_all_auths must satisfy require_auth()"
             );
         });
@@ -6334,7 +6386,7 @@ mod test {
             TrustBridgeContract::set_guardian(env.clone(), guardian.clone()).unwrap();
 
             // Trip both flags
-            TrustBridgeContract::pause(env.clone()).unwrap();
+            TrustBridgeContract::pause(env.clone(), 1).unwrap();
             TrustBridgeContract::emergency_pause(env.clone(), guardian.clone()).unwrap();
 
             // Clear emergency pause only — normal pause still blocks
@@ -6351,7 +6403,7 @@ mod test {
             );
 
             // Clear normal pause too — now unblocked
-            TrustBridgeContract::unpause(env.clone()).unwrap();
+            TrustBridgeContract::unpause(env.clone(), 4).unwrap();
             TrustBridgeContract::register(
                 env.clone(),
                 username(&env, "nowworks"),

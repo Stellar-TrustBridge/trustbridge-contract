@@ -19,8 +19,14 @@ pub const REG_KEY: Symbol = symbol_short!("reg");
 pub const ADMIN_KEY: Symbol = symbol_short!("admin");
 pub const COUNT_KEY: Symbol = symbol_short!("count");
 pub const VCOUNT_KEY: Symbol = symbol_short!("vcount");
+/// Monotonic count of verifications ever granted (Issue #229). Unlike
+/// `VCOUNT_KEY` this never decreases, so revoking does not erase the fact that
+/// a contributor was verified at some point.
+pub const EVER_VCOUNT_KEY: Symbol = symbol_short!("evcount");
 pub const INDEX_KEY: Symbol = symbol_short!("idx");
 pub const PAUSED_KEY: Symbol = symbol_short!("pause");
+/// Last `PauseReason` recorded by `pause` / `unpause`.
+pub const PAUSE_RSN_KEY: Symbol = symbol_short!("pause_rsn");
 pub const COOLDOWN_KEY: Symbol = symbol_short!("cdown");
 // Pending reverify flag per username
 pub const PENDING_REVERIFY_KEY: Symbol = symbol_short!("pend_rev");
@@ -276,8 +282,11 @@ pub struct AdminTransferProposal {
 pub struct Stats {
     /// Total number of registered contributors.
     pub total: u32,
-    /// Number of contributors who have been verified.
+    /// Number of contributors **currently** verified. Decreases on revoke.
     pub verified: u32,
+    /// Number of verifications ever granted, including any later revoked
+    /// (Issue #229). Monotonic: this never decreases.
+    pub ever_verified: u32,
 }
 
 /// A single page of registry records returned by paginated export functions.
@@ -448,6 +457,30 @@ pub fn get_verified_count(env: &Env) -> u32 {
 
 pub fn set_verified_count(env: &Env, count: u32) {
     env.storage().instance().set(&VCOUNT_KEY, &count);
+}
+
+/// Verifications ever granted, including those later revoked (Issue #229).
+///
+/// Instances deployed before this counter existed have no stored value. Rather
+/// than reporting zero — which would claim nobody was ever verified while
+/// `get_verified_count` says otherwise — they fall back to the live verified
+/// count, the tightest lower bound the contract can still prove.
+pub fn get_ever_verified_count(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&EVER_VCOUNT_KEY)
+        .unwrap_or_else(|| get_verified_count(env))
+}
+
+pub fn set_ever_verified_count(env: &Env, count: u32) {
+    env.storage().instance().set(&EVER_VCOUNT_KEY, &count);
+}
+
+/// Record one more verification in the monotonic counter. Saturates rather than
+/// wrapping, so the figure can only ever stall, never run backwards.
+pub fn bump_ever_verified_count(env: &Env) {
+    let next = get_ever_verified_count(env).saturating_add(1);
+    set_ever_verified_count(env, next);
 }
 
 // ── Flat username index ──────────────────────────────────────────────────────
@@ -655,12 +688,20 @@ pub fn get_registered_paginated_internal(
 // All stats reads (get_stats, and any future indexer/dashboard aggregate
 // endpoints) should route through it rather than building `Stats { .. }`
 // literals directly, so count/verified-count semantics stay in one place.
-pub fn build_stats(total: u32, verified: u32) -> Stats {
-    Stats { total, verified }
+pub fn build_stats(total: u32, verified: u32, ever_verified: u32) -> Stats {
+    Stats {
+        total,
+        verified,
+        ever_verified,
+    }
 }
 
 pub fn get_stats(env: &Env) -> Stats {
-    build_stats(get_count(env), get_verified_count(env))
+    build_stats(
+        get_count(env),
+        get_verified_count(env),
+        get_ever_verified_count(env),
+    )
 }
 
 // ── Cooldown / upgrade timelock ───────────────────────────────────────────────
@@ -1058,4 +1099,126 @@ pub fn run_migration_steps(
     }
 
     applied
+}
+
+// ── Pause reason ─────────────────────────────────────────────────────────────
+
+/// Record why the contract was last paused or unpaused.
+pub fn set_pause_reason(env: &Env, reason: PauseReason) {
+    env.storage()
+        .instance()
+        .set(&PAUSE_RSN_KEY, &(reason as u32));
+}
+
+/// The last recorded pause reason, or `None` if the contract has never been
+/// paused on this instance.
+pub fn get_pause_reason(env: &Env) -> Option<PauseReason> {
+    env.storage()
+        .instance()
+        .get::<Symbol, u32>(&PAUSE_RSN_KEY)
+        .and_then(PauseReason::from_code)
+}
+
+// ── Reserved usernames (Issue #213) ──────────────────────────────────────────
+
+/// The reserved username list, empty when nothing has been reserved.
+pub fn get_reserved_list(env: &Env) -> Vec<String> {
+    env.storage()
+        .instance()
+        .get(&RESERVED_KEY)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Case-insensitive membership test against the reserved list.
+pub fn is_reserved(env: &Env, username: &String) -> bool {
+    let reserved = get_reserved_list(env);
+    for entry in reserved.iter() {
+        if crate::utils::eq_ignore_ascii_case(&entry, username) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Add `username` to the reserved list.
+///
+/// # Errors
+///
+/// - [`ContractError::AlreadyReserved`] if it is already on the list.
+/// - [`ContractError::ReservedListFull`] if the list already holds
+///   `MAX_RESERVED` entries.
+pub fn add_to_reserved(env: &Env, username: &String) -> Result<(), ContractError> {
+    if is_reserved(env, username) {
+        return Err(ContractError::AlreadyReserved);
+    }
+    let mut reserved = get_reserved_list(env);
+    if reserved.len() >= MAX_RESERVED {
+        return Err(ContractError::ReservedListFull);
+    }
+    reserved.push_back(username.clone());
+    env.storage().instance().set(&RESERVED_KEY, &reserved);
+    Ok(())
+}
+
+/// Remove `username` from the reserved list.
+///
+/// # Errors
+///
+/// - [`ContractError::NotReserved`] if it is not currently reserved.
+pub fn remove_from_reserved(env: &Env, username: &String) -> Result<(), ContractError> {
+    let reserved = get_reserved_list(env);
+    let mut remaining: Vec<String> = Vec::new(env);
+    let mut found = false;
+    for entry in reserved.iter() {
+        if crate::utils::eq_ignore_ascii_case(&entry, username) {
+            found = true;
+        } else {
+            remaining.push_back(entry);
+        }
+    }
+    if !found {
+        return Err(ContractError::NotReserved);
+    }
+    env.storage().instance().set(&RESERVED_KEY, &remaining);
+    Ok(())
+}
+
+// ── Index compaction (Issue #209) ────────────────────────────────────────────
+
+/// Rebuild the chunked index densely from the flat index.
+///
+/// Removals leave holes in the chunk pages; this re-partitions the flat index
+/// into contiguous full chunks plus one partial tail and drops the persistent
+/// entries that are no longer backed by any username. Returns the number of
+/// chunks written.
+pub fn compact_chunked_index(env: &Env) -> u32 {
+    let index = get_index(env);
+    let previous_chunks = get_chunk_count(env);
+
+    let mut chunk_idx: u32 = 0;
+    let mut current: Vec<String> = Vec::new(env);
+    for username in index.iter() {
+        current.push_back(username);
+        if current.len() >= CHUNK_SIZE {
+            set_chunk(env, chunk_idx, &current);
+            chunk_idx += 1;
+            current = Vec::new(env);
+        }
+    }
+
+    // A partial tail still needs a page of its own.
+    if !current.is_empty() {
+        set_chunk(env, chunk_idx, &current);
+        chunk_idx += 1;
+    }
+
+    // Reclaim pages the compacted index no longer reaches.
+    let mut stale = chunk_idx;
+    while stale < previous_chunks {
+        env.storage().persistent().remove(&(CHUNK_KEY, stale));
+        stale += 1;
+    }
+
+    set_chunk_count(env, chunk_idx);
+    chunk_idx
 }

@@ -75,6 +75,18 @@ pub enum ContractError {
     /// Operation is blocked because a challenge is active on this username
     /// (Issue #214).
     ChallengeActive = 20,
+    /// `pause` / `unpause` was called with a code that is not a `PauseReason`.
+    InvalidPauseReason = 21,
+    /// `upgrade` was called while an attestation is required but none is live.
+    AttestationRequired = 22,
+    /// `add_reserved` was called with a username already on the reserved list.
+    AlreadyReserved = 23,
+    /// `remove_reserved` was called with a username that is not reserved.
+    NotReserved = 24,
+    /// `add_reserved` was called when the list already holds `MAX_RESERVED`.
+    ReservedListFull = 25,
+    /// `register` was called with a username on the reserved list.
+    UsernameReserved = 26,
 }
 
 impl ContractError {
@@ -110,6 +122,12 @@ impl ContractError {
             18 => Some(ContractError::NoChallengeActive),
             19 => Some(ContractError::ChallengeNotResolvable),
             20 => Some(ContractError::ChallengeActive),
+            21 => Some(ContractError::InvalidPauseReason),
+            22 => Some(ContractError::AttestationRequired),
+            23 => Some(ContractError::AlreadyReserved),
+            24 => Some(ContractError::NotReserved),
+            25 => Some(ContractError::ReservedListFull),
+            26 => Some(ContractError::UsernameReserved),
             _ => None,
         }
     }
