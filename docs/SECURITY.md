@@ -661,6 +661,58 @@ during the window, the admin cancels the challenge and the registration is prese
 
 ---
 
+## Address Rotation Delay (Issue #234)
+
+`register` accepts an address change when both the outgoing and incoming
+addresses sign. Dual auth proves both keys were available *at that moment* — it
+does not prove the holder intended the change. An attacker who phishes a
+GitHub session and a wallet signature together holds both keys at once, and the
+swap lands instantly, redirecting every future payout before the real holder
+sees anything.
+
+The delay window closes that. With `set_rotation_delay(seconds)` armed:
+
+| Step | Entry point | Effect |
+|---|---|---|
+| Request | `request_address_rotation(username, new_address)` | Records the pending address, emits `RotationRequestedEvent`. **Nothing moves.** |
+| Wait | — | `executable_at = requested_at + delay` |
+| Execute | `execute_address_rotation(username)` | Applies the change, emits `RotationExecutedEvent` |
+| Stop | `cancel_address_rotation(caller, username)` | Holder or admin cancels, emits `RotationCancelledEvent` |
+
+Both addresses still `require_auth` on the request, exactly as before. What
+changes is that the authorisation buys a *queued* rotation rather than an
+immediate one, and the queue is visible: the request event gives indexers and
+the holder a window to notice a rotation nobody asked for, and
+`cancel_address_rotation` is how they stop it.
+
+While a rotation is pending:
+
+- **Reads return the current address.** `get_address`, `has_record`, and
+  `get_record_proof` all keep reporting the outgoing address until the rotation
+  executes. A pending rotation is a proposal, not a fact.
+- `get_pending_rotation(username)` exposes the queued address and its
+  `executable_at`, and works while paused so a holder can always see what is
+  queued against their name.
+- `verify` still operates on the record as it stands, against the current
+  address.
+- `register` refuses a direct address change with `RotationRequired`, so the
+  window cannot be stepped around.
+- A second request is refused with `RotationPending`; cancel first.
+- A rotation cannot be requested while a challenge is open on the username —
+  a challenge is an unresolved question about ownership, and queuing a rotation
+  underneath it would let the answer change mid-flight.
+
+Executing a rotation clears the verified flag and marks the username pending
+re-verify, the same policy a direct address change already applied: the
+verification vouched for the address, and the address has changed.
+
+**The delay defaults to 0, which disables all of the above** and preserves the
+direct dual-auth swap. This matches the existing `set_cooldown` convention.
+Operators handling real payouts should set it — 24h (`86400`) gives a holder a
+day to notice and cancel.
+
+---
+
 ## On-Chain Audit Logging
 
 The contract records structured audit log entries into contract storage upon state mutations (`initialize`, `register`, `remove`, `verify`, `batch_verify`, `pause`, `unpause`, `config_verification`, `set_role`).

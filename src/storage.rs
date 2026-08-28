@@ -19,6 +19,10 @@ pub const REG_KEY: Symbol = symbol_short!("reg");
 pub const ADMIN_KEY: Symbol = symbol_short!("admin");
 pub const COUNT_KEY: Symbol = symbol_short!("count");
 pub const VCOUNT_KEY: Symbol = symbol_short!("vcount");
+/// Monotonic count of verifications ever granted (Issue #229). Unlike
+/// `VCOUNT_KEY` this never decreases, so revoking does not erase the fact that
+/// a contributor was verified at some point.
+pub const EVER_VCOUNT_KEY: Symbol = symbol_short!("evcount");
 pub const INDEX_KEY: Symbol = symbol_short!("idx");
 pub const ORG_INDEX_KEY: Symbol = symbol_short!("orgidx");
 pub const TEAM_INDEX_KEY: Symbol = symbol_short!("tmidx");
@@ -32,7 +36,14 @@ pub enum EntityType {
     Team = 2,
 }
 pub const PAUSED_KEY: Symbol = symbol_short!("pause");
+/// Last `PauseReason` recorded by `pause` / `unpause`.
+pub const PAUSE_RSN_KEY: Symbol = symbol_short!("pause_rsn");
 pub const COOLDOWN_KEY: Symbol = symbol_short!("cdown");
+/// Seconds a requested address rotation must wait before it can execute
+/// (Issue #234). 0 disables the delay, matching the cooldown convention.
+pub const ROT_DELAY_KEY: Symbol = symbol_short!("rotdelay");
+/// Key prefix for a username's pending address rotation (Issue #234).
+pub const PENDING_ROT_KEY: Symbol = symbol_short!("pendrot");
 // Pending reverify flag per username
 pub const PENDING_REVERIFY_KEY: Symbol = symbol_short!("pend_rev");
 // Emergency pause flag and timestamp — wired as guardian circuit breaker (Issue #196)
@@ -311,14 +322,54 @@ pub struct AdminTransferProposal {
     pub executable_at: u64,
 }
 
+/// An address rotation that has been requested but not yet executed (Issue #234).
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+pub struct PendingRotation {
+    /// The address the registration will move to once executed.
+    pub new_address: Address,
+    /// Ledger timestamp the rotation was requested.
+    pub requested_at: u64,
+    /// Ledger timestamp from which the rotation may be executed.
+    pub executable_at: u64,
+}
+
+/// Existence proof for a single record, shaped for light clients (Issue #230).
+///
+/// Lets an indexer or the GitHub action confirm one registration without
+/// paging the whole registry, and carries what it needs to fetch or revive the
+/// underlying ledger entry itself.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+pub struct RecordProof {
+    /// Whether a record is currently stored for this username.
+    pub exists: bool,
+    /// The record's verified flag. Always `false` when `exists` is `false`.
+    pub verified: bool,
+    /// Ledger timestamp the record was last written, or 0 when absent.
+    pub registered_at: u32,
+    /// Ledger sequence this proof was taken at.
+    pub as_of_ledger: u32,
+    /// Remaining-TTL threshold below which the entry is bumped, in ledgers.
+    pub ttl_threshold_ledgers: u32,
+    /// How far ahead of the current ledger a bump extends the entry.
+    pub ttl_bump_ledgers: u32,
+    /// Symbol half of the record's storage key. The full key is
+    /// `(key_prefix, github_username)` — see `docs/STORAGE_RENT.md`.
+    pub key_prefix: Symbol,
+}
+
 /// Aggregate registry statistics returned by `get_stats`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[soroban_sdk::contracttype]
 pub struct Stats {
     /// Total number of registered contributors.
     pub total: u32,
-    /// Number of contributors who have been verified.
+    /// Number of contributors **currently** verified. Decreases on revoke.
     pub verified: u32,
+    /// Number of verifications ever granted, including any later revoked
+    /// (Issue #229). Monotonic: this never decreases.
+    pub ever_verified: u32,
 }
 
 /// A single page of registry records returned by paginated export functions.
@@ -485,6 +536,41 @@ pub fn has_record(env: &Env, github_username: &String) -> bool {
     get_record(env, github_username).is_some()
 }
 
+/// Build the light-client existence proof for `github_username` (Issue #230).
+///
+/// Deliberately reads through `get_record`, so an existing record gets the same
+/// TTL bump any other read would give it and a proof cannot be used to sidestep
+/// keeping a live record alive.
+///
+/// The exact `liveUntilLedgerSeq` is not returned: a contract cannot read its
+/// own entry's TTL on-chain. The key and the TTL policy are returned instead so
+/// a client can read `liveUntilLedgerSeq` straight from the ledger entry — see
+/// `docs/STORAGE_RENT.md`.
+pub fn build_record_proof(env: &Env, github_username: &String) -> RecordProof {
+    let record = get_record(env, github_username);
+    let as_of_ledger = env.ledger().sequence();
+    match record {
+        Some(record) => RecordProof {
+            exists: true,
+            verified: record.verified,
+            registered_at: record.registered_at,
+            as_of_ledger,
+            ttl_threshold_ledgers: TTL_THRESHOLD,
+            ttl_bump_ledgers: TTL_BUMP,
+            key_prefix: REG_KEY,
+        },
+        None => RecordProof {
+            exists: false,
+            verified: false,
+            registered_at: 0,
+            as_of_ledger,
+            ttl_threshold_ledgers: TTL_THRESHOLD,
+            ttl_bump_ledgers: TTL_BUMP,
+            key_prefix: REG_KEY,
+        },
+    }
+}
+
 // ── Counters ─────────────────────────────────────────────────────────────────
 
 pub fn get_count(env: &Env) -> u32 {
@@ -501,6 +587,30 @@ pub fn get_verified_count(env: &Env) -> u32 {
 
 pub fn set_verified_count(env: &Env, count: u32) {
     env.storage().instance().set(&VCOUNT_KEY, &count);
+}
+
+/// Verifications ever granted, including those later revoked (Issue #229).
+///
+/// Instances deployed before this counter existed have no stored value. Rather
+/// than reporting zero — which would claim nobody was ever verified while
+/// `get_verified_count` says otherwise — they fall back to the live verified
+/// count, the tightest lower bound the contract can still prove.
+pub fn get_ever_verified_count(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&EVER_VCOUNT_KEY)
+        .unwrap_or_else(|| get_verified_count(env))
+}
+
+pub fn set_ever_verified_count(env: &Env, count: u32) {
+    env.storage().instance().set(&EVER_VCOUNT_KEY, &count);
+}
+
+/// Record one more verification in the monotonic counter. Saturates rather than
+/// wrapping, so the figure can only ever stall, never run backwards.
+pub fn bump_ever_verified_count(env: &Env) {
+    let next = get_ever_verified_count(env).saturating_add(1);
+    set_ever_verified_count(env, next);
 }
 
 // ── Flat username index ──────────────────────────────────────────────────────
@@ -708,12 +818,20 @@ pub fn get_registered_paginated_internal(
 // All stats reads (get_stats, and any future indexer/dashboard aggregate
 // endpoints) should route through it rather than building `Stats { .. }`
 // literals directly, so count/verified-count semantics stay in one place.
-pub fn build_stats(total: u32, verified: u32) -> Stats {
-    Stats { total, verified }
+pub fn build_stats(total: u32, verified: u32, ever_verified: u32) -> Stats {
+    Stats {
+        total,
+        verified,
+        ever_verified,
+    }
 }
 
 pub fn get_stats(env: &Env) -> Stats {
-    build_stats(get_count(env), get_verified_count(env))
+    build_stats(
+        get_count(env),
+        get_verified_count(env),
+        get_ever_verified_count(env),
+    )
 }
 
 // ── Cooldown / upgrade timelock ───────────────────────────────────────────────
@@ -1278,50 +1396,167 @@ pub fn run_migration_steps(
     applied
 }
 
+// ── Pause reason ─────────────────────────────────────────────────────────────
 
-// ── Network tagging (Issue #231) ─────────────────────────────────────────────
-
-/// Network id recorded at `initialize`, or `None` for an instance initialized
-/// before network tagging existed.
-#[must_use]
-pub fn get_network_id(env: &Env) -> Option<BytesN<32>> {
-    env.storage().instance().get(&NETWORK_KEY)
+/// Record why the contract was last paused or unpaused.
+pub fn set_pause_reason(env: &Env, reason: PauseReason) {
+    env.storage()
+        .instance()
+        .set(&PAUSE_RSN_KEY, &(reason as u32));
 }
 
-/// Records the live network id. Called once from `initialize`.
-pub fn set_network_id(env: &Env, network_id: &BytesN<32>) {
-    env.storage().instance().set(&NETWORK_KEY, network_id);
+/// The last recorded pause reason, or `None` if the contract has never been
+/// paused on this instance.
+pub fn get_pause_reason(env: &Env) -> Option<PauseReason> {
+    env.storage()
+        .instance()
+        .get::<Symbol, u32>(&PAUSE_RSN_KEY)
+        .and_then(PauseReason::from_code)
 }
 
-/// Fails when the recorded network does not match the one being executed on
-/// (Issue #231).
-///
-/// A Stellar G-address is valid on every network, so nothing about a stored
-/// `ContributorRecord` reveals which network its registration was meant for.
-/// If an instance's state is restored onto a different network — a mainnet
-/// snapshot stood up on Futurenet for testing, say — every record in it silently
-/// becomes a claim about the wrong ledger, and a consumer computing payouts has
-/// no way to notice.
-///
-/// # Migration
-///
-/// An instance with **no** recorded network predates this check and is allowed
-/// through: refusing it would brick every contract deployed before the tag
-/// existed, and the constraint on this change is not to break existing records.
-/// Such an instance can be tagged in place with `adopt_network_tag`. Once a tag
-/// is present it is compared on every mutation and never rewritten, so a
-/// mismatch fails closed rather than being "fixed" by overwriting the tag with
-/// whatever network the caller happens to be on.
+// ── Reserved usernames (Issue #213) ──────────────────────────────────────────
+
+/// The reserved username list, empty when nothing has been reserved.
+pub fn get_reserved_list(env: &Env) -> Vec<String> {
+    env.storage()
+        .instance()
+        .get(&RESERVED_KEY)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Case-insensitive membership test against the reserved list.
+pub fn is_reserved(env: &Env, username: &String) -> bool {
+    let reserved = get_reserved_list(env);
+    for entry in reserved.iter() {
+        if crate::utils::eq_ignore_ascii_case(&entry, username) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Add `username` to the reserved list.
 ///
 /// # Errors
 ///
-/// [`ContractError::NetworkMismatch`] when a recorded tag disagrees with
-/// `env.ledger().network_id()`.
-pub fn require_matching_network(env: &Env) -> Result<(), ContractError> {
-    match get_network_id(env) {
-        Some(recorded) if recorded != env.ledger().network_id() => {
-            Err(ContractError::NetworkMismatch)
-        }
-        _ => Ok(()),
+/// - [`ContractError::AlreadyReserved`] if it is already on the list.
+/// - [`ContractError::ReservedListFull`] if the list already holds
+///   `MAX_RESERVED` entries.
+pub fn add_to_reserved(env: &Env, username: &String) -> Result<(), ContractError> {
+    if is_reserved(env, username) {
+        return Err(ContractError::AlreadyReserved);
     }
+    let mut reserved = get_reserved_list(env);
+    if reserved.len() >= MAX_RESERVED {
+        return Err(ContractError::ReservedListFull);
+    }
+    reserved.push_back(username.clone());
+    env.storage().instance().set(&RESERVED_KEY, &reserved);
+    Ok(())
+}
+
+/// Remove `username` from the reserved list.
+///
+/// # Errors
+///
+/// - [`ContractError::NotReserved`] if it is not currently reserved.
+pub fn remove_from_reserved(env: &Env, username: &String) -> Result<(), ContractError> {
+    let reserved = get_reserved_list(env);
+    let mut remaining: Vec<String> = Vec::new(env);
+    let mut found = false;
+    for entry in reserved.iter() {
+        if crate::utils::eq_ignore_ascii_case(&entry, username) {
+            found = true;
+        } else {
+            remaining.push_back(entry);
+        }
+    }
+    if !found {
+        return Err(ContractError::NotReserved);
+    }
+    env.storage().instance().set(&RESERVED_KEY, &remaining);
+    Ok(())
+}
+
+// ── Index compaction (Issue #209) ────────────────────────────────────────────
+
+/// Rebuild the chunked index densely from the flat index.
+///
+/// Removals leave holes in the chunk pages; this re-partitions the flat index
+/// into contiguous full chunks plus one partial tail and drops the persistent
+/// entries that are no longer backed by any username. Returns the number of
+/// chunks written.
+pub fn compact_chunked_index(env: &Env) -> u32 {
+    let index = get_index(env);
+    let previous_chunks = get_chunk_count(env);
+
+    let mut chunk_idx: u32 = 0;
+    let mut current: Vec<String> = Vec::new(env);
+    for username in index.iter() {
+        current.push_back(username);
+        if current.len() >= CHUNK_SIZE {
+            set_chunk(env, chunk_idx, &current);
+            chunk_idx += 1;
+            current = Vec::new(env);
+        }
+    }
+
+    // A partial tail still needs a page of its own.
+    if !current.is_empty() {
+        set_chunk(env, chunk_idx, &current);
+        chunk_idx += 1;
+    }
+
+    // Reclaim pages the compacted index no longer reaches.
+    let mut stale = chunk_idx;
+    while stale < previous_chunks {
+        env.storage().persistent().remove(&(CHUNK_KEY, stale));
+        stale += 1;
+    }
+
+    set_chunk_count(env, chunk_idx);
+    chunk_idx
+}
+
+// ── Address rotation (Issue #234) ────────────────────────────────────────────
+
+/// Seconds a requested rotation must wait before it can execute. 0 disables the
+/// delay, in which case `register` keeps its direct dual-auth address change.
+pub fn get_rotation_delay(env: &Env) -> u64 {
+    env.storage().instance().get(&ROT_DELAY_KEY).unwrap_or(0)
+}
+
+pub fn set_rotation_delay(env: &Env, seconds: u64) {
+    env.storage().instance().set(&ROT_DELAY_KEY, &seconds);
+}
+
+pub fn get_pending_rotation(env: &Env, github_username: &String) -> Option<PendingRotation> {
+    let key = (PENDING_ROT_KEY, github_username.clone());
+    let pending: Option<PendingRotation> = env.storage().persistent().get(&key);
+    if pending.is_some() {
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+    }
+    pending
+}
+
+pub fn set_pending_rotation(env: &Env, github_username: &String, rotation: &PendingRotation) {
+    let key = (PENDING_ROT_KEY, github_username.clone());
+    env.storage().persistent().set(&key, rotation);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+}
+
+pub fn remove_pending_rotation(env: &Env, github_username: &String) {
+    env.storage()
+        .persistent()
+        .remove(&(PENDING_ROT_KEY, github_username.clone()));
+}
+
+pub fn has_pending_rotation(env: &Env, github_username: &String) -> bool {
+    env.storage()
+        .persistent()
+        .has(&(PENDING_ROT_KEY, github_username.clone()))
 }

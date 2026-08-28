@@ -222,6 +222,44 @@ stellar contract invoke \
 
 ---
 
+## Reading a record's TTL from outside (Issue #230)
+
+`get_record_proof(github_username)` returns a `RecordProof`:
+
+| Field | Meaning |
+|---|---|
+| `exists` | Whether a record is stored for this username |
+| `verified` | The record's verified flag; `false` when `exists` is `false` |
+| `registered_at` | Ledger timestamp the record was last written |
+| `as_of_ledger` | Ledger sequence the proof was taken at |
+| `ttl_threshold_ledgers` | Remaining TTL below which the entry is bumped (`TTL_THRESHOLD`) |
+| `ttl_bump_ledgers` | How far ahead of the current ledger a bump extends it (`TTL_BUMP`) |
+| `key_prefix` | Symbol half of the storage key |
+
+It deliberately does **not** return `liveUntilLedgerSeq`. A contract cannot read
+its own entry's TTL on-chain — the host exposes `get_ttl` only to test
+utilities — so any number the contract reported would be inferred rather than
+observed, and would drift from the ledger the moment an extension landed.
+
+Read the real value from the ledger entry instead. The record's key is
+`(key_prefix, github_username)`, i.e. the `reg` symbol paired with the
+username, in **persistent** storage:
+
+```bash
+stellar contract read --id $ID --network testnet --durability persistent \
+  --key '["reg","octocat"]'
+```
+
+Over RPC, `getLedgerEntries` returns `liveUntilLedgerSeq` for the same key. A
+light client can then compare it against `as_of_ledger` from the proof and use
+`ttl_threshold_ledgers` / `ttl_bump_ledgers` to predict when the next read will
+bump the entry.
+
+If the entry has been archived, the same key is what
+[`extend_registry_ttl`](ABI.md) needs to revive it.
+
+---
+
 ## Related Docs
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — Storage layout, instance vs. persistent keys

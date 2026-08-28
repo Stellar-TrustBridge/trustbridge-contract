@@ -27,13 +27,16 @@ pub use error::ContractError;
 pub use events::{RegisteredEvent, RemovedEvent, VerifiedEvent};
 pub use storage::{ContributorRecord, EntityType, Stats};
 pub use events::{
-    ChallengeCancelledEvent, ChallengeCompletedEvent, ChallengeStartedEvent, PausedEvent,
+    AttestationClearedEvent, ChallengeCancelledEvent, ChallengeCompletedEvent, RenamedEvent,
+    RotationCancelledEvent, RotationExecutedEvent, RotationRequestedEvent,
+    ChallengeStartedEvent, EmergencyClearedEvent, EmergencyPausedEvent, PausedEvent,
     RegisteredEvent, RemovedEvent, RoleGrantedEvent, RoleRevokedEvent, UnpausedEvent,
-    UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
+    UpgradeAttestedEvent, UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
 };
 pub use storage::{
-    ChallengeRecord, ContributorRecord, ExportPage, HealthSnapshot, Role, RoleHolder, Stats,
-    VerificationConfig, WasmAttestation, WasmProvenance, MAX_ROLE_PAGE_LIMIT,
+    ChallengeRecord, ContributorRecord, ExportPage, HealthSnapshot, PauseReason, PendingRotation,
+    RecordProof, Role, Stats,
+    VerificationConfig, WasmAttestation, WasmProvenance,
 };
 pub use version::Version;
 
@@ -47,16 +50,22 @@ use crate::storage::{
     add_to_index, clear_pending_reverify, get_admin, get_audit_logs, get_audit_stats,
     get_challenge, get_cooldown as storage_get_cooldown, get_count, get_index, get_last_upgrade,
     get_record, get_registered_paginated_internal, get_role as storage_get_role,
-    get_network_id as storage_get_network_id,
-    get_role_holder_count as storage_get_role_holder_count, get_role_holders_internal,
+    bump_ever_verified_count, get_emergency_pause, get_emergency_pause_ts,
+    get_ever_verified_count as storage_get_ever_verified_count, get_guardian as storage_get_guardian,
     get_stats as read_stats, get_verification_config, get_verified_count as storage_get_verified_count,
+    is_attestation_required, is_guardian, remove_guardian as storage_remove_guardian,
+    set_emergency_pause, set_emergency_pause_ts, set_guardian_address,
     get_version as storage_get_version, get_wasm_attestation, get_wasm_provenance, has_challenge,
-    has_record, is_admin_caller, is_in_cooldown, is_paused as storage_is_paused, push_audit_entry,
+    build_record_proof, get_pending_rotation as storage_get_pending_rotation,
+    get_rotation_delay as storage_get_rotation_delay, has_pending_rotation, has_record,
+    is_admin_caller, is_in_cooldown, is_paused as storage_is_paused, push_audit_entry,
+    remove_pending_rotation, set_pending_rotation, set_rotation_delay as storage_set_rotation_delay,
     remove_challenge, remove_from_index, remove_record, remove_role as storage_remove_role,
     remove_wasm_attestation, require_initialized, require_not_paused,
     run_migration_steps, set_challenge, set_cooldown as storage_set_cooldown, set_count,
     set_last_action, set_last_upgrade, set_paused as set_paused_state, set_pending_reverify,
-    set_record, set_role as storage_set_role, set_verified_count, set_version,
+    set_ever_verified_count, set_record, set_role as storage_set_role, set_verified_count,
+    set_version,
     set_wasm_attestation, set_wasm_provenance, DEFAULT_CHALLENGE_DELAY_SECS,
     ADMIN_KEY, MAX_FALLBACK_ADDRESSES,
 };
@@ -147,6 +156,7 @@ impl TrustBridgeContract {
         set_network_id(&env, &env.ledger().network_id());
         set_count(&env, 0);
         set_verified_count(&env, 0);
+        set_ever_verified_count(&env, 0);
         set_paused_state(&env, false);
         storage_set_cooldown(&env, 0);
         set_version(&env, (1, 0, 0));
@@ -1243,6 +1253,12 @@ impl TrustBridgeContract {
             return Err(ContractError::ZeroAddress);
         }
 
+        // Reserved names are held back for their real owners; the check is
+        // case-insensitive so "Stellar" cannot slip past a reserved "stellar".
+        if crate::storage::is_reserved(&env, &github_username) {
+            return Err(ContractError::UsernameReserved);
+        }
+
         // Block re-registration while a challenge is pending (Issue #214).
         // The registrant's window to prove ownership off-chain must not be
         // bypassed by simply re-registering to a new address.
@@ -1277,6 +1293,16 @@ impl TrustBridgeContract {
 
         if is_in_cooldown(&env, &github_username) {
             return Err(ContractError::CooldownActive);
+        }
+
+        // With a rotation delay configured, an address change must go through
+        // request/execute so the delay window and its events actually apply.
+        // A direct swap here would be exactly the instant takeover the delay
+        // exists to prevent (Issue #234).
+        if let Some(ref old) = existing {
+            if old.stellar_address != stellar_address && storage_get_rotation_delay(&env) > 0 {
+                return Err(ContractError::RotationRequired);
+            }
         }
 
         let record = ContributorRecord {
@@ -1515,6 +1541,28 @@ impl TrustBridgeContract {
         has_record(&env, &github_username)
     }
 
+    /// Returns a light-client existence proof for `github_username` (Issue #230).
+    ///
+    /// [`Self::has_record`] answers only yes/no. This carries the verified bit,
+    /// when the record was written, the ledger the answer was taken at, and the
+    /// storage key plus TTL policy needed to read or revive the ledger entry —
+    /// enough for an indexer or the GitHub action to confirm one registration
+    /// without paging the whole registry.
+    ///
+    /// A missing username is not an error: the proof comes back with
+    /// `exists: false`, which is itself the answer a light client needs.
+    ///
+    /// The exact `liveUntilLedgerSeq` is **not** included, because a contract
+    /// cannot read its own entry's TTL on-chain. Read it from the ledger entry
+    /// at `(key_prefix, github_username)`; see
+    /// [`docs/STORAGE_RENT.md`](../docs/STORAGE_RENT.md).
+    ///
+    /// Read-only; no auth required; works while paused.
+    #[must_use]
+    pub fn get_record_proof(env: Env, github_username: String) -> RecordProof {
+        build_record_proof(&env, &github_username)
+    }
+
     /// Removes the registration for `github_username`. Callable by the registrant or the admin.
     ///
     /// `caller` must sign the transaction and must equal either the contract admin or the
@@ -1723,26 +1771,32 @@ impl TrustBridgeContract {
         let admin = get_admin(&env)?;
         admin.require_auth();
 
+        if !PauseReason::is_valid(reason_code) {
+            return Err(ContractError::InvalidPauseReason);
+        }
+        let reason = PauseReason::from_code(reason_code).unwrap_or(PauseReason::Other);
+
         // Idempotent: skip event emission if already in the requested state.
         if storage_is_paused(&env) == paused {
             return Ok(());
         }
 
         set_paused_state(&env, paused);
+        crate::storage::set_pause_reason(&env, reason);
         let timestamp = env.ledger().timestamp();
 
         if paused {
             PausedEvent {
                 admin: admin.clone(),
                 timestamp,
-                domain: event_domain(&env),
+                reason_code,
             }
             .publish(&env);
         } else {
             UnpausedEvent {
                 admin: admin.clone(),
                 timestamp,
-                domain: event_domain(&env),
+                reason_code,
             }
             .publish(&env);
         }
@@ -1792,6 +1846,7 @@ impl TrustBridgeContract {
         record.verified = true;
         set_record(&env, &github_username, &record);
         set_verified_count(&env, storage_get_verified_count(&env).saturating_add(1));
+        bump_ever_verified_count(&env);
 
         // Clear pending reverify flag upon successful verification
         clear_pending_reverify(&env, &github_username);
@@ -1891,6 +1946,8 @@ impl TrustBridgeContract {
 
             record.verified = true;
             set_record(&env, &username, &record);
+            set_verified_count(&env, storage_get_verified_count(&env).saturating_add(1));
+            bump_ever_verified_count(&env);
             clear_pending_reverify(&env, &username);
 
             VerifiedEvent {
@@ -2002,6 +2059,426 @@ impl TrustBridgeContract {
     #[must_use]
     pub fn get_verified_count(env: Env) -> u32 {
         storage_get_verified_count(&env)
+    }
+
+    /// Moves a registration from `old_username` to `new_username` (Issue #233).
+    ///
+    /// GitHub users rename. Without this they had to `remove` and re-register,
+    /// which drops the record entirely and leaves the old name free for anyone
+    /// to take in between.
+    ///
+    /// The move is atomic: the new record is written and the old one removed in
+    /// the same invocation, so there is no ledger state where the registration
+    /// exists under both names or neither. The total registration count is
+    /// unchanged — this is a move, not a new registration.
+    ///
+    /// # Verified state
+    ///
+    /// **The verified flag does not travel.** Verification attests that a
+    /// particular GitHub identity controls the address; the contract cannot
+    /// confirm that the new handle is the same GitHub account, and carrying the
+    /// badge across would let a verified throwaway rename onto a valuable
+    /// handle and arrive pre-trusted. The record is marked pending re-verify
+    /// instead, and `get_ever_verified_count` still remembers the original
+    /// verification. See `docs/ABI.md`.
+    ///
+    /// Emits [`RenamedEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from `caller`, which must be the registered address or the
+    /// contract admin — the same rule `remove` applies.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotRegistered`] if `old_username` is not registered.
+    /// - [`ContractError::NotAuthorized`] if `caller` is neither holder nor admin.
+    /// - [`ContractError::InvalidUsername`] if `new_username` is not a valid
+    ///   GitHub username, or is the same as `old_username`.
+    /// - [`ContractError::UsernameReserved`] if `new_username` is reserved.
+    /// - [`ContractError::UsernameTaken`] if `new_username` is already registered.
+    /// - [`ContractError::CooldownActive`] if the username is in cooldown.
+    /// - [`ContractError::ChallengeActive`] if a challenge is open on either name.
+    /// - [`ContractError::RotationPending`] if an address rotation is pending.
+    pub fn rename(
+        env: Env,
+        caller: Address,
+        old_username: String,
+        new_username: String,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        let record = get_record(&env, &old_username).ok_or(ContractError::NotRegistered)?;
+        let admin = get_admin(&env)?;
+
+        caller.require_auth();
+        Self::require_remove_auth(&caller, &admin, &record.stellar_address)?;
+
+        if !is_valid_github_username(&new_username) {
+            return Err(ContractError::InvalidUsername);
+        }
+
+        // A rename to the identical string is a no-op dressed as a state
+        // change; reject it rather than emit an event for nothing. A
+        // case-only rename is a real move and stays allowed, since the storage
+        // key is the exact string.
+        if new_username == old_username {
+            return Err(ContractError::InvalidUsername);
+        }
+
+        if crate::storage::is_reserved(&env, &new_username) {
+            return Err(ContractError::UsernameReserved);
+        }
+
+        if has_record(&env, &new_username) {
+            return Err(ContractError::UsernameTaken);
+        }
+
+        // An open challenge on either name is an unresolved ownership question.
+        if has_challenge(&env, &old_username) || has_challenge(&env, &new_username) {
+            return Err(ContractError::ChallengeActive);
+        }
+
+        // A queued address rotation is scoped to the old key; let it settle or
+        // be cancelled before the name moves out from under it.
+        if has_pending_rotation(&env, &old_username) {
+            return Err(ContractError::RotationPending);
+        }
+
+        if is_in_cooldown(&env, &old_username) {
+            return Err(ContractError::CooldownActive);
+        }
+
+        let timestamp = env.ledger().timestamp();
+        let verification_cleared = record.verified;
+
+        // Verification attested the old handle; it does not follow the rename.
+        if verification_cleared {
+            set_verified_count(&env, storage_get_verified_count(&env).saturating_sub(1));
+        }
+
+        let moved = ContributorRecord {
+            stellar_address: record.stellar_address.clone(),
+            registered_at: timestamp as u32,
+            verified: false,
+        };
+
+        // Write the new key and drop the old one in the same invocation: the
+        // registration is never visible under both names, nor missing from both.
+        set_record(&env, &new_username, &moved);
+        add_to_index(&env, &new_username);
+        remove_record(&env, &old_username);
+        remove_from_index(&env, &old_username);
+
+        clear_pending_reverify(&env, &old_username);
+        if verification_cleared {
+            set_pending_reverify(&env, &new_username, true);
+        }
+
+        set_last_action(&env, &new_username, timestamp);
+
+        RenamedEvent {
+            old_username: old_username.clone(),
+            new_username: new_username.clone(),
+            stellar_address: record.stellar_address.clone(),
+            verification_cleared,
+            timestamp,
+        }
+        .publish(&env);
+
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(
+                AuditEventType::UserRegistered,
+                timestamp,
+                Some(record.stellar_address),
+            ),
+        );
+
+        Ok(())
+    }
+
+    // ── Address rotation with a delay window (Issue #234) ────────────────────
+
+    /// Sets how long a requested address rotation must wait before it can be
+    /// executed, in seconds. Admin-only. 0 disables the delay.
+    ///
+    /// While the delay is 0, `register` keeps its direct dual-auth address
+    /// change. Once it is set, an address change must go through
+    /// [`Self::request_address_rotation`] and
+    /// [`Self::execute_address_rotation`], and `register` rejects a direct
+    /// change with [`ContractError::RotationRequired`].
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
+    pub fn set_rotation_delay(env: Env, seconds: u64) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+        storage_set_rotation_delay(&env, seconds);
+        Ok(())
+    }
+
+    /// Returns the configured rotation delay in seconds. 0 means disabled.
+    ///
+    /// Read-only; no auth required.
+    #[must_use]
+    pub fn get_rotation_delay(env: Env) -> u64 {
+        storage_get_rotation_delay(&env)
+    }
+
+    /// Returns the pending address rotation for `github_username`, if any.
+    ///
+    /// Read-only; no auth required; works while paused, so a holder can always
+    /// see that a rotation is queued against their name.
+    #[must_use]
+    pub fn get_pending_rotation(env: Env, github_username: String) -> Option<PendingRotation> {
+        storage_get_pending_rotation(&env, &github_username)
+    }
+
+    /// Requests moving `github_username` to `new_address` after the delay.
+    ///
+    /// Both the current address and the new one must sign, exactly as a direct
+    /// re-registration required. The difference is that nothing moves yet: the
+    /// request is recorded, [`RotationRequestedEvent`] is emitted so indexers
+    /// and the holder can see it immediately, and the rotation only becomes
+    /// executable once the delay has elapsed. That window is what turns a
+    /// phished GitHub-plus-wallet session from an instant payout redirect into
+    /// something the real holder can notice and cancel.
+    ///
+    /// Reads keep returning the **current** address for the whole window.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from both the currently registered address and `new_address`.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotRegistered`] if the username is not registered.
+    /// - [`ContractError::ZeroAddress`] if `new_address` is the burn address.
+    /// - [`ContractError::RotationPending`] if a rotation is already pending.
+    /// - [`ContractError::ChallengeActive`] if a challenge is open on the username.
+    pub fn request_address_rotation(
+        env: Env,
+        github_username: String,
+        new_address: Address,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        let record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
+
+        if is_zero_address(&env, &new_address) {
+            return Err(ContractError::ZeroAddress);
+        }
+
+        // A challenge is an open question about who owns this name; queuing a
+        // rotation underneath it would let the answer change mid-flight.
+        if has_challenge(&env, &github_username) {
+            return Err(ContractError::ChallengeActive);
+        }
+
+        if has_pending_rotation(&env, &github_username) {
+            return Err(ContractError::RotationPending);
+        }
+
+        // Same dual-auth requirement as a direct re-registration.
+        record.stellar_address.require_auth();
+        if new_address != record.stellar_address {
+            new_address.require_auth();
+        }
+
+        let timestamp = env.ledger().timestamp();
+        let executable_at = timestamp.saturating_add(storage_get_rotation_delay(&env));
+
+        set_pending_rotation(
+            &env,
+            &github_username,
+            &PendingRotation {
+                new_address: new_address.clone(),
+                requested_at: timestamp,
+                executable_at,
+            },
+        );
+
+        RotationRequestedEvent {
+            github_username: github_username.clone(),
+            current_address: record.stellar_address.clone(),
+            new_address,
+            executable_at,
+            timestamp,
+        }
+        .publish(&env);
+
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(
+                AuditEventType::UserRegistered,
+                timestamp,
+                Some(record.stellar_address),
+            ),
+        );
+
+        Ok(())
+    }
+
+    /// Executes a pending rotation once its delay has elapsed.
+    ///
+    /// Applies the same verified-state policy a direct address change had: the
+    /// verified flag is cleared and the username is marked pending re-verify,
+    /// because the address that was vouched for is no longer the one on file.
+    ///
+    /// Emits [`RotationExecutedEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the incoming address.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotRegistered`] if the username is not registered.
+    /// - [`ContractError::NoRotationPending`] if nothing is pending.
+    /// - [`ContractError::RotationNotReady`] if the delay has not elapsed.
+    pub fn execute_address_rotation(
+        env: Env,
+        github_username: String,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
+        let pending = storage_get_pending_rotation(&env, &github_username)
+            .ok_or(ContractError::NoRotationPending)?;
+
+        let timestamp = env.ledger().timestamp();
+        if timestamp < pending.executable_at {
+            return Err(ContractError::RotationNotReady);
+        }
+
+        pending.new_address.require_auth();
+
+        let old_address = record.stellar_address.clone();
+
+        // The verification vouched for the old address, so it does not travel.
+        if record.verified {
+            set_verified_count(&env, storage_get_verified_count(&env).saturating_sub(1));
+            set_pending_reverify(&env, &github_username, true);
+        }
+
+        record.stellar_address = pending.new_address.clone();
+        record.registered_at = timestamp as u32;
+        record.verified = false;
+
+        set_record(&env, &github_username, &record);
+        set_last_action(&env, &github_username, timestamp);
+        remove_pending_rotation(&env, &github_username);
+
+        RotationExecutedEvent {
+            github_username: github_username.clone(),
+            old_address,
+            new_address: pending.new_address.clone(),
+            timestamp,
+        }
+        .publish(&env);
+
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(
+                AuditEventType::UserRegistered,
+                timestamp,
+                Some(pending.new_address),
+            ),
+        );
+
+        Ok(())
+    }
+
+    /// Cancels a pending rotation. Callable by the current holder or the admin.
+    ///
+    /// This is the half of the delay window that matters: it gives the real
+    /// holder a way to stop a rotation they did not intend.
+    ///
+    /// Emits [`RotationCancelledEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from `caller`, which must be the currently registered
+    /// address or the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotRegistered`] if the username is not registered.
+    /// - [`ContractError::NoRotationPending`] if nothing is pending.
+    /// - [`ContractError::NotAuthorized`] if `caller` is neither holder nor admin.
+    pub fn cancel_address_rotation(
+        env: Env,
+        caller: Address,
+        github_username: String,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+
+        let record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
+        if !has_pending_rotation(&env, &github_username) {
+            return Err(ContractError::NoRotationPending);
+        }
+
+        caller.require_auth();
+        let admin = get_admin(&env)?;
+        if caller != record.stellar_address && caller != admin {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        remove_pending_rotation(&env, &github_username);
+
+        let timestamp = env.ledger().timestamp();
+        RotationCancelledEvent {
+            github_username: github_username.clone(),
+            cancelled_by: caller.clone(),
+            timestamp,
+        }
+        .publish(&env);
+
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(AuditEventType::UserRegistered, timestamp, Some(caller)),
+        );
+
+        Ok(())
+    }
+
+    /// Returns the reason recorded by the most recent `pause` / `unpause`.
+    ///
+    /// Defaults to [`PauseReason::Other`] on an instance that has never been
+    /// paused, so the read is always answerable.
+    ///
+    /// Read-only; no auth required; works while paused.
+    #[must_use]
+    pub fn get_pause_reason(env: Env) -> PauseReason {
+        crate::storage::get_pause_reason(&env).unwrap_or(PauseReason::Other)
+    }
+
+    /// Returns how many verifications have ever been granted, including any
+    /// since revoked (Issue #229).
+    ///
+    /// Unlike [`Self::get_verified_count`], which reports who is verified
+    /// *right now* and drops when a verification is revoked, this figure only
+    /// ever grows. Reports asking "how many contributors did we ever verify"
+    /// should read this one.
+    ///
+    /// Read-only; no auth required; works while paused.
+    #[must_use]
+    pub fn get_ever_verified_count(env: Env) -> u32 {
+        storage_get_ever_verified_count(&env)
     }
 
     /// Returns aggregate registry statistics: total and verified registration counts.
@@ -2402,6 +2879,8 @@ extern crate std;
 #[cfg(test)]
 mod test {
     use super::*;
+    use alloc::format;
+    use alloc::string::ToString;
     use soroban_sdk::{
         testutils::{Address as _, Events as _, Ledger as _},
         Address, Env, Event as _, String, TryFromVal,
@@ -3292,6 +3771,829 @@ mod test {
         });
     }
 
+    // ── Issue #233: username rename ──────────────────────────────────────────
+
+    fn register_as(env: &Env, contract_id: &Address, name: &str, addr: &Address) {
+        env.mock_all_auths();
+        env.as_contract(contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(env, name), addr.clone()).unwrap();
+        });
+    }
+
+    #[test]
+    fn test_rename_moves_the_registration_atomically() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::rename(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+                username(&env, "octocat2"),
+            )
+            .unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            assert!(
+                !TrustBridgeContract::has_record(env.clone(), username(&env, "octocat")),
+                "old name must be gone"
+            );
+            assert_eq!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat2"))
+                    .unwrap()
+                    .stellar_address,
+                user,
+                "new name must hold the same address"
+            );
+            assert_eq!(
+                TrustBridgeContract::get_stats(env.clone()).total,
+                1,
+                "a rename is a move, not a new registration"
+            );
+        });
+    }
+
+    #[test]
+    fn test_rename_updates_the_index() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::rename(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+                username(&env, "octocat2"),
+            )
+            .unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 50).unwrap();
+            let names: alloc::vec::Vec<_> = page
+                .records
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect();
+            assert!(
+                names.contains(&username(&env, "octocat2")),
+                "index must list the new name"
+            );
+            assert!(
+                !names.contains(&username(&env, "octocat")),
+                "index must not still list the old name"
+            );
+        });
+    }
+
+    /// Verification attested the old handle, so it does not follow the rename.
+    #[test]
+    fn test_rename_clears_verification_and_flags_reverify() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::rename(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+                username(&env, "octocat2"),
+            )
+            .unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            assert!(
+                !TrustBridgeContract::get_address(env.clone(), username(&env, "octocat2"))
+                    .unwrap()
+                    .verified,
+                "the badge must not travel to the new handle"
+            );
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0);
+            assert_eq!(
+                TrustBridgeContract::get_ever_verified_count(env.clone()),
+                1,
+                "history still remembers the original verification"
+            );
+        });
+    }
+
+    #[test]
+    fn test_rename_rejects_a_taken_username() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+        register_as(&env, &contract_id, "hubber", &other);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::rename(
+                    env.clone(),
+                    user.clone(),
+                    username(&env, "octocat"),
+                    username(&env, "hubber"),
+                ),
+                Err(ContractError::UsernameTaken)
+            );
+        });
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "hubber"))
+                    .unwrap()
+                    .stellar_address,
+                other,
+                "the existing registration must be untouched"
+            );
+        });
+    }
+
+    #[test]
+    fn test_rename_rejects_a_reserved_username() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::add_reserved(env.clone(), username(&env, "stellar")).unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::rename(
+                    env.clone(),
+                    user.clone(),
+                    username(&env, "octocat"),
+                    username(&env, "stellar"),
+                ),
+                Err(ContractError::UsernameReserved)
+            );
+        });
+    }
+
+    #[test]
+    fn test_rename_rejects_an_unregistered_username() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::rename(
+                    env.clone(),
+                    user.clone(),
+                    username(&env, "ghost"),
+                    username(&env, "ghost2"),
+                ),
+                Err(ContractError::NotRegistered)
+            );
+        });
+    }
+
+    #[test]
+    fn test_rename_rejects_renaming_to_the_same_name() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::rename(
+                    env.clone(),
+                    user.clone(),
+                    username(&env, "octocat"),
+                    username(&env, "octocat"),
+                ),
+                Err(ContractError::InvalidUsername)
+            );
+        });
+    }
+
+    #[test]
+    fn test_rename_rejects_a_non_holder() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::rename(
+                    env.clone(),
+                    other.clone(),
+                    username(&env, "octocat"),
+                    username(&env, "octocat2"),
+                ),
+                Err(ContractError::NotAuthorized)
+            );
+        });
+    }
+
+    /// A case-only change is a real move, since the storage key is the exact string.
+    #[test]
+    fn test_rename_allows_a_case_only_change() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::rename(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+                username(&env, "OctoCat"),
+            )
+            .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            assert!(TrustBridgeContract::has_record(env.clone(), username(&env, "OctoCat")));
+            assert!(!TrustBridgeContract::has_record(env.clone(), username(&env, "octocat")));
+        });
+    }
+
+    /// The old name is free again, and taking it does not disturb the moved record.
+    #[test]
+    fn test_old_name_is_registerable_after_a_rename() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        register_as(&env, &contract_id, "octocat", &user);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::rename(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+                username(&env, "octocat2"),
+            )
+            .unwrap();
+        });
+
+        register_as(&env, &contract_id, "octocat", &other);
+
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                    .unwrap()
+                    .stellar_address,
+                other
+            );
+            assert_eq!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat2"))
+                    .unwrap()
+                    .stellar_address,
+                user
+            );
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 2);
+        });
+    }
+
+    // ── Issue #234: address rotation delay window ────────────────────────────
+
+    const ROT_DELAY: u64 = 86_400;
+
+    /// Register `octocat` to `user` and arm the rotation delay.
+    fn setup_rotation(env: &Env, contract_id: &Address, user: &Address) {
+        env.mock_all_auths();
+        env.as_contract(contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(contract_id, || {
+            TrustBridgeContract::set_rotation_delay(env.clone(), ROT_DELAY).unwrap();
+        });
+    }
+
+    #[test]
+    fn test_rotation_delay_defaults_to_zero() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::get_rotation_delay(env.clone()), 0);
+        });
+    }
+
+    /// With no delay configured, register keeps its direct dual-auth swap.
+    #[test]
+    fn test_register_still_swaps_directly_when_delay_is_zero() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), other.clone())
+                .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                    .unwrap()
+                    .stellar_address,
+                other
+            );
+        });
+    }
+
+    /// Once a delay is armed, the instant swap is refused.
+    #[test]
+    fn test_register_refuses_direct_address_change_when_delay_armed() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        setup_rotation(&env, &contract_id, &user);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::register(env.clone(), username(&env, "octocat"), other.clone()),
+                Err(ContractError::RotationRequired)
+            );
+        });
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                    .unwrap()
+                    .stellar_address,
+                user,
+                "the address must not have moved"
+            );
+        });
+    }
+
+    /// Re-registering the same address is not a rotation and stays allowed.
+    #[test]
+    fn test_register_same_address_still_allowed_with_delay_armed() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        setup_rotation(&env, &contract_id, &user);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn test_requesting_a_rotation_does_not_move_the_address() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        setup_rotation(&env, &contract_id, &user);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::request_address_rotation(
+                env.clone(),
+                username(&env, "octocat"),
+                other.clone(),
+            )
+            .unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                    .unwrap()
+                    .stellar_address,
+                user,
+                "reads return the current address for the whole window"
+            );
+            let pending =
+                TrustBridgeContract::get_pending_rotation(env.clone(), username(&env, "octocat"))
+                    .expect("rotation must be pending");
+            assert_eq!(pending.new_address, other);
+            assert_eq!(pending.executable_at, pending.requested_at + ROT_DELAY);
+        });
+    }
+
+    #[test]
+    fn test_rotation_cannot_execute_before_the_delay_elapses() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        setup_rotation(&env, &contract_id, &user);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::request_address_rotation(
+                env.clone(),
+                username(&env, "octocat"),
+                other.clone(),
+            )
+            .unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::execute_address_rotation(env.clone(), username(&env, "octocat")),
+                Err(ContractError::RotationNotReady)
+            );
+        });
+    }
+
+    #[test]
+    fn test_rotation_executes_once_the_delay_has_elapsed() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        setup_rotation(&env, &contract_id, &user);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::request_address_rotation(
+                env.clone(),
+                username(&env, "octocat"),
+                other.clone(),
+            )
+            .unwrap();
+        });
+
+        env.ledger().with_mut(|li| li.timestamp += ROT_DELAY);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::execute_address_rotation(env.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                    .unwrap()
+                    .stellar_address,
+                other
+            );
+            assert!(
+                TrustBridgeContract::get_pending_rotation(env.clone(), username(&env, "octocat"))
+                    .is_none(),
+                "the pending entry must be cleared"
+            );
+        });
+    }
+
+    /// The window is only useful if the real holder can stop the rotation.
+    #[test]
+    fn test_holder_can_cancel_a_pending_rotation() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        setup_rotation(&env, &contract_id, &user);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::request_address_rotation(
+                env.clone(),
+                username(&env, "octocat"),
+                other.clone(),
+            )
+            .unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::cancel_address_rotation(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+            )
+            .unwrap();
+        });
+
+        env.ledger().with_mut(|li| li.timestamp += ROT_DELAY);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::execute_address_rotation(env.clone(), username(&env, "octocat")),
+                Err(ContractError::NoRotationPending),
+                "a cancelled rotation must not become executable"
+            );
+        });
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                    .unwrap()
+                    .stellar_address,
+                user
+            );
+        });
+    }
+
+    #[test]
+    fn test_second_rotation_request_is_rejected_while_one_is_pending() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        setup_rotation(&env, &contract_id, &user);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::request_address_rotation(
+                env.clone(),
+                username(&env, "octocat"),
+                other.clone(),
+            )
+            .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::request_address_rotation(
+                    env.clone(),
+                    username(&env, "octocat"),
+                    other.clone(),
+                ),
+                Err(ContractError::RotationPending)
+            );
+        });
+    }
+
+    #[test]
+    fn test_rotation_requires_a_registered_username() {
+        let env = Env::default();
+        let (_admin, _user, other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::request_address_rotation(
+                    env.clone(),
+                    username(&env, "ghost"),
+                    other.clone(),
+                ),
+                Err(ContractError::NotRegistered)
+            );
+        });
+    }
+
+    /// A verified registration loses its badge when the address moves.
+    #[test]
+    fn test_executing_a_rotation_clears_the_verified_flag() {
+        let env = Env::default();
+        let (admin, user, other, contract_id) = setup(&env);
+        setup_rotation(&env, &contract_id, &user);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 1);
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::request_address_rotation(
+                env.clone(),
+                username(&env, "octocat"),
+                other.clone(),
+            )
+            .unwrap();
+        });
+        env.ledger().with_mut(|li| li.timestamp += ROT_DELAY);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::execute_address_rotation(env.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            assert!(
+                !TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                    .unwrap()
+                    .verified,
+                "verification vouched for the old address"
+            );
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0);
+            assert_eq!(
+                TrustBridgeContract::get_ever_verified_count(env.clone()),
+                1,
+                "the historical count still remembers it"
+            );
+        });
+    }
+
+    // ── Issue #230: light-client record proof ────────────────────────────────
+
+    #[test]
+    fn test_record_proof_for_registered_username() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            let proof = TrustBridgeContract::get_record_proof(env.clone(), username(&env, "octocat"));
+            assert!(proof.exists);
+            assert!(!proof.verified, "a fresh registration is unverified");
+            assert_eq!(proof.as_of_ledger, env.ledger().sequence());
+            assert_eq!(proof.key_prefix, soroban_sdk::symbol_short!("reg"));
+            assert_eq!(proof.ttl_threshold_ledgers, crate::storage::TTL_THRESHOLD);
+            assert_eq!(proof.ttl_bump_ledgers, crate::storage::TTL_BUMP);
+        });
+    }
+
+    #[test]
+    fn test_record_proof_reports_verified_bit() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            let proof = TrustBridgeContract::get_record_proof(env.clone(), username(&env, "octocat"));
+            assert!(proof.exists);
+            assert!(proof.verified);
+        });
+    }
+
+    /// A missing username is an answer, not an error.
+    #[test]
+    fn test_record_proof_for_missing_username() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.as_contract(&contract_id, || {
+            let proof = TrustBridgeContract::get_record_proof(env.clone(), username(&env, "ghost"));
+            assert!(!proof.exists);
+            assert!(!proof.verified);
+            assert_eq!(proof.registered_at, 0);
+            // The key and policy still come back so a client can look for the
+            // entry — including an archived one — itself.
+            assert_eq!(proof.key_prefix, soroban_sdk::symbol_short!("reg"));
+            assert_eq!(proof.ttl_bump_ledgers, crate::storage::TTL_BUMP);
+        });
+    }
+
+    #[test]
+    fn test_record_proof_agrees_with_has_record() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            for name in ["octocat", "ghost"] {
+                assert_eq!(
+                    TrustBridgeContract::get_record_proof(env.clone(), username(&env, name)).exists,
+                    TrustBridgeContract::has_record(env.clone(), username(&env, name)),
+                    "proof.exists must agree with has_record for '{name}'"
+                );
+            }
+        });
+    }
+
+    /// The proof is a read: it must work while the contract is paused.
+    #[test]
+    fn test_record_proof_works_while_paused() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::pause(env.clone(), 1).unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            assert!(TrustBridgeContract::get_record_proof(env.clone(), username(&env, "octocat")).exists);
+        });
+    }
+
+    // ── Issue #229: monotonic ever-verified counter ──────────────────────────
+
+    /// A verify/revoke/verify cycle: the live count moves with the flag, the
+    /// historical count only ever climbs.
+    #[test]
+    fn test_ever_verified_count_survives_a_revoke_cycle() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::get_ever_verified_count(env.clone()), 0);
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 1);
+            assert_eq!(TrustBridgeContract::get_ever_verified_count(env.clone()), 1);
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::revoke_verification(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+                1,
+            )
+            .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_verified_count(env.clone()),
+                0,
+                "live count must drop on revoke"
+            );
+            assert_eq!(
+                TrustBridgeContract::get_ever_verified_count(env.clone()),
+                1,
+                "historical count must not drop on revoke"
+            );
+        });
+
+        // Verifying the same contributor again counts as a second verification.
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 1);
+            assert_eq!(TrustBridgeContract::get_ever_verified_count(env.clone()), 2);
+        });
+    }
+
+    /// `get_stats` reports the live and historical counts side by side.
+    #[test]
+    fn test_stats_reports_live_and_ever_verified() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::revoke_verification(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+                1,
+            )
+            .unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            let stats = TrustBridgeContract::get_stats(env.clone());
+            assert_eq!(stats.total, 1);
+            assert_eq!(stats.verified, 0, "verified is the live figure");
+            assert_eq!(stats.ever_verified, 1, "ever_verified keeps the history");
+        });
+    }
+
+    /// A fresh instance starts both counters at zero.
+    #[test]
+    fn test_ever_verified_count_starts_at_zero() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::get_ever_verified_count(env.clone()), 0);
+        });
+    }
+
     #[test]
     fn test_revoke_verification_clears_flag_and_decrements_vcount() {
         let env = Env::default();
@@ -3872,12 +5174,23 @@ mod test {
             ContractError::NoChallengeActive,
             ContractError::ChallengeNotResolvable,
             ContractError::ChallengeActive,
+            ContractError::InvalidPauseReason,
+            ContractError::AttestationRequired,
+            ContractError::AlreadyReserved,
+            ContractError::NotReserved,
+            ContractError::ReservedListFull,
+            ContractError::UsernameReserved,
+            ContractError::RotationRequired,
+            ContractError::RotationPending,
+            ContractError::NoRotationPending,
+            ContractError::RotationNotReady,
+            ContractError::UsernameTaken,
         ] {
             assert_eq!(ContractError::from_code(variant.code()), Some(variant));
         }
         assert_eq!(ContractError::from_code(0), None);
-        // 21 is one past the highest assigned variant (ChallengeActive = 20):
-        assert_eq!(ContractError::from_code(21), None);
+        // 32 is one past the highest assigned variant (UsernameTaken = 31):
+        assert_eq!(ContractError::from_code(32), None);
     }
 
     // --- Issue #69: max username length guard ---
@@ -4489,7 +5802,7 @@ mod test {
     #[test]
     fn test_from_code_unknown_returns_none() {
         assert_eq!(ContractError::from_code(0), None);
-        assert_eq!(ContractError::from_code(21), None);
+        assert_eq!(ContractError::from_code(32), None);
         assert_eq!(ContractError::from_code(u32::MAX), None);
     }
 
@@ -6383,7 +7696,7 @@ mod test {
         // 5. Works while paused
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::pause(env.clone()).unwrap();
+            TrustBridgeContract::pause(env.clone(), 1).unwrap();
             let usernames = soroban_sdk::vec![&env, username(&env, "octocat")];
             let extended = TrustBridgeContract::extend_registry_ttl(env.clone(), usernames).unwrap();
             assert_eq!(extended, 1);
@@ -6536,16 +7849,14 @@ mod test {
         let (admin, _user, _other, contract_id) = setup(&env);
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::set_paused(env.clone(), true).unwrap();
+            TrustBridgeContract::set_paused(env.clone(), true, 1).unwrap();
             let events = env.events().all();
+            let expected_topic = soroban_sdk::xdr::ScVal::Symbol(
+                soroban_sdk::xdr::ScSymbol("paused_event".try_into().unwrap()),
+            );
             let found = events.events().iter().any(|e| {
-                let topics = e.topics;
-                if topics.len() >= 2 {
-                    if let Ok(s) = soroban_sdk::Symbol::try_from_val(&env, &topics.get_unchecked(1)) {
-                        return s == soroban_sdk::Symbol::new(&env, "paused_event");
-                    }
-                }
-                false
+                let soroban_sdk::xdr::ContractEventBody::V0(body) = &e.body;
+                body.topics.iter().any(|t| t == &expected_topic)
             });
             assert!(found, "set_paused(true) must emit PausedEvent");
         });
@@ -6558,18 +7869,16 @@ mod test {
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
             // First pause, then unpause via set_paused
-            TrustBridgeContract::pause(env.clone()).unwrap();
+            TrustBridgeContract::pause(env.clone(), 1).unwrap();
             env.events().all(); // consume
-            TrustBridgeContract::set_paused(env.clone(), false).unwrap();
+            TrustBridgeContract::set_paused(env.clone(), false, 4).unwrap();
             let events = env.events().all();
+            let expected_topic = soroban_sdk::xdr::ScVal::Symbol(
+                soroban_sdk::xdr::ScSymbol("unpaused_event".try_into().unwrap()),
+            );
             let found = events.events().iter().any(|e| {
-                let topics = e.topics;
-                if topics.len() >= 2 {
-                    if let Ok(s) = soroban_sdk::Symbol::try_from_val(&env, &topics.get_unchecked(1)) {
-                        return s == soroban_sdk::Symbol::new(&env, "unpaused_event");
-                    }
-                }
-                false
+                let soroban_sdk::xdr::ContractEventBody::V0(body) = &e.body;
+                body.topics.iter().any(|t| t == &expected_topic)
             });
             assert!(found, "set_paused(false) must emit UnpausedEvent");
         });
@@ -6583,7 +7892,7 @@ mod test {
         env.as_contract(&contract_id, || {
             // Already unpaused — calling set_paused(false) again should be a no-op
             let count_before = env.events().all().events().len();
-            TrustBridgeContract::set_paused(env.clone(), false).unwrap();
+            TrustBridgeContract::set_paused(env.clone(), false, 4).unwrap();
             let count_after = env.events().all().events().len();
             assert_eq!(
                 count_before, count_after,
@@ -6591,9 +7900,9 @@ mod test {
             );
 
             // Pause, then call set_paused(true) again — still a no-op
-            TrustBridgeContract::set_paused(env.clone(), true).unwrap();
+            TrustBridgeContract::set_paused(env.clone(), true, 1).unwrap();
             let count_before2 = env.events().all().events().len();
-            TrustBridgeContract::set_paused(env.clone(), true).unwrap();
+            TrustBridgeContract::set_paused(env.clone(), true, 1).unwrap();
             let count_after2 = env.events().all().events().len();
             assert_eq!(
                 count_before2, count_after2,
@@ -6612,7 +7921,7 @@ mod test {
             // We mock all auths so this tests the logical path — the admin key is
             // the only one that satisfies the check.
             assert!(
-                TrustBridgeContract::set_paused(env.clone(), true).is_ok(),
+                TrustBridgeContract::set_paused(env.clone(), true, 1).is_ok(),
                 "mock_all_auths must satisfy require_auth()"
             );
         });
@@ -6743,7 +8052,7 @@ mod test {
             TrustBridgeContract::set_guardian(env.clone(), guardian.clone()).unwrap();
 
             // Trip both flags
-            TrustBridgeContract::pause(env.clone()).unwrap();
+            TrustBridgeContract::pause(env.clone(), 1).unwrap();
             TrustBridgeContract::emergency_pause(env.clone(), guardian.clone()).unwrap();
 
             // Clear emergency pause only — normal pause still blocks
@@ -6761,7 +8070,7 @@ mod test {
             );
 
             // Clear normal pause too — now unblocked
-            TrustBridgeContract::unpause(env.clone()).unwrap();
+            TrustBridgeContract::unpause(env.clone(), 4).unwrap();
             TrustBridgeContract::register(
                 env.clone(),
                 username(&env, "nowworks"),

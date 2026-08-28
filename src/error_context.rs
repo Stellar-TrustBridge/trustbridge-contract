@@ -109,6 +109,17 @@ pub fn classify_error(error: ContractError) -> ErrorCategory {
         ContractError::NoChallengeActive => ErrorCategory::Validation,
         ContractError::ChallengeNotResolvable => ErrorCategory::Transient,
         ContractError::ChallengeActive => ErrorCategory::Transient,
+        ContractError::InvalidPauseReason => ErrorCategory::Validation,
+        ContractError::AttestationRequired => ErrorCategory::Permanent,
+        ContractError::AlreadyReserved => ErrorCategory::Validation,
+        ContractError::NotReserved => ErrorCategory::Validation,
+        ContractError::ReservedListFull => ErrorCategory::Permanent,
+        ContractError::UsernameReserved => ErrorCategory::Validation,
+        ContractError::RotationRequired => ErrorCategory::Validation,
+        ContractError::RotationPending => ErrorCategory::Validation,
+        ContractError::NoRotationPending => ErrorCategory::Validation,
+        ContractError::RotationNotReady => ErrorCategory::Transient,
+        ContractError::UsernameTaken => ErrorCategory::Validation,
     }
 }
 
