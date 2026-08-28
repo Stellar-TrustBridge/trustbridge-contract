@@ -146,6 +146,9 @@ struct ChallengeRecord {
 | 19 | `ChallengeNotResolvable` | `complete_challenge` called before the delay has elapsed |
 | 20 | `ChallengeActive` | `register` attempted while a challenge is active on the username |
 | 21 | `NetworkMismatch` | Instance state was initialized on a different network than the one executing (Issue #231) |
+| 31 | `VerifierAllowlistFull` | `add_verifier` would exceed the `MAX_VERIFIERS` cap (Issue #293) |
+| 32 | `VerifierNotAllowlisted` | `remove_verifier` for an address not on the allowlist (Issue #293) |
+| 33 | `VerifierExpiryInPast` | `add_verifier` given a non-zero `expires_at` not in the future (Issue #293) |
 
 `ContractError::from_code(u32)` maps every code in this table back to the typed
 variant and returns `None` for any unrecognized code. Every code round-trips
@@ -160,6 +163,14 @@ tests in `src/lib.rs` (`test_error_from_code_is_inverse_of_code`).
 |-------|------|-------|
 | `address` | `Address` | Address holding the role |
 | `role` | `Role` | Role held, as the `Role` discriminant |
+
+### VerifierAllowEntry (Issue #293)
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `address` | `Address` | Allowlisted verifier |
+| `expires_at` | `u64` | Ledger timestamp after which the entry is inactive; `0` = no expiry |
+| `added_at` | `u64` | Ledger timestamp the entry was added or last refreshed |
 
 ### EventDomain (Issue #226)
 
@@ -980,6 +991,70 @@ Configures the WASM upgrade timelock cooldown period in seconds. Admin-only.
 ### `get_cooldown() -> u64`
 
 Returns the current WASM upgrade timelock cooldown period in seconds.
+
+---
+
+### `add_verifier(verifier: Address, expires_at: u64) -> Result<(), ContractError>`
+
+Adds `verifier` to the campaign allowlist and grants it `Role::Verifier`
+(Issue #293). Admin-only.
+
+- **Cap:** at most `MAX_VERIFIERS` (10) concurrently active members. A new
+  address over the cap → `VerifierAllowlistFull`. Expired entries are pruned
+  before the check, so a lapsed member never blocks a new one.
+- **Expiry:** `expires_at` is a ledger timestamp after which the entry stops
+  authorizing `verify` / `batch_verify`. `0` = no expiry. A non-zero value not
+  in the future → `VerifierExpiryInPast`.
+- **Refresh:** calling again for an address already listed updates its
+  `expires_at` in place and does **not** consume another slot.
+- **`set_role` interaction:** composes, does not duplicate. `add_verifier` also
+  calls `set_role(verifier, Verifier)`. **Once the allowlist has been populated
+  at least once**, `verify` / `batch_verify` require the caller to be an
+  *active* allowlist member — a bare `set_role(Verifier)` grant is no longer
+  sufficient. Before the first `add_verifier` call the contract stays in pure
+  role-based mode (backward compatible). There is only one expiry mechanism in
+  the contract — this one.
+
+| **Errors** | `NotInitialized`, `Paused`, `NotAuthorized`, `VerifierExpiryInPast`, `VerifierAllowlistFull` |
+
+---
+
+### `remove_verifier(verifier: Address) -> Result<(), ContractError>`
+
+Removes `verifier` from the allowlist and revokes its `Role::Verifier`.
+Admin-only. Not listed → `VerifierNotAllowlisted`.
+
+| **Errors** | `NotInitialized`, `Paused`, `NotAuthorized`, `VerifierNotAllowlisted` |
+
+---
+
+### `get_verifiers() -> Vec<VerifierAllowEntry>`
+
+The allowlist as `{ address, expires_at, added_at }` entries, including any that
+have expired but not yet been pruned. Read-only; no auth.
+
+---
+
+### `is_active_verifier(verifier: Address) -> bool`
+
+`true` if `verifier` is on the allowlist and not expired as of the current
+ledger. Read-only; no auth.
+
+---
+
+### `verifier_slots_remaining() -> u32`
+
+Allowlist slots free before the `MAX_VERIFIERS` cap, counting only active
+(non-expired) members. Read-only; no auth.
+
+---
+
+### `prune_expired_verifiers() -> Result<u32, ContractError>`
+
+Drops every expired allowlist entry, returning how many were removed. Callable
+by anyone — it only removes entries that are already inactive.
+
+| **Errors** | `NotInitialized` |
 
 ---
 
