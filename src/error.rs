@@ -40,6 +40,8 @@ pub enum ContractError {
     NotRegistered = 4,
     /// `verify` was called on a username that is already verified.
     AlreadyVerified = 5,
+    InvalidEntityType = 6,
+    OrgNameRequired = 7,
     /// `revoke_verification` was called on a username that is not verified.
     NotVerified = 6,
     /// A state-mutating function was called while the contract is paused.

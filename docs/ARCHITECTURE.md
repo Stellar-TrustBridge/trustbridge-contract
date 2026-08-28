@@ -52,6 +52,8 @@ reference and migration guide from manual probing.
 | `Symbol("count")` | `u32` | Total active registrations |
 | `Symbol("vcount")` | `u32` | Count of verified registrations |
 | `Symbol("idx")` | `Vec<String>` | Ordered list of registered usernames (for admin export) |
+| `Symbol("orgidx")` | `Vec<String>` | Ordered list of registered org names |
+| `Symbol("tmidx")` | `Vec<String>` | Ordered list of team keys (org:name format) |
 | `Symbol("ver")` | `(u32, u32, u32)` | Contract schema version tuple |
 
 ### Persistent Storage (per-entry, TTL-extended)
@@ -67,6 +69,14 @@ pub struct ContributorRecord {
     pub stellar_address: Address,
     pub registered_at: u32,   // ledger timestamp (u32 saves 4 bytes/record)
     pub verified: bool,       // set by admin after off-chain GitHub check
+    pub entity_type: EntityType, // Personal, Org, or Team
+    pub org_name: Option<String>, // org name for Org/Team entries
+}
+
+pub enum EntityType {
+    Personal = 0,
+    Org = 1,
+    Team = 2,
 }
 ```
 
