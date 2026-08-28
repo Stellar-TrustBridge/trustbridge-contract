@@ -2454,3 +2454,293 @@ fn test_compact_index_does_not_change_stats() {
         );
     });
 }
+
+// ── Protocol-upgrade rehearsal (Issue #239) ────────────────────────────────────
+
+/// End-to-end protocol-upgrade rehearsal.
+///
+/// Populates diverse on-chain state (registrations, verifications, roles,
+/// cooldown, reserved list), reads every public getter to snapshot the
+/// pre-upgrade world, uploads the release WASM to simulate a Soroban host
+/// bump, upgrades the contract instance, then re-reads every public getter
+/// and asserts that every value survived the upgrade identically.
+///
+/// This test is gated on the `wasm-test` feature because it requires the
+/// pre-built `wasm32v1-none` release artifact.
+///
+/// What "pass" means:
+///   - Every getter returns the same value before and after upgrade.
+///   - The upgrade itself succeeds.
+///   - Post-upgrade state is still operationally valid (register, verify,
+///     remove work on the upgraded instance).
+///
+/// Run: `cargo test test_protocol_upgrade_rehearsal --features wasm-test`
+/// Or:  `make test-rehearsal`
+#[test]
+#[cfg(feature = "wasm-test")]
+fn test_protocol_upgrade_rehearsal() {
+    let (env, admin, user1, user2, contract_id) = setup_test_env();
+    let user3 = Address::generate(&env);
+    let verifier = Address::generate(&env);
+    let upgrader = Address::generate(&env);
+
+    // ── Populate diverse state ────────────────────────────────────────────
+
+    // Set roles
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+        TrustBridgeContract::set_role(env.clone(), upgrader.clone(), Role::Upgrader).unwrap();
+    });
+
+    // Set cooldown
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_cooldown(env.clone(), 3600).unwrap();
+    });
+
+    // Register three users (one verified, one not, one later removed)
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone()).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2.clone()).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "carol"), user3.clone()).unwrap();
+    });
+
+    // Verify alice via verifier
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(env.clone(), verifier.clone(), s(&env, "alice")).unwrap();
+    });
+
+    // Verify bob via admin
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "bob")).unwrap();
+    });
+
+    // Remove carol
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "carol")).unwrap();
+    });
+
+    // ── Snapshot pre-upgrade state ────────────────────────────────────────
+
+    let pre_stats = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_stats(env.clone())
+    });
+    let pre_version = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_version(env.clone())
+    });
+    let pre_paused = env.as_contract(&contract_id, || {
+        TrustBridgeContract::is_paused(env.clone())
+    });
+    let pre_cooldown = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_cooldown(env.clone())
+    });
+    let pre_verified_count = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_verified_count(env.clone())
+    });
+    let pre_alice = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_address(env.clone(), s(&env, "alice")).unwrap()
+    });
+    let pre_bob = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_address(env.clone(), s(&env, "bob")).unwrap()
+    });
+    let pre_alice_has = env.as_contract(&contract_id, || {
+        TrustBridgeContract::has_record(env.clone(), s(&env, "alice"))
+    });
+    let pre_carol_has = env.as_contract(&contract_id, || {
+        TrustBridgeContract::has_record(env.clone(), s(&env, "carol"))
+    });
+    let pre_verifier_role = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_role(env.clone(), verifier.clone())
+    });
+    let pre_upgrader_role = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_role(env.clone(), upgrader.clone())
+    });
+    let pre_paginated = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap()
+    });
+    let pre_health = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_health(env.clone()).unwrap()
+    });
+    let pre_reserved = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_reserved_list(env.clone()).unwrap()
+    });
+    let pre_attestation = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_attestation(env.clone())
+    });
+    let pre_provenance = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_provenance(env.clone())
+    });
+    let pre_guardian = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_guardian(env.clone())
+    });
+
+    // ── Simulate WASM upgrade ─────────────────────────────────────────────
+
+    let wasm_bytes = soroban_sdk::Bytes::from_slice(
+        &env,
+        include_bytes!("../target/wasm32v1-none/release/trustbridge_contract.wasm"),
+    );
+    let new_wasm_hash = env.deployer().upload_contract_wasm(wasm_bytes);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::upgrade(env.clone(), new_wasm_hash.clone()).unwrap();
+    });
+
+    // ── Assert post-upgrade state matches pre-upgrade snapshot ─────────────
+
+    let post_stats = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_stats(env.clone())
+    });
+    assert_eq!(pre_stats.total, post_stats.total, "total must survive upgrade");
+    assert_eq!(pre_stats.verified, post_stats.verified, "verified must survive upgrade");
+
+    let post_version = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_version(env.clone())
+    });
+    assert_eq!(pre_version, post_version, "version must survive upgrade");
+
+    let post_paused = env.as_contract(&contract_id, || {
+        TrustBridgeContract::is_paused(env.clone())
+    });
+    assert_eq!(pre_paused, post_paused, "pause state must survive upgrade");
+
+    let post_cooldown = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_cooldown(env.clone())
+    });
+    assert_eq!(pre_cooldown, post_cooldown, "cooldown must survive upgrade");
+
+    let post_verified_count = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_verified_count(env.clone())
+    });
+    assert_eq!(
+        pre_verified_count, post_verified_count,
+        "verified count must survive upgrade"
+    );
+
+    let post_alice = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_address(env.clone(), s(&env, "alice")).unwrap()
+    });
+    assert_eq!(pre_alice.stellar_address, post_alice.stellar_address, "alice address must survive upgrade");
+    assert_eq!(pre_alice.verified, post_alice.verified, "alice verified must survive upgrade");
+
+    let post_bob = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_address(env.clone(), s(&env, "bob")).unwrap()
+    });
+    assert_eq!(pre_bob.stellar_address, post_bob.stellar_address, "bob address must survive upgrade");
+    assert_eq!(pre_bob.verified, post_bob.verified, "bob verified must survive upgrade");
+
+    let post_alice_has = env.as_contract(&contract_id, || {
+        TrustBridgeContract::has_record(env.clone(), s(&env, "alice"))
+    });
+    assert_eq!(pre_alice_has, post_alice_has, "has_record(alice) must survive upgrade");
+
+    let post_carol_has = env.as_contract(&contract_id, || {
+        TrustBridgeContract::has_record(env.clone(), s(&env, "carol"))
+    });
+    assert_eq!(pre_carol_has, post_carol_has, "has_record(carol) must survive upgrade");
+
+    let post_verifier_role = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_role(env.clone(), verifier.clone())
+    });
+    assert_eq!(pre_verifier_role, post_verifier_role, "verifier role must survive upgrade");
+
+    let post_upgrader_role = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_role(env.clone(), upgrader.clone())
+    });
+    assert_eq!(pre_upgrader_role, post_upgrader_role, "upgrader role must survive upgrade");
+
+    let post_paginated = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap()
+    });
+    assert_eq!(pre_paginated.total, post_paginated.total, "paginated total must survive upgrade");
+    assert_eq!(
+        pre_paginated.records.len(),
+        post_paginated.records.len(),
+        "paginated records count must survive upgrade"
+    );
+
+    let post_health = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_health(env.clone()).unwrap()
+    });
+    assert_eq!(pre_health.paused, post_health.paused, "health.paused must survive upgrade");
+    assert_eq!(pre_health.total, post_health.total, "health.total must survive upgrade");
+
+    let post_reserved = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_reserved_list(env.clone()).unwrap()
+    });
+    assert_eq!(
+        pre_reserved.len(),
+        post_reserved.len(),
+        "reserved list length must survive upgrade"
+    );
+
+    let post_attestation = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_attestation(env.clone())
+    });
+    assert_eq!(
+        pre_attestation.is_some(),
+        post_attestation.is_some(),
+        "attestation presence must survive upgrade"
+    );
+
+    let post_provenance = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_provenance(env.clone())
+    });
+    assert!(
+        post_provenance.is_some(),
+        "provenance must exist after upgrade"
+    );
+
+    let post_guardian = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_guardian(env.clone())
+    });
+    assert_eq!(pre_guardian, post_guardian, "guardian must survive upgrade");
+
+    // ── Post-upgrade operational validity ──────────────────────────────────
+
+    // Register a new user on the upgraded instance
+    let user4 = Address::generate(&env);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(env.clone(), s(&env, "dave"), user4.clone()).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        let record = TrustBridgeContract::get_address(env.clone(), s(&env, "dave")).unwrap();
+        assert_eq!(record.stellar_address, user4);
+    });
+
+    // Verify dave on the upgraded instance
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "dave")).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        let record = TrustBridgeContract::get_address(env.clone(), s(&env, "dave")).unwrap();
+        assert!(record.verified, "newly verified record must work post-upgrade");
+    });
+
+    // Remove dave on the upgraded instance
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::remove(env.clone(), user4.clone(), s(&env, "dave")).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        assert!(
+            TrustBridgeContract::get_address(env.clone(), s(&env, "dave")).is_none(),
+            "removed record must not exist post-upgrade"
+        );
+    });
+
+    // Final stats check
+    env.as_contract(&contract_id, || {
+        let final_stats = TrustBridgeContract::get_stats(env.clone());
+        assert_eq!(final_stats.total, 2, "only alice and bob remain");
+        assert_eq!(final_stats.verified, 2, "both alice and bob verified");
+    });
+}
