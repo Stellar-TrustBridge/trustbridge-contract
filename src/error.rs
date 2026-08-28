@@ -77,12 +77,8 @@ pub enum ContractError {
     /// Operation is blocked because a challenge is active on this username
     /// (Issue #214).
     ChallengeActive = 20,
-    /// The network this instance was initialized on does not match the network
-    /// the call is executing on (Issue #231). Raised when contract state has
-    /// been restored onto a different network; the records it holds were
-    /// registered against a different ledger and must not be served as if they
-    /// belonged to this one.
-    NetworkMismatch = 21,
+    /// The fallback address list exceeds `MAX_FALLBACK_ADDRESSES` (Issue #238).
+    FallbackListFull = 21,
 }
 
 impl ContractError {
@@ -118,7 +114,7 @@ impl ContractError {
             18 => Some(ContractError::NoChallengeActive),
             19 => Some(ContractError::ChallengeNotResolvable),
             20 => Some(ContractError::ChallengeActive),
-            21 => Some(ContractError::NetworkMismatch),
+            21 => Some(ContractError::FallbackListFull),
             _ => None,
         }
     }

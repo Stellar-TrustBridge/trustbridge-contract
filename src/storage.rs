@@ -91,6 +91,10 @@ pub const RESERVED_KEY: Symbol = symbol_short!("reserved");
 /// Maximum entries in the reserved username list (Issue #213).
 pub const MAX_RESERVED: u32 = 200;
 
+/// Hard cap on the number of fallback addresses per registration (Issue #238).
+/// Prevents unbounded storage growth from a single registration.
+pub const MAX_FALLBACK_ADDRESSES: u32 = 5;
+
 /// Key for the version stored at `storage::get_version` / `set_version`.
 /// Aliased as VERSION_KEY for callers that use that name.
 pub const VERSION_KEY: Symbol = VER_KEY;
@@ -215,8 +219,9 @@ pub struct ContributorRecord {
     pub registered_at: u32,
     /// Whether the contributor has been verified by an admin or Verifier.
     pub verified: bool,
-    pub entity_type: EntityType,
-    pub org_name: Option<String>,
+    /// Ordered fallback addresses tried when `stellar_address` is
+    /// unreachable. Capped at [`MAX_FALLBACK_ADDRESSES`] entries.
+    pub fallback_addresses: Vec<Address>,
 }
 
 /// Provenance of the currently deployed WASM executable (Wave #24).

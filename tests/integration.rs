@@ -43,7 +43,7 @@ fn test_integration_full_registry_lifecycle_and_events() {
     // Register
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env)).unwrap();
     });
 
     env.as_contract(&contract_id, || {
@@ -108,7 +108,7 @@ fn test_integration_pause_unpause_governance() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         assert_eq!(
-            TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), None),
+            TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env)),
             Err(ContractError::Paused)
         );
     });
@@ -130,7 +130,7 @@ fn test_integration_pause_unpause_governance() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         assert!(
-            TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), None).is_ok()
+            TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env)).is_ok()
         );
     });
 }
@@ -192,7 +192,7 @@ fn test_integration_verifier_role_separation() {
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "octocat"), user1.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "octocat"), user1.clone(), Vec::new(&env)).unwrap();
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
@@ -257,7 +257,7 @@ fn test_integration_no_role_cannot_verify() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "octocat"), user1.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "octocat"), user1.clone(), Vec::new(&env)).unwrap();
         let result = TrustBridgeContract::verify(env.clone(), nobody.clone(), s(&env, "octocat"));
         assert_eq!(result, Err(ContractError::NotAuthorized));
     });
@@ -272,9 +272,9 @@ fn test_integration_lookup_after_peer_removal() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), None).unwrap();
-        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2.clone(), None).unwrap();
-        TrustBridgeContract::register(env.clone(), s(&env, "carol"), user3.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env)).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2.clone(), Vec::new(&env)).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "carol"), user3.clone(), Vec::new(&env)).unwrap();
 
         // Remove the first peer
         TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
@@ -304,9 +304,9 @@ fn test_integration_export_consistent_after_removal() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), None).unwrap();
-        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2.clone(), None).unwrap();
-        TrustBridgeContract::register(env.clone(), s(&env, "carol"), user3.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env)).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2.clone(), Vec::new(&env)).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "carol"), user3.clone(), Vec::new(&env)).unwrap();
 
         TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "bob")).unwrap();
 
@@ -337,7 +337,7 @@ fn test_integration_not_initialized_guards() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         assert_eq!(
-            TrustBridgeContract::register(env.clone(), s(&env, "alice"), addr.clone(), None),
+            TrustBridgeContract::register(env.clone(), s(&env, "alice"), addr.clone(), Vec::new(&env)),
             Err(ContractError::NotInitialized),
             "register before init"
         );
@@ -407,11 +407,11 @@ fn test_integration_verification_attestation_storage() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env)).unwrap();
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2.clone(), Vec::new(&env)).unwrap();
     });
 
     env.as_contract(&contract_id, || {
@@ -492,7 +492,7 @@ fn test_integration_attestation_preserved_on_same_address_reregister() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env)).unwrap();
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
@@ -500,7 +500,7 @@ fn test_integration_attestation_preserved_on_same_address_reregister() {
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env)).unwrap();
     });
     env.as_contract(&contract_id, || {
         let record = TrustBridgeContract::get_address(env.clone(), s(&env, "alice")).unwrap();
@@ -526,7 +526,7 @@ fn test_integration_attestation_cleared_on_address_change() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env)).unwrap();
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
@@ -537,7 +537,7 @@ fn test_integration_attestation_cleared_on_address_change() {
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user2.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user2.clone(), Vec::new(&env)).unwrap();
     });
     env.as_contract(&contract_id, || {
         let record = TrustBridgeContract::get_address(env.clone(), s(&env, "alice")).unwrap();
@@ -674,7 +674,7 @@ fn test_integration_guards_lifted_after_initialization() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         assert_eq!(
-            TrustBridgeContract::register(env.clone(), s(&env, "alice"), user.clone(), None),
+            TrustBridgeContract::register(env.clone(), s(&env, "alice"), user.clone(), Vec::new(&env)),
             Err(ContractError::NotInitialized)
         );
     });
@@ -687,7 +687,7 @@ fn test_integration_guards_lifted_after_initialization() {
     // Same calls must now pass
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        assert!(TrustBridgeContract::register(env.clone(), s(&env, "alice"), user.clone(), None).is_ok());
+        assert!(TrustBridgeContract::register(env.clone(), s(&env, "alice"), user.clone(), Vec::new(&env)).is_ok());
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
@@ -713,7 +713,7 @@ fn test_integration_paginated_export_after_multiple_removals() {
     ] {
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::register(env.clone(), name, addr, None).unwrap();
+            TrustBridgeContract::register(env.clone(), name, addr, Vec::new(&env)).unwrap();
         });
     }
     env.mock_all_auths();
@@ -747,15 +747,15 @@ fn test_integration_public_paginated_after_peer_removal() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env)).unwrap();
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2.clone(), Vec::new(&env)).unwrap();
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "carol"), user3.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "carol"), user3.clone(), Vec::new(&env)).unwrap();
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
@@ -799,7 +799,7 @@ fn test_integration_revoked_verifier_cannot_verify() {
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env)).unwrap();
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
@@ -860,7 +860,7 @@ fn test_integration_upgrader_cannot_verify_or_revoke() {
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env)).unwrap();
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
@@ -900,15 +900,15 @@ fn test_integration_attestation_record_fields_isolated() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env)).unwrap();
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2.clone(), Vec::new(&env)).unwrap();
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "carol"), user3.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "carol"), user3.clone(), Vec::new(&env)).unwrap();
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
@@ -970,7 +970,7 @@ fn test_integration_vcount_never_underflows() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env)).unwrap();
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
@@ -1020,9 +1020,9 @@ fn test_integration_middle_user_removal_index_compaction() {
     // Register three users: alice, bob, carol
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), None).unwrap();
-        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2.clone(), None).unwrap();
-        TrustBridgeContract::register(env.clone(), s(&env, "carol"), user3.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env)).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2.clone(), Vec::new(&env)).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "carol"), user3.clone(), Vec::new(&env)).unwrap();
     });
 
     // Verify initial state
@@ -1163,7 +1163,7 @@ fn test_integration_stats_verified_matches_verified_count() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env)).unwrap();
     });
     check(&env, &contract_id);
 
@@ -1175,7 +1175,7 @@ fn test_integration_stats_verified_matches_verified_count() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2.clone(), None).unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2.clone(), Vec::new(&env)).unwrap();
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
@@ -1767,7 +1767,7 @@ fn test_pause_reason_readable_while_paused() {
         // register must still fail with Paused, not some other error.
         env.mock_all_auths();
         let result =
-            trustbridge_contract::TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), None);
+            trustbridge_contract::TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env));
         assert_eq!(result, Err(ContractError::Paused));
     });
 }
@@ -1819,7 +1819,7 @@ fn test_reserved_username_cannot_be_registered() {
             env.clone(),
             s(&env, "stellar"),
             user1.clone(),
-        , None);
+        , Vec::new(&env));
         assert_eq!(result, Err(ContractError::UsernameReserved));
     });
 
@@ -1895,7 +1895,7 @@ fn test_reserved_check_is_case_insensitive() {
                 env.clone(),
                 name.clone(),
                 user1.clone(),
-            , None);
+            , Vec::new(&env));
             assert_eq!(
                 result,
                 Err(ContractError::UsernameReserved),
@@ -1999,7 +1999,7 @@ fn test_removed_reserved_name_can_be_registered() {
             env.clone(),
             s(&env, "trustbridge"),
             user1.clone(),
-        , None)
+        , Vec::new(&env))
         .expect("register must succeed after reserved name is removed");
     });
 
@@ -2060,7 +2060,7 @@ fn test_adding_reserved_does_not_evict_existing_registration() {
             env.clone(),
             s(&env, "trustbridge"),
             user1.clone(),
-        , None)
+        , Vec::new(&env))
         .unwrap();
     });
 
@@ -2113,19 +2113,19 @@ fn test_compact_index_no_op_on_dense_registry() {
             env.clone(),
             s(&env, "alice"),
             user1.clone(),
-        , None)
+        , Vec::new(&env))
         .unwrap();
         trustbridge_contract::TrustBridgeContract::register(
             env.clone(),
             s(&env, "bob"),
             user2.clone(),
-        , None)
+        , Vec::new(&env))
         .unwrap();
         trustbridge_contract::TrustBridgeContract::register(
             env.clone(),
             s(&env, "carol"),
             user3.clone(),
-        , None)
+        , Vec::new(&env))
         .unwrap();
     });
 
@@ -2183,7 +2183,7 @@ fn test_compact_index_after_sparse_removals_restores_dense_pagination() {
     ] {
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            trustbridge_contract::TrustBridgeContract::register(env.clone(), name, addr, None).unwrap();
+            trustbridge_contract::TrustBridgeContract::register(env.clone(), name, addr, Vec::new(&env)).unwrap();
         });
     }
 
@@ -2261,7 +2261,7 @@ fn test_compact_index_single_entry_registry() {
             env.clone(),
             s(&env, "solo"),
             user1.clone(),
-        , None)
+        , Vec::new(&env))
         .unwrap();
     });
 
@@ -2298,7 +2298,7 @@ fn test_compact_index_is_idempotent() {
             env.clone(),
             s(&env, "a"),
             user1.clone(),
-        , None)
+        , Vec::new(&env))
         .unwrap();
     });
     env.mock_all_auths();
@@ -2307,7 +2307,7 @@ fn test_compact_index_is_idempotent() {
             env.clone(),
             s(&env, "b"),
             user2.clone(),
-        , None)
+        , Vec::new(&env))
         .unwrap();
     });
     env.mock_all_auths();
@@ -2316,7 +2316,7 @@ fn test_compact_index_is_idempotent() {
             env.clone(),
             s(&env, "c"),
             user3.clone(),
-        , None)
+        , Vec::new(&env))
         .unwrap();
     });
 
@@ -2395,19 +2395,19 @@ fn test_compact_index_does_not_change_stats() {
             env.clone(),
             s(&env, "alice"),
             user1.clone(),
-        , None)
+        , Vec::new(&env))
         .unwrap();
         trustbridge_contract::TrustBridgeContract::register(
             env.clone(),
             s(&env, "bob"),
             user2.clone(),
-        , None)
+        , Vec::new(&env))
         .unwrap();
         trustbridge_contract::TrustBridgeContract::register(
             env.clone(),
             s(&env, "carol"),
             user3.clone(),
-        , None)
+        , Vec::new(&env))
         .unwrap();
     });
 
