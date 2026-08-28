@@ -2744,3 +2744,118 @@ fn test_protocol_upgrade_rehearsal() {
         assert_eq!(final_stats.verified, 2, "both alice and bob verified");
     });
 }
+
+// ── Cross-contract deny: admin exports (Issue #295 / #149) ────────────────────
+//
+// `src/version.rs` (`CROSS_CONTRACT_READ_MIN_VERSION` doc) and
+// `docs/ABI.md` § Cross-Contract Read Interface both state that the
+// admin-gated exports — `get_all_registered`, `get_registered_page`,
+// `get_registered_paginated` — cannot be invoked cross-contract: each calls
+// `admin.require_auth()`, and a *calling* contract executes in its own
+// authorization context, so it cannot present the registry admin's signature.
+//
+// These tests pin that as behaviour rather than a comment: a contract acting
+// as the caller must fail auth on every admin export, while the documented
+// public read surface stays callable from the same contract.
+
+use soroban_sdk::{contract, contractimpl, IntoVal, Symbol, Vec as SdkVec};
+
+/// A stand-in for a sibling contract (e.g. a payout contract) that reads the
+/// registry cross-contract.
+#[contract]
+struct RegistryConsumer;
+
+#[contractimpl]
+impl RegistryConsumer {
+    /// Public read — documented as safe to call cross-contract.
+    pub fn probe(env: Env, registry: Address, username: String) -> bool {
+        env.invoke_contract(
+            &registry,
+            &Symbol::new(&env, "has_record"),
+            (username,).into_val(&env),
+        )
+    }
+
+    /// Admin export via cursor pagination — must trap on auth.
+    pub fn siphon_paginated(env: Env, registry: Address) -> u32 {
+        let page: trustbridge_contract::ExportPage = env.invoke_contract(
+            &registry,
+            &Symbol::new(&env, "get_registered_paginated"),
+            (0u32, 50u32).into_val(&env),
+        );
+        page.records.len()
+    }
+
+    /// Admin export via offset pagination — must trap on auth.
+    pub fn siphon_page(env: Env, registry: Address) -> u32 {
+        let page: trustbridge_contract::ExportPage = env.invoke_contract(
+            &registry,
+            &Symbol::new(&env, "get_registered_page"),
+            (0u32, 50u32).into_val(&env),
+        );
+        page.records.len()
+    }
+
+    /// Admin export of the whole index — must trap on auth.
+    pub fn siphon_all(env: Env, registry: Address) -> u32 {
+        let rows: SdkVec<(String, Address)> = env.invoke_contract(
+            &registry,
+            &Symbol::new(&env, "get_all_registered"),
+            ().into_val(&env),
+        );
+        rows.len()
+    }
+}
+
+fn deny_setup() -> (Env, Address, Address) {
+    let env = Env::default();
+    let registry = env.register(TrustBridgeContract, ());
+    env.as_contract(&registry, || {
+        TrustBridgeContract::initialize(env.clone(), Address::generate(&env)).unwrap();
+    });
+    let consumer = env.register(RegistryConsumer, ());
+    (env, registry, consumer)
+}
+
+/// The public read surface documented for cross-contract use stays reachable
+/// from another contract with no admin signature involved.
+#[test]
+fn cross_contract_public_read_surface_is_reachable() {
+    let (env, registry, consumer) = deny_setup();
+    let client = RegistryConsumerClient::new(&env, &consumer);
+    // `has_record` on an absent username returns false without any auth.
+    assert!(!client.probe(&registry, &s(&env, "nobody")));
+}
+
+/// Each admin export must fail when the caller is a contract. No
+/// `env.mock_all_auths()` here: the consumer contract has no path to the
+/// registry admin's signature, which is exactly the condition being asserted.
+#[test]
+fn cross_contract_caller_cannot_run_get_registered_paginated() {
+    let (env, registry, consumer) = deny_setup();
+    let res = RegistryConsumerClient::new(&env, &consumer).try_siphon_paginated(&registry);
+    assert!(
+        res.is_err(),
+        "a contract caller must not export the registry via get_registered_paginated"
+    );
+}
+
+#[test]
+fn cross_contract_caller_cannot_run_get_registered_page() {
+    let (env, registry, consumer) = deny_setup();
+    let res = RegistryConsumerClient::new(&env, &consumer).try_siphon_page(&registry);
+    assert!(
+        res.is_err(),
+        "a contract caller must not export the registry via get_registered_page"
+    );
+}
+
+#[test]
+fn cross_contract_caller_cannot_run_get_all_registered() {
+    let (env, registry, consumer) = deny_setup();
+    let res = RegistryConsumerClient::new(&env, &consumer).try_siphon_all(&registry);
+    assert!(
+        res.is_err(),
+        "a contract caller must not export the registry via get_all_registered"
+    );
+}
