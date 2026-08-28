@@ -562,6 +562,58 @@ The `revoke_verification` function guards:
 
 ---
 
+## Verifier Rate Limiting (Issue #292)
+
+### Threat
+
+A Verifier or Revoker key — legitimately issued, or compromised — can call
+`verify`, `revoke_verification`, and `batch_verify` as fast as it can submit
+transactions. During a Wave this bloats the contract event stream and consumes
+instruction budget for every other caller. Before this control, `pause` was the
+only brake, and `batch_verify` made the problem *worse* because one call could
+touch up to `MAX_WRITE_BATCH` records.
+
+### Control
+
+An on-chain counter caps the number of **verify/revoke units** a single
+non-admin actor may spend per ledger:
+
+| Path | Units charged |
+|------|---------------|
+| `verify` | 1 (charged after auth, before any state read — junk usernames still count) |
+| `revoke_verification` | 1 |
+| `batch_verify` | `usernames.len()` — the **requested** size, before dedup/skip, charged atomically |
+
+- **Key:** `(Symbol("vfyrate"), actor_address)` in persistent storage, value
+  `(ledger_seq, units_spent)`.
+- **Ledger rollover:** the first call in a new ledger observes a stale
+  `ledger_seq` and resets `units_spent` to 0. There is no cross-ledger carry and
+  no unbounded growth — a single entry per actor, overwritten in place.
+- **Exceed → reject whole, write nothing:** the charge is computed before the
+  write; if it would push this ledger's spend past the cap, the call returns
+  `VerifyRateLimited` (code 30) having mutated no state (no record, no counter,
+  no event).
+- **Configurable:** `set_verify_limit(limit)` (admin-only). `limit == 0`
+  disables the check. With no configured value the contract uses
+  `DEFAULT_VERIFIES_PER_LEDGER` (20). `get_verify_limit()` is a public read.
+
+### Admin bypass (documented and intentional)
+
+The **admin is never rate-limited.** Callers check `is_admin_caller` first and
+the admin path never reaches `charge_verify_rate`. Incident response — mass
+revoke after a detected fraud, mass verify to clear a backlog — must not be
+throttled by the same mechanism that throttles a griefer. An admin key is
+already the maximum-trust key in the system; adding a rate limit to it would
+only create a denial-of-service against recovery.
+
+### Not covered
+
+- **Reads are never rate-limited.** Only the mutating verify/revoke paths carry
+  the counter.
+- Off-chain / RPC-level rate limiting is out of scope for the contract.
+
+---
+
 ## Responsible Disclosure
 
 If you discover a security vulnerability:

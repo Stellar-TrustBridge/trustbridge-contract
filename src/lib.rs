@@ -69,6 +69,8 @@ use crate::storage::{
     ADMIN_KEY,
     get_guardian as storage_get_guardian,
     remove_guardian as storage_remove_guardian,
+    charge_verify_rate, get_verify_limit as storage_get_verify_limit,
+    set_verify_limit as storage_set_verify_limit,
 };
 
 use crate::utils::{
@@ -720,6 +722,41 @@ impl TrustBridgeContract {
     #[must_use]
     pub fn get_cooldown(env: Env) -> u64 {
         storage_get_cooldown(&env)
+    }
+
+    /// Sets the per-verifier, per-ledger cap on verify/revoke units (Issue #292).
+    /// Admin-only.
+    ///
+    /// One `verify` or `revoke_verification` call spends one unit; one
+    /// `batch_verify` spends one unit per requested username. When a non-admin
+    /// caller would exceed `limit` units in a single ledger, the call fails with
+    /// [`ContractError::VerifyRateLimited`] and writes nothing.
+    ///
+    /// `limit == 0` disables the check entirely. With no configured value the
+    /// contract uses a built-in default (`DEFAULT_VERIFIES_PER_LEDGER`).
+    ///
+    /// The admin is never rate-limited — incident response must not be throttled.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
+    pub fn set_verify_limit(env: Env, limit: u32) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        storage_set_verify_limit(&env, limit);
+        Ok(())
+    }
+
+    /// Returns the active per-verifier, per-ledger verify/revoke cap (Issue #292).
+    ///
+    /// This is the configured value when the admin has set one (including `0`,
+    /// meaning disabled), otherwise the built-in default. Read-only; no auth.
+    #[must_use]
+    pub fn get_verify_limit(env: Env) -> u32 {
+        storage_get_verify_limit(&env)
     }
 
     fn register_personal(env: &Env, contract_id: &soroban_sdk::Address, name: &str, addr: &Address) {
@@ -1923,6 +1960,13 @@ impl TrustBridgeContract {
             return Err(ContractError::NotAuthorized);
         }
 
+        // Per-verifier, per-ledger anti-grief cap (Issue #292). Charged before
+        // any state read so a spammer calling `verify` on junk usernames still
+        // pays into the limit. The admin is exempt.
+        if !is_admin {
+            charge_verify_rate(&env, &caller, 1)?;
+        }
+
         let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
 
         if record.verified {
@@ -1990,6 +2034,15 @@ impl TrustBridgeContract {
         let is_verifier = storage_get_role(&env, &caller) == Some(Role::Verifier);
         if !is_admin && !is_verifier {
             return Err(ContractError::NotAuthorized);
+        }
+
+        // A batch spends one rate-limit unit per requested username, so a batch
+        // call cannot be used to exceed the per-ledger cap a loop of single
+        // `verify` calls would hit (Issue #292). Counted on the requested size,
+        // before dedup/skip, and charged atomically: if the batch would blow the
+        // cap it is rejected whole, having written nothing. Admin is exempt.
+        if !is_admin {
+            charge_verify_rate(&env, &caller, usernames.len())?;
         }
 
         let total = usernames.len();
@@ -2113,6 +2166,13 @@ impl TrustBridgeContract {
         let is_revoker = storage_get_role(&env, &caller) == Some(Role::Revoker);
         if !is_admin && !is_revoker {
             return Err(ContractError::NotAuthorized);
+        }
+
+        // Revoke shares the per-actor, per-ledger cap with verify (Issue #292):
+        // a compromised Revoker key can bloat events just as fast by revoking.
+        // Admin is exempt.
+        if !is_admin {
+            charge_verify_rate(&env, &caller, 1)?;
         }
 
         let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
@@ -3841,6 +3901,156 @@ mod test {
             let result =
                 TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "missing"));
             assert_eq!(result, Err(ContractError::NotRegistered));
+        });
+    }
+
+    // ── Issue #292: per-verifier, per-ledger verify/revoke rate limit ────────
+
+    #[test]
+    fn test_verify_rate_limit_blocks_verifier_after_cap() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        let verifier = Address::generate(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_verify_limit(env.clone(), 2).unwrap();
+            TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+
+            for i in 0..3u32 {
+                let name = format!("u{i}");
+                TrustBridgeContract::register(
+                    env.clone(),
+                    username(&env, &name),
+                    Address::generate(&env),
+                    Vec::new(&env),
+                )
+                .unwrap();
+            }
+
+            // First two verifies fit the cap.
+            TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "u0")).unwrap();
+            TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "u1")).unwrap();
+
+            // Third in the same ledger is rejected, and nothing is written.
+            let res =
+                TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "u2"));
+            assert_eq!(res, Err(ContractError::VerifyRateLimited));
+            assert!(
+                !TrustBridgeContract::get_address(env.clone(), username(&env, "u2"))
+                    .unwrap()
+                    .verified
+            );
+        });
+    }
+
+    #[test]
+    fn test_verify_rate_limit_resets_on_next_ledger() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        let verifier = Address::generate(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_verify_limit(env.clone(), 1).unwrap();
+            TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+            for i in 0..2u32 {
+                TrustBridgeContract::register(
+                    env.clone(),
+                    username(&env, &format!("u{i}")),
+                    Address::generate(&env),
+                    Vec::new(&env),
+                )
+                .unwrap();
+            }
+
+            TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "u0")).unwrap();
+            assert_eq!(
+                TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "u1")),
+                Err(ContractError::VerifyRateLimited)
+            );
+        });
+
+        // New ledger — the per-ledger counter starts fresh.
+        env.ledger().with_mut(|li| li.sequence_number += 1);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "u1")).unwrap();
+        });
+    }
+
+    #[test]
+    fn test_admin_is_exempt_from_verify_rate_limit() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_verify_limit(env.clone(), 1).unwrap();
+            for i in 0..4u32 {
+                let name = format!("u{i}");
+                TrustBridgeContract::register(
+                    env.clone(),
+                    username(&env, &name),
+                    Address::generate(&env),
+                    Vec::new(&env),
+                )
+                .unwrap();
+                TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, &name))
+                    .unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn test_batch_verify_counts_each_username_against_rate_limit() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        let verifier = Address::generate(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_verify_limit(env.clone(), 2).unwrap();
+            TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+
+            let mut names: Vec<String> = Vec::new(&env);
+            for i in 0..3u32 {
+                let name = format!("u{i}");
+                TrustBridgeContract::register(
+                    env.clone(),
+                    username(&env, &name),
+                    Address::generate(&env),
+                    Vec::new(&env),
+                )
+                .unwrap();
+                names.push_back(username(&env, &name));
+            }
+
+            // Batch of 3 against a cap of 2 is rejected whole.
+            assert_eq!(
+                TrustBridgeContract::batch_verify(env.clone(), verifier.clone(), names.clone()),
+                Err(ContractError::VerifyRateLimited)
+            );
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0);
+        });
+    }
+
+    #[test]
+    fn test_verify_rate_limit_disabled_when_zero() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        let verifier = Address::generate(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_verify_limit(env.clone(), 0).unwrap();
+            TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+            for i in 0..25u32 {
+                let name = format!("u{i}");
+                TrustBridgeContract::register(
+                    env.clone(),
+                    username(&env, &name),
+                    Address::generate(&env),
+                    Vec::new(&env),
+                )
+                .unwrap();
+                TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, &name))
+                    .unwrap();
+            }
         });
     }
 

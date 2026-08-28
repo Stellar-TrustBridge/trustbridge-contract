@@ -26,6 +26,7 @@ use soroban_sdk::contracterror;
 /// | 19 | `NotReserved` | `remove_reserved` |
 /// | 20 | `UsernameReserved` | `register` |
 /// | 21 | `ReservedListFull` | `add_reserved` |
+/// | 30 | `VerifyRateLimited` | `verify`, `batch_verify`, `revoke_verification` |
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -96,6 +97,10 @@ pub enum ContractError {
     NoPendingAdminTransfer = 28,
     /// `upgrade` was called without a required attestation (attestation-required mode is on).
     AttestationRequired = 29,
+    /// A non-admin caller exceeded the per-verifier, per-ledger verify/revoke
+    /// rate limit (Issue #292). Raised by `verify`, `batch_verify`, and
+    /// `revoke_verification`. The admin is exempt.
+    VerifyRateLimited = 30,
 }
 
 impl ContractError {
@@ -140,6 +145,7 @@ impl ContractError {
             27 => Some(ContractError::AdminTransferDelayActive),
             28 => Some(ContractError::NoPendingAdminTransfer),
             29 => Some(ContractError::AttestationRequired),
+            30 => Some(ContractError::VerifyRateLimited),
             _ => None,
         }
     }
