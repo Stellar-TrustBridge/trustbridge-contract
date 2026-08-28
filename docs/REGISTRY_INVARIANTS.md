@@ -1,8 +1,9 @@
 # Registry Invariants
 
-These invariants help reviewers reason about safe contract changes. Every
-invariant below is enforced by the property fuzzing suite in `src/lib.rs`, so a
-change that breaks one fails CI rather than reaching testnet.
+These invariants help reviewers reason about safe contract changes. The
+invariants below are enforced by the property fuzzing suite in `src/lib.rs` or
+the opt-in scale harness, so a change that breaks one is caught before reaching
+testnet.
 
 Related docs: [ABI](ABI.md) · [ARCHITECTURE](ARCHITECTURE.md) · [SECURITY](SECURITY.md)
 
@@ -34,6 +35,7 @@ Related docs: [ABI](ABI.md) · [ARCHITECTURE](ARCHITECTURE.md) · [SECURITY](SEC
 | I6 | Every username resolves to the address last registered for it, with the expected verification flag | `assert_registry_invariants` |
 | I7 | A rejected operation moves no counter and mutates no record | `test_fuzz_failure_paths_leave_invariants_intact` |
 | I8 | Counters never underflow, including removal attempts against an empty registry | `test_fuzz_counters_never_underflow_on_empty_registry` |
+| I9 | A complete paginated export visits every live username exactly once, with no duplicate, skip, or reorder across chunk boundaries | `test_paginated_export_at_10k_users` |
 
 ### `get_verified_count()` / `get_stats().verified` parity (Issue #90)
 
@@ -84,6 +86,25 @@ cargo test                   # full suite
 make fuzz                    # same as cargo test fuzz (Makefile target)
 make check                   # fmt + clippy + test + build
 ```
+
+### 10k-user pagination scale test
+
+The host-side integration harness `test_paginated_export_at_10k_users` inserts
+10,000 deterministic usernames, which fills 200 `CHUNK_SIZE`-50 chunks. It
+walks both the admin and public cursor-based exports with 100-record pages and
+asserts the total, page sizes, cursor progression, and exact username sequence.
+The test disables Soroban test-environment resource limits because registration
+and the full host-side walk are intentionally larger than a single mainnet
+invocation. It is feature-gated and excluded from the default fast suite.
+
+Run it with:
+
+```bash
+make test-scale
+```
+
+This is a local or scheduled load check; it does not represent a mainnet
+transaction or deployment test.
 
 ### Coverage profile
 

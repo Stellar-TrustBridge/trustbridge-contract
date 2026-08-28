@@ -1,0 +1,4 @@
+records: Vec<(String, ContributorRecord)>
+next_cursor: Option<u32>
+total: u32
+has_more: bool

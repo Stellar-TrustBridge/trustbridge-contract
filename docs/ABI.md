@@ -128,8 +128,6 @@ struct ChallengeRecord {
 | 3 | `NotAuthorized` | Caller lacks permission |
 | 4 | `NotRegistered` | Username not in registry |
 | 5 | `AlreadyVerified` | Username already verified |
-| 6 | `InvalidEntityType` | Unknown entity type value |
-| 7 | `OrgNameRequired` | Team registration requires org_name |
 | 6 | `NotVerified` | Cannot revoke verification because the username is not verified |
 | 7 | `Paused` | Contract is paused for maintenance or emergency |
 | 8 | `CooldownActive` | Upgrade cooldown period has not elapsed |
@@ -151,6 +149,14 @@ struct ChallengeRecord {
 variant and returns `None` for any unrecognized code. Every code round-trips
 through `from_code(variant.code()) == Some(variant)` — verified by the unit
 tests in `src/lib.rs` (`test_error_from_code_is_inverse_of_code`).
+
+Codes 1 through 16 are append-only and are frozen in
+[`abi/contract_error_codes.golden`](../abi/contract_error_codes.golden). The
+`contract_error_codes_match_golden` test checks both the enum discriminant and
+the `from_code()` mapping. New errors must use the next available code after
+the existing variants; renumbering requires a major ABI version. An intentional
+breaking change must update the golden file, this table, and the major ABI
+version in the same pull request with an explanation of the old and new map.
 
 ---
 
@@ -607,6 +613,20 @@ that budget while still allowing full export via a cursor loop.
 | `next_cursor` | `Option<u32>` | Next zero-based index offset, or `None` when done |
 | `total` | `u32` | Live registration count |
 | `has_more` | `bool` | `true` when another page exists |
+
+#### ExportPage layout compatibility
+
+The checked-in golden layout at
+`abi/export_page.layout.golden` is enforced by
+`export_page_layout_preserves_golden_prefix`. Existing `ExportPage` fields must
+keep their names, types, and order. New fields may be appended and remain
+backward-compatible with existing dashboard parsers; inserting or reordering a
+field is a breaking change.
+
+To intentionally accept a breaking layout change, update the golden file in the
+same commit, increment the ABI/schema version recorded in the release change,
+and document the old and new field order in the pull request. The layout test
+must pass with the updated golden before release.
 
 ### `get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
 

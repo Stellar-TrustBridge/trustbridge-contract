@@ -25,7 +25,7 @@ EXPORT_FILE ?= registry-export-$(NETWORK).json
 ADMIN_SOURCE ?=
 WASM_SIZE_LIMIT ?= 204800
 
-.PHONY: help build build-legacy test test-rehearsal fuzz bench bench-export bench-username bench-double-verify bench-register-budget fmt lint docs docs-check check ci clean \
+.PHONY: help build build-legacy test test-rehearsal test-scale fuzz bench bench-export bench-username bench-double-verify bench-register-budget fmt lint docs docs-check check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
         export-registry validate-registry
@@ -48,6 +48,9 @@ test: ## Run unit tests
 test-rehearsal: build ## Run protocol-upgrade rehearsal (requires pre-built WASM)
 	cargo test test_protocol_upgrade_rehearsal --features wasm-test -- --nocapture
 	@echo "PASS: protocol-upgrade rehearsal completed — all getters survived simulated WASM upgrade"
+
+test-scale: ## Run the opt-in 10k-user pagination boundary load test
+	cargo test --test integration --features scale-test test_paginated_export_at_10k_users -- --nocapture --test-threads=1
 
 fuzz: ## Run the invariant property fuzzing suite (deterministic seeds)
 	cargo test fuzz -- --nocapture

@@ -34,6 +34,82 @@ fn s(env: &Env, text: &str) -> String {
     String::from_str(env, text)
 }
 
+#[cfg(feature = "scale-test")]
+#[test]
+fn test_paginated_export_at_10k_users() {
+    const USER_COUNT: u32 = 10_000;
+    const PAGE_SIZE: u32 = 100;
+
+    let (env, _admin, user, _other, contract_id) = setup_test_env();
+    env.cost_estimate().disable_resource_limits();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        for index in 0..USER_COUNT {
+            let name = format!("scale-user-{index:05}");
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, &name),
+                user.clone(),
+                soroban_sdk::Vec::new(&env),
+            )
+            .unwrap();
+        }
+        assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, USER_COUNT);
+        assert_eq!(
+            trustbridge_contract::storage::get_chunk_count(&env),
+            USER_COUNT / trustbridge_contract::storage::CHUNK_SIZE,
+            "10k users must occupy 200 complete chunks"
+        );
+    });
+
+    for public in [false, true] {
+        let mut cursor = 0;
+        let mut seen = 0;
+
+        while cursor < USER_COUNT {
+            env.mock_all_auths();
+            let page = env.as_contract(&contract_id, || {
+                if public {
+                    TrustBridgeContract::get_public_paginated(env.clone(), cursor, PAGE_SIZE)
+                } else {
+                    TrustBridgeContract::get_registered_paginated(env.clone(), cursor, PAGE_SIZE)
+                }
+            })
+            .unwrap();
+
+            let expected_len = (USER_COUNT - cursor).min(PAGE_SIZE);
+            assert_eq!(page.total, USER_COUNT);
+            assert_eq!(page.records.len(), expected_len);
+
+            for offset in 0..expected_len {
+                let expected_name = format!("scale-user-{seen:05}");
+                assert_eq!(
+                    page.records.get(offset).unwrap().0,
+                    s(&env, &expected_name),
+                    "pagination returned a duplicate, skipped user, or reordered user"
+                );
+                seen += 1;
+            }
+
+            cursor = match page.next_cursor {
+                Some(next) => {
+                    assert_eq!(next, seen, "next cursor must advance by the page size");
+                    next
+                }
+                None => {
+                    assert_eq!(seen, USER_COUNT);
+                    assert!(!page.has_more);
+                    break;
+                }
+            };
+            assert!(page.has_more);
+        }
+
+        assert_eq!(seen, USER_COUNT, "pagination must visit every user exactly once");
+    }
+}
+
 // ── Full lifecycle ────────────────────────────────────────────────────────────
 
 #[test]
