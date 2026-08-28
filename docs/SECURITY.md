@@ -26,6 +26,10 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Compromised or unpinned RPC client dependency | Crate validation checklist below |
 | Compromised Verifier key silently revoking payout eligibility | `Role::Verifier` and `Role::Revoker` are distinct — Issue #212 |
 | Admin force-removing a name without a grace period | Challenge flow enforces on-chain `resolve_after` delay — Issue #214 |
+| Off-boarded contractor or bot key lingering as a live `Verifier`/`Revoker` forever | Optional per-grant expiry via `set_role_with_expiry`, checked lazily by `get_role` — see [Role Expiry](#role-expiry-issue-221) |
+| Stolen or transferred GitHub account staying `verified` (and payout-eligible) indefinitely | `config_verification`'s `expires_in` now drives an actual expiry, checked via `is_verification_active` — see [Time-Bounded Verification](#time-bounded-verification-issue-218) |
+| Single compromised admin key wiping a large slice of the registry in one `batch_remove` call | Above a configurable size threshold, `batch_remove` requires a second, distinct admin-equivalent signature — see [Dual-Control batch_remove](#dual-control-batch_remove-issue-219) |
+| Auditor trusting an unbound, unsigned `export_registry.sh` JSON dump | `export_attestation` binds a page to a SHA-256 digest, version, and ledger for offline comparison — see [Signed Export Attestation](#signed-export-attestation-issue-223) |
 
 ### Out of Scope (handled off-chain)
 
@@ -559,6 +563,193 @@ The `verify` function additionally guards against illegal state transitions:
 The `revoke_verification` function guards:
 - Revoking from an unregistered username → `NotRegistered` (code 4)
 - Revoking from a username that was never verified → `NotVerified` (code 6)
+
+---
+
+## Role Expiry (Issue #221)
+
+Contractors and bots that held `Role::Verifier` or `Role::Revoker` used to
+keep that access forever unless someone remembered to call `remove_role`. An
+off-boarded key that nobody thought to revoke could go on verifying (or
+revoking) payout eligibility indefinitely.
+
+`set_role_with_expiry(target, role, expires_at: Option<u64>)` grants a
+role that lapses once `env.ledger().timestamp() >= expires_at`. `set_role`
+is unchanged and still grants a role with no expiry — expiry is strictly
+opt-in.
+
+**Lazy expiry.** The `(role, expires_at)` entries are not deleted when the
+clock passes `expires_at`. Every role check in the contract —
+`get_role`, and therefore `verify`, `revoke_verification`, `batch_verify`,
+`get_role_holders`, `has_role_or_admin`, and `execute_batch_remove`'s
+second-signer check — reads through a single function
+(`storage::get_role`) that treats an expired grant as absent. This means a
+lapsed grant behaves as "no role" everywhere with no per-call-site change
+required, but the storage entry itself (and the address's slot in the
+enumeration index) persists until an explicit `remove_role`. Operators who
+want the entry actually deleted, not just ignored, still need to call
+`remove_role` — expiry answers "can this address still act as this role
+right now", not "has this contract forgotten this address ever held one."
+
+**Boundary:** `expires_at` is checked with `>=`, so a grant expires exactly
+at its timestamp, not one ledger after. `set_role_with_expiry` accepts an
+`expires_at` in the past or exactly equal to "now" — the grant is recorded
+but reads as already expired the instant the call returns. This is a
+deliberate simplification: no separate validation error, and no special
+case for a boundary an operator is unlikely to construct on purpose.
+
+**The admin identity is never affected.** `is_admin_caller` / `get_admin`
+read `ADMIN_KEY`, a separate, immutable storage slot set once by
+`initialize` and never touched by `set_role_with_expiry`. Only the
+RBAC-style `Role::Admin` grant — the one `initialize` sets alongside
+`ADMIN_KEY` through the same `set_role` path everyone else's roles go
+through — can be given an expiry, and only if a caller explicitly does so
+with `set_role_with_expiry`. This satisfies the constraint that this
+feature must not be able to expire the admin's authority "by accident."
+
+---
+
+## Time-Bounded Verification (Issue #218)
+
+A `verified` flag that stays true forever is a standing liability: a GitHub
+account can be phished or transferred after the contract already marked its
+Stellar address as verified, and nothing on-chain would notice.
+`config_verification`'s `expires_in` parameter existed before this issue but
+was stored and never read — this wires it into an actual check.
+
+**Clock:** the ledger timestamp (`env.ledger().timestamp()`), the same clock
+every other time-based policy in this contract uses (cooldowns, challenge
+delays, admin-transfer delay, role expiry above).
+
+**Lazy expiry, mirroring Role Expiry above.** `verify` records a
+verification timestamp; `ContributorRecord.verified` itself is **not**
+flipped back to `false` when the configured window lapses — only
+`revoke_verification` does that. `is_verification_active(github_username)`
+is the effective, expiry-aware read; `get_address(..).verified` remains the
+raw flag and stays `true` past expiry until revoked. Off-chain consumers
+that gate payouts on verification status **must** call
+`is_verification_active`, not read the raw flag, once `config_verification`
+has been used with a non-zero `expires_in`.
+
+**Expired, but not revoked, is an explicit and supported state.** A record
+can sit with `verified == true` (raw) and `is_verification_active == false`
+(effective) indefinitely if nobody calls `verify` or `revoke_verification`
+on it. This is intentional — lazy expiry means the contract does not spend
+gas eagerly walking the registry to flip flags nobody asked about, and any
+reader that cares checks `is_verification_active` directly.
+
+**`verify` renews instead of rejecting.** Calling `verify` on a username
+whose prior verification has expired succeeds and records a fresh
+timestamp, rather than returning `AlreadyVerified`. A verification that is
+still active is unaffected: a duplicate `verify` call against it still
+returns `AlreadyVerified`, exactly as before this issue.
+
+**Stats definition (`get_stats` / `get_verified_count`):** both count the
+raw `ContributorRecord.verified` flag, unchanged from before this issue.
+They are **not** expiry-aware and do not decrement when a verification
+expires without being revoked — only `revoke_verification` moves them. This
+is a deliberate O(1)-counter tradeoff: making the aggregate count
+expiry-aware would require scanning every record on every `get_stats` call.
+Callers needing the effective count must page the registry and check
+`is_verification_active` per record.
+
+---
+
+## Dual-Control `batch_remove` (Issue #219)
+
+`batch_remove` is a single admin signature that can delete up to
+`MAX_WRITE_BATCH` (25) registrations in one invocation — a wave treasury or
+large cleanup operation is one compromised or careless admin key away from a
+significant, instant loss of registry state. Above a configurable size
+threshold, a second, independently held key is now required.
+
+**Threshold semantics.** `set_batch_remove_threshold(n)` (admin-only). `n =
+0` (the default) disables dual control entirely: `batch_remove` behaves
+exactly as it did before this issue, for any batch size up to
+`MAX_WRITE_BATCH`. With `n > 0`, a batch with `usernames.len() > n` (strictly
+greater — a batch exactly at the threshold is unaffected) is rejected by
+`batch_remove` itself with `DualControlRequired`; it must go through
+`propose_batch_remove` → `execute_batch_remove`.
+
+**The two keys must be different.** `propose_batch_remove(caller, ...)`
+requires `caller == admin`, same as `batch_remove` today.
+`execute_batch_remove(caller)` requires `caller` to be the admin or hold
+`Role::Admin`, **and** requires `caller != proposal.proposed_by`. Neither
+signature alone can remove a large batch — one proposes, a distinct one
+executes.
+
+**"Do not deadlock if the second key is the same as the first" — addressed
+by documentation, not by code that silently falls back to single-key
+execution.** If an operator sets a non-zero threshold without first
+provisioning a second `Role::Admin` holder distinct from the contract
+admin, a large batch can be *proposed* but never *executed* — that is
+correct dual-control behavior, not a bug, and relaxing it (e.g. letting the
+proposer also execute when no second key exists) would defeat the point of
+this issue. The documented mitigation:
+
+- Provision a second `Role::Admin` address **before** relying on this — see
+  [ADMIN_RUNBOOK.md](./ADMIN_RUNBOOK.md#dual-control-batch_remove-issue-219).
+- `cancel_batch_remove` is always available (including while paused) to
+  discard a proposal that cannot currently be executed, so an operator is
+  never permanently stuck with an un-cancellable pending removal.
+- Alternatively, lower or zero the threshold (`set_batch_remove_threshold`)
+  to fall back to direct single-admin `batch_remove` for smaller cleanups.
+
+**Proposal expiry.** A pending proposal older than
+`BATCH_REMOVE_PROPOSAL_TTL_SECS` (24 hours) is treated as gone the next time
+`execute_batch_remove` is called — the storage slot is cleared and the call
+returns `NoPendingBatchRemove`. This bounds how long a stale username list
+remains executable; the operational context that justified it (e.g. a
+specific dispute list) may no longer hold weeks later.
+
+**Partial-success semantics are unchanged.** `execute_batch_remove` shares
+the exact same per-entry removal logic as `batch_remove` — one bad entry
+(already removed, never registered) does not block the rest, and the
+returned `BatchSummary` reports the real outcome.
+
+---
+
+## Signed Export Attestation (Issue #223)
+
+`export_registry.sh` produces a JSON page with no on-chain binding: an
+auditor working from a copy of that file has to trust that nobody tampered
+with it between export and review, with nothing to check that trust
+against. `export_attestation(cursor, limit)` gives an auditor a value bound
+to a specific ledger and contract version that they can verify offline.
+
+**What it does.** Returns the same `ExportPage` `get_registered_paginated`
+would for identical `cursor`/`limit`, plus a SHA-256 digest computed over
+that page's XDR encoding, the contract's schema version, and the ledger
+sequence the read happened at. XDR encoding of a fixed value is
+deterministic, so unchanged state reproduces the same digest on every call,
+and any change to a record, the total, or the pagination cursor changes it
+— this is what "digest stability" means for this feature and is what the
+unit tests in `src/lib.rs` (search `export_attestation`) assert directly,
+rather than pinning a specific hash value.
+
+**Auth is unchanged, not weakened.** `export_attestation` requires admin
+auth via `admin.require_auth()`, exactly like `get_registered_paginated` and
+`get_all_registered`. This issue adds a binding on top of an existing
+admin-gated export; it does not introduce a new, more permissive way to
+read the registry.
+
+**Paused behavior matches the existing admin-export pattern.**
+`export_attestation` does not call `require_not_paused` — like
+`get_registered_paginated` / `get_all_registered`, it stays available to
+the admin during a maintenance window so audit and export tooling is not
+blocked by the same pause that might be the reason for the audit.
+
+**Empty registry.** A fresh or fully-emptied instance is not a special
+case: `page.records` is empty, `page.total` is `0`, and `digest` is still a
+real, deterministic hash over that empty page — usable as a baseline
+attestation, e.g. immediately after deployment.
+
+**Explicitly out of scope for this issue** (see the issue's own Scope
+section): threshold/multi-party signatures over the digest, and a Merkle
+root committing to the *entire* registry across all pages. Both are
+possible future work — a registry-wide Merkle root in particular could
+complement this per Issue #27 — but neither is part of this attestation
+struct.
 
 ---
 

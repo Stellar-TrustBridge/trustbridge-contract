@@ -27,15 +27,17 @@ pub use error::ContractError;
 pub use events::{RegisteredEvent, RemovedEvent, VerifiedEvent};
 pub use storage::{ContributorRecord, EntityType, Stats};
 pub use events::{
-    AttestationClearedEvent, ChallengeCancelledEvent, ChallengeCompletedEvent, RenamedEvent,
+    AttestationClearedEvent, BatchRemoveCancelledEvent, BatchRemoveExecutedEvent,
+    BatchRemoveProposedEvent, ChallengeCancelledEvent, ChallengeCompletedEvent, RenamedEvent,
     RotationCancelledEvent, RotationExecutedEvent, RotationRequestedEvent,
     ChallengeStartedEvent, EmergencyClearedEvent, EmergencyPausedEvent, PausedEvent,
     RegisteredEvent, RemovedEvent, RoleGrantedEvent, RoleRevokedEvent, UnpausedEvent,
     UpgradeAttestedEvent, UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
 };
 pub use storage::{
-    ChallengeRecord, ContributorRecord, ExportPage, HealthSnapshot, Role, Stats,
-    VerificationConfig, WasmAttestation, WasmProvenance, PauseReason,
+    ChallengeRecord, ContributorRecord, ExportAttestation, ExportPage, HealthSnapshot,
+    PendingBatchRemove, Role, Stats, VerificationConfig, WasmAttestation, WasmProvenance,
+    PauseReason,
 };
 pub use version::Version;
 
@@ -509,7 +511,7 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Assigns a role to `target`. Admin-only.
+    /// Assigns a role to `target` with no expiry. Admin-only.
     ///
     /// Roles gate access to privileged operations:
     ///
@@ -518,6 +520,11 @@ impl TrustBridgeContract {
     /// | `Admin` | Everything |
     /// | `Upgrader` | Call `upgrade` |
     /// | `Verifier` | Call `verify` and `revoke_verification` |
+    ///
+    /// A grant made here never lapses on its own — see `set_role_with_expiry`
+    /// (Issue #221) for a time-bounded grant, e.g. for a contractor or bot
+    /// key that should stop verifying after a known off-boarding date without
+    /// requiring anyone to remember to call `remove_role`.
     ///
     /// Emits [`RoleGrantedEvent`].
     ///
@@ -555,7 +562,10 @@ impl TrustBridgeContract {
     ///
     /// After this call `get_role(target)` returns `None`. Does not affect the
     /// admin's own role — the admin address is stored separately and cannot be
-    /// stripped via `remove_role`.
+    /// stripped via `remove_role`. Also clears any expiry timestamp set via
+    /// `set_role_with_expiry` (Issue #221) — this is the only way to actually
+    /// delete a role's storage entries; letting a time-bounded grant simply
+    /// lapse leaves it in storage, just no longer reported by `get_role`.
     ///
     /// Emits [`RoleRevokedEvent`].
     ///
@@ -588,13 +598,102 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Returns the role assigned to `address`, or `None` if no role is assigned.
+    /// Returns the role currently assigned to `address`, or `None` if no role
+    /// is assigned **or its grant has expired** (Issue #221).
     ///
-    /// Read-only; no auth required. Returns `None` for any address that has never
-    /// been granted a role (including the admin address, which is stored separately).
+    /// Read-only; no auth required. Returns `None` for any address that has
+    /// never been granted a role (including the admin address, which is
+    /// stored separately). Expiry is lazy: an expired grant's storage entry
+    /// is left in place — `get_role` just stops reporting it as held. Use
+    /// `get_role_expiry` to see the raw expiry timestamp, including for an
+    /// address whose grant has already lapsed.
     #[must_use]
     pub fn get_role(env: Env, address: Address) -> Option<Role> {
         storage_get_role(&env, &address)
+    }
+
+    /// Returns `true` if `address` currently holds `role` — i.e. `get_role`
+    /// would return `Some(role)` (Issue #221). Expired grants read as not
+    /// held, the same as if `address` had never been granted a role.
+    ///
+    /// Read-only; no auth required.
+    #[must_use]
+    pub fn has_role(env: Env, address: Address, role: Role) -> bool {
+        storage_get_role(&env, &address) == Some(role)
+    }
+
+    /// The expiry timestamp for `address`'s current role grant, or `None` if
+    /// it was granted with no expiry, or if `address` holds no `ROLE_KEY`
+    /// entry at all (Issue #221).
+    ///
+    /// Unlike `get_role`, this does **not** hide an already-lapsed expiry —
+    /// it is the raw stored timestamp, so an operator auditing off-boarded
+    /// keys can distinguish "never expires" (`None`) from "expired at T"
+    /// (`Some(T)` where `T` is in the past) without waiting for `remove_role`
+    /// to run.
+    ///
+    /// Read-only; no auth required.
+    #[must_use]
+    pub fn get_role_expiry(env: Env, address: Address) -> Option<u64> {
+        crate::storage::get_role_expiry(&env, &address)
+    }
+
+    /// Assigns a role to `target` with an optional expiry timestamp
+    /// (Issue #221). Admin-only.
+    ///
+    /// Identical to `set_role`, except the grant can be time-bounded: once
+    /// `env.ledger().timestamp() >= expires_at`, `get_role(target)` returns
+    /// `None` — and every role check built on it (`verify`,
+    /// `revoke_verification`, `batch_verify`, `get_role_holders`,
+    /// `has_role_or_admin`) treats `target` as holding no role at all, with
+    /// no further changes needed at those call sites. `set_role(target,
+    /// role)` remains available and is exactly `set_role_with_expiry(target,
+    /// role, None)` — a grant that never expires.
+    ///
+    /// This is intentionally the **only** path that can expire a role
+    /// assignment. It never touches `ADMIN_KEY`: the contract admin's
+    /// identity (`has_admin_role`, `get_admin`) is a separate, immutable
+    /// storage slot, so granting `Role::Admin` here with an expiry only
+    /// affects RBAC-style role checks, never who the admin is.
+    ///
+    /// Expiry is lazy — see `get_role` and `docs/SECURITY.md` for what that
+    /// means for `get_role_holders` and storage cleanup.
+    ///
+    /// Emits [`RoleGrantedEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
+    pub fn set_role_with_expiry(
+        env: Env,
+        target: Address,
+        role: Role,
+        expires_at: Option<u64>,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        crate::storage::set_role_with_expiry(&env, &target, &role, expires_at);
+        let timestamp = env.ledger().timestamp();
+        RoleGrantedEvent {
+            address: target,
+            role: role as u32,
+            admin,
+            timestamp,
+            domain: event_domain(&env),
+        }
+        .publish(&env);
+
+        Ok(())
     }
 
     /// Lists addresses that currently hold a role, as `(address, role)` pairs
@@ -1099,6 +1198,56 @@ impl TrustBridgeContract {
         get_verification_config(&env)
     }
 
+    /// Returns `true` if `github_username` is verified **and that
+    /// verification has not expired** (Issue #218).
+    ///
+    /// This is the effective, expiry-aware status — the read to use when
+    /// deciding payout eligibility. It differs from
+    /// `get_address(github_username).map(|r| r.verified)` in one case: a
+    /// record whose `verified` flag is still raw-`true` but whose
+    /// `config_verification`-configured window has lapsed. That case reads
+    /// `true` from the raw flag but `false` here.
+    ///
+    /// `false` for an unregistered username, a never-verified one, or one
+    /// whose verification has expired. `true` for a verified username when
+    /// verification was never configured, or configured with
+    /// `expires_in == 0` (no expiry) — expiry only ever narrows `verified`,
+    /// it never widens it.
+    ///
+    /// Read-only; no auth required; works while paused.
+    #[must_use]
+    pub fn is_verification_active(env: Env, github_username: String) -> bool {
+        match get_record(&env, &github_username) {
+            Some(record) if record.verified => {
+                !crate::storage::is_verification_expired(&env, &github_username)
+            }
+            _ => false,
+        }
+    }
+
+    /// Returns the ledger timestamp at which `github_username`'s **current**
+    /// verification will expire, or `None` if it cannot expire — never
+    /// verified, verification not configured, configured with
+    /// `expires_in == 0`, or already revoked (Issue #218).
+    ///
+    /// Does not check whether that timestamp is already in the past — pair
+    /// this with `is_verification_active` for the effective yes/no answer.
+    ///
+    /// Read-only; no auth required.
+    #[must_use]
+    pub fn get_verification_expiry(env: Env, github_username: String) -> Option<u64> {
+        let record = get_record(&env, &github_username)?;
+        if !record.verified {
+            return None;
+        }
+        let config = get_verification_config(&env)?;
+        if config.expires_in == 0 {
+            return None;
+        }
+        let verified_at = crate::storage::get_verified_at(&env, &github_username)?;
+        Some(verified_at.saturating_add(config.expires_in))
+    }
+
     /// Returns stored audit log entries for operator compliance and inspection.
     #[must_use]
     pub fn get_audit_logs(env: Env) -> Vec<AuditLogEntry> {
@@ -1511,6 +1660,10 @@ impl TrustBridgeContract {
     /// - [`ContractError::Paused`] if the contract is paused.
     /// - [`ContractError::InvalidBatchSize`] if `usernames` is empty or exceeds
     ///   the configured maximum batch size.
+    /// - [`ContractError::DualControlRequired`] if `usernames.len()` exceeds
+    ///   the configured dual-control threshold (Issue #219, `0` by default,
+    ///   which disables this check) — use `propose_batch_remove` /
+    ///   `execute_batch_remove` for a batch this size instead.
     ///
     /// # Per-entry outcomes (counted in BatchSummary)
     ///
@@ -1541,6 +1694,254 @@ impl TrustBridgeContract {
             return Err(ContractError::NotAuthorized);
         }
 
+        // Issue #219: above the configured threshold, a single admin
+        // signature is not enough — route through propose/execute instead.
+        if crate::storage::requires_batch_remove_dual_control(&env, usernames.len()) {
+            return Err(ContractError::DualControlRequired);
+        }
+
+        let summary = Self::apply_batch_remove(&env, &caller, &usernames);
+        Ok(summary)
+    }
+
+    /// Proposes a large `batch_remove` for dual-control execution
+    /// (Issue #219). First of the two steps required once `usernames.len()`
+    /// exceeds the configured threshold (`set_batch_remove_threshold`) —
+    /// `batch_remove` itself refuses a batch that size with
+    /// `DualControlRequired`.
+    ///
+    /// Records the exact username list and who proposed it. A **different**
+    /// admin-equivalent address must call `execute_batch_remove` to actually
+    /// remove them — one signature alone can never delete a large batch.
+    ///
+    /// Only one proposal may be pending at a time; call `cancel_batch_remove`
+    /// first to replace one. A proposal not executed within
+    /// `BATCH_REMOVE_PROPOSAL_TTL_SECS` (24 hours) is treated as gone the
+    /// next time anyone calls `execute_batch_remove`.
+    ///
+    /// Emits [`BatchRemoveProposedEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::InvalidBatchSize`] if `usernames` is empty or exceeds
+    ///   the configured maximum batch size.
+    /// - [`ContractError::NotAuthorized`] if `caller` is not the contract admin.
+    /// - [`ContractError::BatchRemoveProposalPending`] if a proposal is
+    ///   already pending.
+    pub fn propose_batch_remove(
+        env: Env,
+        caller: Address,
+        usernames: Vec<String>,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        let config = BatchConfig::for_writes();
+        if !config.is_valid_batch_size(usernames.len()) {
+            return Err(ContractError::InvalidBatchSize);
+        }
+
+        caller.require_auth();
+
+        let admin = get_admin(&env)?;
+        if caller != admin {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        if let Some(existing) = crate::storage::get_pending_batch_remove(&env) {
+            if !crate::storage::is_batch_remove_proposal_expired(&env, &existing) {
+                return Err(ContractError::BatchRemoveProposalPending);
+            }
+        }
+
+        let timestamp = env.ledger().timestamp();
+        let count = usernames.len();
+        crate::storage::set_pending_batch_remove(
+            &env,
+            &PendingBatchRemove {
+                usernames,
+                proposed_by: caller.clone(),
+                proposed_at: timestamp,
+            },
+        );
+
+        BatchRemoveProposedEvent {
+            proposed_by: caller,
+            count,
+            timestamp,
+            domain: event_domain(&env),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Executes the pending large `batch_remove` proposal. Second step of
+    /// dual control (Issue #219).
+    ///
+    /// `caller` must be a **different** address than whoever proposed the
+    /// batch, and must itself be admin-equivalent — the contract admin or
+    /// any address currently holding `Role::Admin` (see `set_role`). This is
+    /// what makes the control "dual": neither address alone can remove the
+    /// batch. An operator relying on this must provision at least one
+    /// `Role::Admin` holder distinct from the contract admin ahead of time —
+    /// see `docs/SECURITY.md#dual-control-batch_remove-issue-219`.
+    ///
+    /// A proposal older than `BATCH_REMOVE_PROPOSAL_TTL_SECS` is treated as
+    /// gone (cleared, `NoPendingBatchRemove`) rather than executed.
+    ///
+    /// Same partial-success semantics as `batch_remove`: one bad entry does
+    /// not block the rest. Emits [`BatchRemoveExecutedEvent`] plus a
+    /// [`RemovedEvent`] per removed username.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from `caller`.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NoPendingBatchRemove`] if nothing is proposed, or
+    ///   the pending proposal has expired.
+    /// - [`ContractError::NotAuthorized`] if `caller` is not admin-equivalent,
+    ///   or is the same address that proposed the batch.
+    pub fn execute_batch_remove(env: Env, caller: Address) -> Result<BatchSummary, ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        caller.require_auth();
+
+        let proposal = crate::storage::get_pending_batch_remove(&env)
+            .ok_or(ContractError::NoPendingBatchRemove)?;
+
+        if crate::storage::is_batch_remove_proposal_expired(&env, &proposal) {
+            crate::storage::clear_pending_batch_remove(&env);
+            return Err(ContractError::NoPendingBatchRemove);
+        }
+
+        let admin = get_admin(&env)?;
+        let is_admin_equivalent =
+            caller == admin || storage_get_role(&env, &caller) == Some(Role::Admin);
+        if !is_admin_equivalent || caller == proposal.proposed_by {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        crate::storage::clear_pending_batch_remove(&env);
+
+        let count = proposal.usernames.len();
+        let summary = Self::apply_batch_remove(&env, &caller, &proposal.usernames);
+
+        BatchRemoveExecutedEvent {
+            executed_by: caller,
+            proposed_by: proposal.proposed_by,
+            count,
+            successful: summary.successful,
+            timestamp: env.ledger().timestamp(),
+            domain: event_domain(&env),
+        }
+        .publish(&env);
+
+        Ok(summary)
+    }
+
+    /// Cancels the pending large `batch_remove` proposal without executing
+    /// it (Issue #219). Available even while paused — an abort path should
+    /// not itself be blockable by the same emergency that might motivate
+    /// using it.
+    ///
+    /// Emits [`BatchRemoveCancelledEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if `caller` is not the contract admin.
+    /// - [`ContractError::NoPendingBatchRemove`] if nothing is proposed.
+    pub fn cancel_batch_remove(env: Env, caller: Address) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        caller.require_auth();
+
+        let admin = get_admin(&env)?;
+        if caller != admin {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        let proposal = crate::storage::get_pending_batch_remove(&env)
+            .ok_or(ContractError::NoPendingBatchRemove)?;
+
+        crate::storage::clear_pending_batch_remove(&env);
+
+        BatchRemoveCancelledEvent {
+            cancelled_by: caller,
+            proposed_by: proposal.proposed_by,
+            timestamp: env.ledger().timestamp(),
+            domain: event_domain(&env),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Returns the pending large-batch proposal, if one exists — regardless
+    /// of whether it has already expired (Issue #219). Read-only; no auth
+    /// required; works while paused, so a holder of either key can always
+    /// see what is queued.
+    #[must_use]
+    pub fn get_pending_batch_remove(env: Env) -> Option<PendingBatchRemove> {
+        crate::storage::get_pending_batch_remove(&env)
+    }
+
+    /// Sets the `batch_remove` dual-control size threshold. Admin-only
+    /// (Issue #219).
+    ///
+    /// `0` (the default) disables dual control entirely — every
+    /// `batch_remove` call executes directly regardless of size, matching
+    /// pre-#219 behavior. A non-zero value requires any batch strictly
+    /// larger than it to go through `propose_batch_remove` /
+    /// `execute_batch_remove` instead.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
+    pub fn set_batch_remove_threshold(env: Env, threshold: u32) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        crate::storage::set_batch_remove_threshold(&env, threshold);
+        Ok(())
+    }
+
+    /// Returns the configured `batch_remove` dual-control size threshold —
+    /// `0` if dual control is disabled (the default) (Issue #219).
+    ///
+    /// Read-only; no auth required.
+    #[must_use]
+    pub fn get_batch_remove_threshold(env: Env) -> u32 {
+        crate::storage::get_batch_remove_threshold(&env)
+    }
+
+    /// Shared removal loop for `batch_remove` and `execute_batch_remove`
+    /// (Issue #219). `caller` is the signer of the transaction actually
+    /// performing the removals — the admin for a direct `batch_remove`, or
+    /// the executing address for a dual-control batch — and is what gets
+    /// recorded on each `RemovedEvent` / audit entry.
+    fn apply_batch_remove(env: &Env, caller: &Address, usernames: &Vec<String>) -> BatchSummary {
         let total = usernames.len();
         let mut successful: u32 = 0;
         let mut removed: u32 = 0;
@@ -1549,18 +1950,16 @@ impl TrustBridgeContract {
         for username in usernames.iter() {
             // Attempt the remove. Silently skip failures (not registered, etc.)
             // so one bad entry does not kill the whole batch.
-            let record = match get_record(&env, &username) {
+            let record = match get_record(env, &username) {
                 Some(r) => r,
                 None => continue, // not registered — count as failure below
             };
 
-            // With admin auth, the auth check inside single remove would pass,
-            // but we replicate the full logic here to be explicit.
             let timestamp = env.ledger().timestamp();
             let stellar_address = record.stellar_address.clone();
 
-            remove_record(&env, &username);
-            remove_from_index(&env, &username);
+            remove_record(env, &username);
+            remove_from_index(env, &username);
 
             // Counters are accumulated and written once after the loop, so
             // `count` and `vcount` move together exactly once per batch rather
@@ -1574,12 +1973,12 @@ impl TrustBridgeContract {
                 github_username: username.clone(),
                 stellar_address: stellar_address.clone(),
                 timestamp,
-                domain: event_domain(&env),
+                domain: event_domain(env),
             }
-            .publish(&env);
+            .publish(env);
 
             push_audit_entry(
-                &env,
+                env,
                 AuditLogEntry::new(AuditEventType::UserRemoved, timestamp, Some(caller.clone()))
                     .with_username(username.clone())
                     .with_address(stellar_address),
@@ -1593,16 +1992,16 @@ impl TrustBridgeContract {
         // operations per entry, and left `count` and `vcount` briefly
         // inconsistent with each other partway through.
         if removed > 0 {
-            set_count(&env, get_count(&env).saturating_sub(removed));
+            set_count(env, get_count(env).saturating_sub(removed));
         }
         if unverified > 0 {
             set_verified_count(
-                &env,
-                storage_get_verified_count(&env).saturating_sub(unverified),
+                env,
+                storage_get_verified_count(env).saturating_sub(unverified),
             );
         }
 
-        Ok(BatchSummary::new(total, successful))
+        BatchSummary::new(total, successful)
     }
 
     /// Looks up the `ContributorRecord` for `github_username`. Returns `None` if not registered.
@@ -1809,6 +2208,60 @@ impl TrustBridgeContract {
         get_registered_paginated_internal(&env, cursor, limit)
     }
 
+    /// Returns a signed export attestation for one page of the registry.
+    /// Admin-only (Issue #223).
+    ///
+    /// Same `cursor`/`limit` pagination as `get_registered_paginated` — this
+    /// wraps the identical [`ExportPage`] with a SHA-256 digest over it, the
+    /// contract's schema version, and the ledger sequence the read happened
+    /// at. `scripts/export_registry.sh` (or any offline tool) can hash the
+    /// same page bytes it just downloaded and compare against `digest`
+    /// without any further network round-trip — the point for air-gapped
+    /// audits, where the auditor may not have live RPC access at all.
+    ///
+    /// An empty registry is not an error: `page.records` is empty, `total`
+    /// is `0`, and `digest` is still a real hash over that (empty) page —
+    /// deterministic and comparable like any other page.
+    ///
+    /// This does **not** replace `get_registered_paginated` /
+    /// `get_all_registered` for the actual bulk export — it is a companion
+    /// attestation over the same data. Admin auth for the underlying export
+    /// is unchanged; this adds a binding on top, it does not relax anything.
+    ///
+    /// Unaffected by the normal pause flag, matching
+    /// `get_registered_paginated` / `get_all_registered`: admin export and
+    /// audit tooling stays available during a maintenance window.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
+    pub fn export_attestation(
+        env: Env,
+        cursor: u32,
+        limit: u32,
+    ) -> Result<ExportAttestation, ContractError> {
+        require_initialized(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        let page = get_registered_paginated_internal(&env, cursor, limit)?;
+        let digest = crate::storage::build_export_digest(&env, &page);
+        let version = storage_get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple());
+        let ledger = env.ledger().sequence();
+
+        Ok(ExportAttestation {
+            page,
+            digest,
+            version: soroban_sdk::vec![&env, version.0, version.1, version.2],
+            ledger,
+        })
+    }
+
     /// Public paginated read for indexers and dashboard consumers.
     ///
     /// Same cursor/limit semantics as `get_registered_paginated` but requires no auth,
@@ -1900,13 +2353,21 @@ impl TrustBridgeContract {
     /// Callable by the contract admin **or** any address assigned the
     /// `Role::Verifier` role (Issue #12 — verifier role separation).
     ///
+    /// If `config_verification` set a non-zero `expires_in` and this
+    /// username's **previous** verification has expired, `verify` treats it
+    /// as not-currently-verified and renews it — recording a fresh
+    /// verification timestamp — rather than returning `AlreadyVerified`
+    /// (Issue #218). A verification that is still active (not expired) is
+    /// unaffected by this and still rejects a duplicate call.
+    ///
     /// # Errors
     ///
     /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
     /// - [`ContractError::Paused`] if the contract is paused.
     /// - [`ContractError::NotAuthorized`] if `caller` is not an admin or verifier.
     /// - [`ContractError::NotRegistered`] if `github_username` is not registered.
-    /// - [`ContractError::AlreadyVerified`] if the record is already verified.
+    /// - [`ContractError::AlreadyVerified`] if the record is verified and that
+    ///   verification has not expired.
     pub fn verify(env: Env, caller: Address, github_username: String) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
@@ -1925,18 +2386,32 @@ impl TrustBridgeContract {
 
         let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
 
-        if record.verified {
+        // Issue #218: an expired prior verification does not block a fresh
+        // one — only a still-active verification does.
+        let was_active =
+            record.verified && !crate::storage::is_verification_expired(&env, &github_username);
+        if was_active {
             return Err(ContractError::AlreadyVerified);
         }
 
+        let was_verified = record.verified;
         record.verified = true;
         set_record(&env, &github_username, &record);
-        set_verified_count(&env, storage_get_verified_count(&env).saturating_add(1));
-        bump_ever_verified_count(&env);
+        let timestamp = env.ledger().timestamp();
+        crate::storage::set_verified_at(&env, &github_username, timestamp);
+
+        // Only a genuine false→true transition is a new verification for
+        // counting purposes — renewing an expired-but-never-revoked
+        // verification does not touch `verified_count` a second time, since
+        // it was never decremented when the previous grant expired (expiry
+        // is lazy; see `is_verification_expired`).
+        if !was_verified {
+            set_verified_count(&env, storage_get_verified_count(&env).saturating_add(1));
+            bump_ever_verified_count(&env);
+        }
 
         // Clear pending reverify flag upon successful verification
         clear_pending_reverify(&env, &github_username);
-        let timestamp = env.ledger().timestamp();
         VerifiedEvent {
             github_username: github_username.clone(),
             stellar_address: record.stellar_address.clone(),
@@ -1959,6 +2434,10 @@ impl TrustBridgeContract {
     ///
     /// Callable by the contract admin **or** any address assigned the
     /// `Role::Verifier` role. `Role::Revoker` does not grant this permission.
+    ///
+    /// Same expired-verification renewal behavior as `verify` (Issue #218):
+    /// an entry whose prior verification has expired is treated as pending,
+    /// not skipped, and gets a fresh verification timestamp.
     ///
     /// # Auth
     ///
@@ -2004,13 +2483,17 @@ impl TrustBridgeContract {
         //
         // Skipping duplicates matters for the counter: the same username twice
         // in one batch would otherwise be counted twice against `vcount` even
-        // though only one record changes.
+        // though only one record changes. A record whose verification is
+        // still active (verified and not expired, Issue #218) is skipped the
+        // same way `verify` skips it; an expired one is treated as pending.
         let mut pending: Vec<String> = Vec::new(&env);
         for username in usernames.iter() {
             let Some(record) = get_record(&env, &username) else {
                 continue;
             };
-            if record.verified {
+            let active =
+                record.verified && !crate::storage::is_verification_expired(&env, &username);
+            if active {
                 continue;
             }
             if pending.iter().any(|u| u == username) {
@@ -2021,6 +2504,11 @@ impl TrustBridgeContract {
 
         // ── Phase 2: apply ──────────────────────────────────────────────────
         let mut successful: u32 = 0;
+        // Only entries making a genuine false→true transition count toward
+        // `verified_count` / `ever_verified_count` — renewing an
+        // expired-but-never-revoked entry does not, since it was never
+        // decremented when its previous grant expired (expiry is lazy).
+        let mut newly_verified: u32 = 0;
         for username in pending.iter() {
             // Re-read rather than carrying the record from phase 1: cloning a
             // record per pending entry would hold the whole batch in memory,
@@ -2030,10 +2518,14 @@ impl TrustBridgeContract {
                 continue;
             };
 
+            let was_verified = record.verified;
             record.verified = true;
             set_record(&env, &username, &record);
-            set_verified_count(&env, storage_get_verified_count(&env).saturating_add(1));
-            bump_ever_verified_count(&env);
+            crate::storage::set_verified_at(&env, &username, timestamp);
+            if !was_verified {
+                newly_verified = newly_verified.saturating_add(1);
+                bump_ever_verified_count(&env);
+            }
             clear_pending_reverify(&env, &username);
 
             VerifiedEvent {
@@ -2062,10 +2554,10 @@ impl TrustBridgeContract {
         // per entry. That is 2 storage operations rather than 2N, and it means
         // `vcount` moves exactly once — there is no intermediate state in which
         // it has been advanced for some entries but not others.
-        if successful > 0 {
+        if newly_verified > 0 {
             set_verified_count(
                 &env,
-                storage_get_verified_count(&env).saturating_add(successful),
+                storage_get_verified_count(&env).saturating_add(newly_verified),
             );
         }
 
@@ -2124,6 +2616,12 @@ impl TrustBridgeContract {
         record.verified = false;
         set_record(&env, &github_username, &record);
         set_verified_count(&env, storage_get_verified_count(&env).saturating_sub(1));
+        // A revoked record has no verification left to expire — clear the
+        // timestamp so a later fresh `verify()` is not compared against a
+        // stale grant (Issue #218). Also covers the "expired but not
+        // revoked" case cleanly: revoking still works off the raw `verified`
+        // flag regardless of expiry, and this leaves nothing behind either way.
+        crate::storage::clear_verified_at(&env, &github_username);
 
         let timestamp = env.ledger().timestamp();
         VerificationRevokedEvent {
@@ -8774,5 +9272,786 @@ mod test {
         assert!(authorized_addresses.contains(&sponsor));
         assert!(authorized_addresses.contains(&user2));
         assert!(authorized_addresses.contains(&user1));
+    }
+
+    // ── Role expiry (Issue #221) ────────────────────────────────────────────
+
+    #[test]
+    fn test_set_role_with_expiry_active_before_expiry() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role_with_expiry(
+                env.clone(),
+                user.clone(),
+                Role::Verifier,
+                Some(2_000),
+            )
+            .unwrap();
+            assert_eq!(
+                TrustBridgeContract::get_role(env.clone(), user.clone()),
+                Some(Role::Verifier)
+            );
+            assert!(TrustBridgeContract::has_role(
+                env.clone(),
+                user.clone(),
+                Role::Verifier
+            ));
+            assert_eq!(
+                TrustBridgeContract::get_role_expiry(env.clone(), user.clone()),
+                Some(2_000)
+            );
+        });
+    }
+
+    #[test]
+    fn test_role_expires_lazily_get_role_returns_none_after_expiry() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role_with_expiry(
+                env.clone(),
+                user.clone(),
+                Role::Verifier,
+                Some(2_000),
+            )
+            .unwrap();
+        });
+
+        env.ledger().set_timestamp(2_500);
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::get_role(env.clone(), user.clone()), None);
+            assert!(!TrustBridgeContract::has_role(
+                env.clone(),
+                user.clone(),
+                Role::Verifier
+            ));
+            // Lazy expiry: the raw timestamp is still readable even though the
+            // grant no longer resolves as held.
+            assert_eq!(
+                TrustBridgeContract::get_role_expiry(env.clone(), user.clone()),
+                Some(2_000)
+            );
+        });
+    }
+
+    #[test]
+    fn test_role_expiry_boundary_exactly_now_is_expired() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role_with_expiry(
+                env.clone(),
+                user.clone(),
+                Role::Verifier,
+                Some(2_000),
+            )
+            .unwrap();
+        });
+
+        // One ledger second before expires_at: still active.
+        env.ledger().set_timestamp(1_999);
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_role(env.clone(), user.clone()),
+                Some(Role::Verifier)
+            );
+        });
+
+        // Exactly at expires_at: `is_role_expired` uses `>=`, so this reads as
+        // already expired.
+        env.ledger().set_timestamp(2_000);
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::get_role(env.clone(), user.clone()), None);
+        });
+    }
+
+    #[test]
+    fn test_set_role_default_never_expires() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role(env.clone(), user.clone(), Role::Verifier).unwrap();
+            assert_eq!(
+                TrustBridgeContract::get_role_expiry(env.clone(), user.clone()),
+                None
+            );
+        });
+
+        env.ledger().set_timestamp(1_000_000_000);
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_role(env.clone(), user.clone()),
+                Some(Role::Verifier)
+            );
+        });
+    }
+
+    #[test]
+    fn test_remove_role_clears_expiry() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role_with_expiry(
+                env.clone(),
+                user.clone(),
+                Role::Verifier,
+                Some(5_000),
+            )
+            .unwrap();
+            TrustBridgeContract::remove_role(env.clone(), user.clone()).unwrap();
+            assert_eq!(TrustBridgeContract::get_role(env.clone(), user.clone()), None);
+            assert_eq!(
+                TrustBridgeContract::get_role_expiry(env.clone(), user.clone()),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn test_admin_role_grant_with_expiry_does_not_affect_admin_identity() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        env.as_contract(&contract_id, || {
+            // Explicitly (and unusually) expire the admin's own RBAC
+            // Role::Admin grant — this must never touch `has_admin_role`.
+            TrustBridgeContract::set_role_with_expiry(
+                env.clone(),
+                admin.clone(),
+                Role::Admin,
+                Some(1_100),
+            )
+            .unwrap();
+        });
+
+        env.ledger().set_timestamp(2_000);
+        env.as_contract(&contract_id, || {
+            // The RBAC grant has lapsed...
+            assert_eq!(TrustBridgeContract::get_role(env.clone(), admin.clone()), None);
+            // ...but the admin's real identity (ADMIN_KEY) is untouched.
+            assert!(TrustBridgeContract::has_admin_role(env.clone(), admin.clone()));
+            // Admin-gated calls still work.
+            TrustBridgeContract::set_cooldown(env.clone(), 42).unwrap();
+            assert_eq!(TrustBridgeContract::get_cooldown(env.clone()), 42);
+        });
+    }
+
+    #[test]
+    fn test_expired_verifier_role_cannot_verify() {
+        let env = Env::default();
+        let (admin, user, verifier, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+            TrustBridgeContract::set_role_with_expiry(
+                env.clone(),
+                verifier.clone(),
+                Role::Verifier,
+                Some(2_000),
+            )
+            .unwrap();
+        });
+
+        env.ledger().set_timestamp(1_500);
+        env.as_contract(&contract_id, || {
+            // Still active: the expired-role holder can verify normally.
+            TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "octocat"))
+                .unwrap();
+            TrustBridgeContract::revoke_verification(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+                1,
+            )
+            .unwrap();
+        });
+
+        env.ledger().set_timestamp(2_500);
+        env.as_contract(&contract_id, || {
+            let res = TrustBridgeContract::verify(
+                env.clone(),
+                verifier.clone(),
+                username(&env, "octocat"),
+            );
+            assert_eq!(res, Err(ContractError::NotAuthorized));
+        });
+    }
+
+    // ── Time-bounded verification (Issue #218) ──────────────────────────────
+
+    #[test]
+    fn test_verify_expires_after_configured_window() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+            TrustBridgeContract::config_verification(
+                env.clone(),
+                admin.clone(),
+                soroban_sdk::Symbol::new(&env, "github_att"),
+                1_000,
+                1,
+            )
+            .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+            assert!(TrustBridgeContract::is_verification_active(
+                env.clone(),
+                username(&env, "octocat")
+            ));
+        });
+
+        // Exactly at the expiry boundary.
+        env.ledger().set_timestamp(2_000);
+        env.as_contract(&contract_id, || {
+            assert!(!TrustBridgeContract::is_verification_active(
+                env.clone(),
+                username(&env, "octocat")
+            ));
+            // Lazy expiry: the raw flag is untouched.
+            let record =
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
+            assert!(record.verified);
+        });
+    }
+
+    #[test]
+    fn test_verify_renews_after_expiry_instead_of_already_verified() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+            TrustBridgeContract::config_verification(
+                env.clone(),
+                admin.clone(),
+                soroban_sdk::Symbol::new(&env, "github_att"),
+                1_000,
+                1,
+            )
+            .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+
+        // Still active: a duplicate verify is rejected as before this issue.
+        env.ledger().set_timestamp(1_500);
+        env.as_contract(&contract_id, || {
+            let res =
+                TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"));
+            assert_eq!(res, Err(ContractError::AlreadyVerified));
+        });
+
+        // Past expiry: verify renews instead of erroring, and does not
+        // double-count `verified_count` / `ever_verified_count`.
+        env.ledger().set_timestamp(2_500);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+            assert!(TrustBridgeContract::is_verification_active(
+                env.clone(),
+                username(&env, "octocat")
+            ));
+            assert_verified_parity(&env, 1);
+            assert_eq!(TrustBridgeContract::get_ever_verified_count(env.clone()), 1);
+        });
+    }
+
+    #[test]
+    fn test_verification_without_config_never_expires() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+
+        env.ledger().set_timestamp(1_000_000_000);
+        env.as_contract(&contract_id, || {
+            assert!(TrustBridgeContract::is_verification_active(
+                env.clone(),
+                username(&env, "octocat")
+            ));
+        });
+    }
+
+    #[test]
+    fn test_verified_count_not_decremented_by_expiry_only_by_revoke() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+            TrustBridgeContract::config_verification(
+                env.clone(),
+                admin.clone(),
+                soroban_sdk::Symbol::new(&env, "github_att"),
+                1_000,
+                1,
+            )
+            .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+
+        // Expire without revoking. Stats definition (Issue #218): the raw
+        // counters count the raw `verified` flag, not the expiry-aware
+        // status, so they do not move on their own.
+        env.ledger().set_timestamp(5_000);
+        env.as_contract(&contract_id, || {
+            assert!(!TrustBridgeContract::is_verification_active(
+                env.clone(),
+                username(&env, "octocat")
+            ));
+            assert_verified_parity(&env, 1);
+
+            TrustBridgeContract::revoke_verification(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+                1,
+            )
+            .unwrap();
+            assert_verified_parity(&env, 0);
+        });
+    }
+
+    #[test]
+    fn test_get_verification_expiry_none_without_config() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+            assert_eq!(
+                TrustBridgeContract::get_verification_expiry(
+                    env.clone(),
+                    username(&env, "octocat")
+                ),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn test_get_verification_expiry_some_when_configured() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+            TrustBridgeContract::config_verification(
+                env.clone(),
+                admin.clone(),
+                soroban_sdk::Symbol::new(&env, "github_att"),
+                500,
+                1,
+            )
+            .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+            assert_eq!(
+                TrustBridgeContract::get_verification_expiry(
+                    env.clone(),
+                    username(&env, "octocat")
+                ),
+                Some(1_500)
+            );
+        });
+    }
+
+    // ── Signed export attestation (Issue #223) ──────────────────────────────
+
+    #[test]
+    fn test_export_attestation_empty_registry() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let attestation = TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap();
+            assert_eq!(attestation.page.records.len(), 0);
+            assert_eq!(attestation.page.total, 0);
+            assert!(!attestation.page.has_more);
+
+            // Deterministic even for an empty page.
+            let again = TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap();
+            assert_eq!(attestation.digest, again.digest);
+        });
+    }
+
+    #[test]
+    fn test_export_attestation_digest_deterministic_across_calls() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+            let a = TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap();
+            let b = TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap();
+            assert_eq!(a.digest, b.digest);
+            assert_eq!(a.page, b.page);
+        });
+    }
+
+    #[test]
+    fn test_export_attestation_digest_changes_with_data() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+        });
+
+        let before = env.as_contract(&contract_id, || {
+            TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap()
+        });
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+
+        let after = env.as_contract(&contract_id, || {
+            TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap()
+        });
+
+        assert_ne!(before.digest, after.digest);
+    }
+
+    #[test]
+    fn test_export_attestation_matches_registered_paginated_page() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+            let attestation = TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap();
+            let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+            assert_eq!(attestation.page, page);
+        });
+    }
+
+    #[test]
+    fn test_export_attestation_reports_version_and_ledger() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let attestation = TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap();
+            assert_eq!(attestation.version, soroban_sdk::vec![&env, 1u32, 0u32, 0u32]);
+            assert_eq!(attestation.ledger, env.ledger().sequence());
+        });
+    }
+
+    // ── Dual-control batch_remove (Issue #219) ──────────────────────────────
+
+    /// Registers `count` fresh usernames (each to its own generated address)
+    /// and returns them, for building batch_remove test fixtures.
+    fn register_batch(env: &Env, contract_id: &Address, count: u32) -> Vec<String> {
+        env.mock_all_auths();
+        let mut names: Vec<String> = Vec::new(env);
+        for i in 0..count {
+            let addr = Address::generate(env);
+            let name = username(env, &format!("user{}", i));
+            env.as_contract(contract_id, || {
+                TrustBridgeContract::register(env.clone(), name.clone(), addr.clone(), Vec::new(env))
+                    .unwrap();
+            });
+            names.push_back(name);
+        }
+        names
+    }
+
+    #[test]
+    fn test_batch_remove_at_or_below_threshold_unchanged() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        let names = register_batch(&env, &contract_id, 3);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+            // size == threshold: still direct, single-step.
+            let summary =
+                TrustBridgeContract::batch_remove(env.clone(), admin.clone(), names.clone())
+                    .unwrap();
+            assert_eq!(summary.successful, 3);
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 0);
+        });
+    }
+
+    #[test]
+    fn test_batch_remove_above_threshold_requires_dual_control() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        let names = register_batch(&env, &contract_id, 4);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+            // size == threshold + 1: rejected, must use propose/execute.
+            let res = TrustBridgeContract::batch_remove(env.clone(), admin.clone(), names.clone());
+            assert_eq!(res, Err(ContractError::DualControlRequired));
+            // Registry untouched — the fail-before-write property.
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 4);
+        });
+    }
+
+    #[test]
+    fn test_batch_remove_threshold_zero_disables_dual_control() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        let names = register_batch(&env, &contract_id, 20);
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::get_batch_remove_threshold(env.clone()), 0);
+            let summary =
+                TrustBridgeContract::batch_remove(env.clone(), admin.clone(), names.clone())
+                    .unwrap();
+            assert_eq!(summary.successful, 20);
+        });
+    }
+
+    #[test]
+    fn test_propose_then_execute_batch_remove_by_second_admin() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        let second_admin = Address::generate(&env);
+        let names = register_batch(&env, &contract_id, 4);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+            TrustBridgeContract::set_role(env.clone(), second_admin.clone(), Role::Admin).unwrap();
+
+            TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
+                .unwrap();
+            let pending = TrustBridgeContract::get_pending_batch_remove(env.clone()).unwrap();
+            assert_eq!(pending.usernames.len(), 4);
+            assert_eq!(pending.proposed_by, admin);
+
+            let summary =
+                TrustBridgeContract::execute_batch_remove(env.clone(), second_admin.clone())
+                    .unwrap();
+            assert_eq!(summary.successful, 4);
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 0);
+            assert!(TrustBridgeContract::get_pending_batch_remove(env.clone()).is_none());
+        });
+    }
+
+    #[test]
+    fn test_execute_batch_remove_same_proposer_rejected() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        let names = register_batch(&env, &contract_id, 4);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+            TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
+                .unwrap();
+            // Same admin tries to execute their own proposal — dual control
+            // means one signature alone is never enough.
+            let res = TrustBridgeContract::execute_batch_remove(env.clone(), admin.clone());
+            assert_eq!(res, Err(ContractError::NotAuthorized));
+            assert!(TrustBridgeContract::get_pending_batch_remove(env.clone()).is_some());
+        });
+    }
+
+    #[test]
+    fn test_execute_batch_remove_without_admin_equivalent_role_rejected() {
+        let env = Env::default();
+        let (admin, _user, bystander, contract_id) = setup(&env);
+        let names = register_batch(&env, &contract_id, 4);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+            TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
+                .unwrap();
+            let res = TrustBridgeContract::execute_batch_remove(env.clone(), bystander.clone());
+            assert_eq!(res, Err(ContractError::NotAuthorized));
+        });
+    }
+
+    #[test]
+    fn test_propose_batch_remove_rejects_second_proposal_while_pending() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        let names = register_batch(&env, &contract_id, 4);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+            TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
+                .unwrap();
+            let res = TrustBridgeContract::propose_batch_remove(
+                env.clone(),
+                admin.clone(),
+                names.clone(),
+            );
+            assert_eq!(res, Err(ContractError::BatchRemoveProposalPending));
+        });
+    }
+
+    #[test]
+    fn test_cancel_batch_remove_clears_proposal_and_allows_new_one() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        let names = register_batch(&env, &contract_id, 4);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+            TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
+                .unwrap();
+            TrustBridgeContract::cancel_batch_remove(env.clone(), admin.clone()).unwrap();
+            assert!(TrustBridgeContract::get_pending_batch_remove(env.clone()).is_none());
+
+            // A fresh proposal is now allowed.
+            TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
+                .unwrap();
+            assert!(TrustBridgeContract::get_pending_batch_remove(env.clone()).is_some());
+        });
+    }
+
+    #[test]
+    fn test_cancel_batch_remove_available_while_paused() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        let names = register_batch(&env, &contract_id, 4);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+            TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
+                .unwrap();
+            TrustBridgeContract::pause(env.clone(), 1).unwrap();
+            // Cancel still works while paused — the abort path must not be
+            // blockable by the same freeze that might motivate using it.
+            TrustBridgeContract::cancel_batch_remove(env.clone(), admin.clone()).unwrap();
+            assert!(TrustBridgeContract::get_pending_batch_remove(env.clone()).is_none());
+        });
+    }
+
+    #[test]
+    fn test_execute_batch_remove_blocked_while_paused() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        let second_admin = Address::generate(&env);
+        let names = register_batch(&env, &contract_id, 4);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+            TrustBridgeContract::set_role(env.clone(), second_admin.clone(), Role::Admin).unwrap();
+            TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
+                .unwrap();
+            TrustBridgeContract::pause(env.clone(), 1).unwrap();
+
+            let res = TrustBridgeContract::execute_batch_remove(env.clone(), second_admin.clone());
+            assert_eq!(res, Err(ContractError::Paused));
+
+            // The proposal survives the pause — the second key can still
+            // execute once unpaused.
+            TrustBridgeContract::unpause(env.clone(), 4).unwrap();
+            let summary =
+                TrustBridgeContract::execute_batch_remove(env.clone(), second_admin.clone())
+                    .unwrap();
+            assert_eq!(summary.successful, 4);
+        });
+    }
+
+    #[test]
+    fn test_execute_batch_remove_after_proposal_expired() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        let second_admin = Address::generate(&env);
+        let names = register_batch(&env, &contract_id, 4);
+        env.ledger().set_timestamp(1_000);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+            TrustBridgeContract::set_role(env.clone(), second_admin.clone(), Role::Admin).unwrap();
+            TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
+                .unwrap();
+        });
+
+        // Past BATCH_REMOVE_PROPOSAL_TTL_SECS (24h).
+        env.ledger().set_timestamp(1_000 + 86_400 + 1);
+        env.as_contract(&contract_id, || {
+            let res = TrustBridgeContract::execute_batch_remove(env.clone(), second_admin.clone());
+            assert_eq!(res, Err(ContractError::NoPendingBatchRemove));
+            // Expired proposal was cleared and never executed.
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 4);
+            assert!(TrustBridgeContract::get_pending_batch_remove(env.clone()).is_none());
+
+            // A fresh proposal is possible immediately after.
+            TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
+                .unwrap();
+        });
     }
 }

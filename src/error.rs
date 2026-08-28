@@ -96,6 +96,16 @@ pub enum ContractError {
     NoPendingAdminTransfer = 28,
     /// `upgrade` was called without a required attestation (attestation-required mode is on).
     AttestationRequired = 29,
+    /// `batch_remove` was called with a batch larger than the configured
+    /// dual-control threshold; use `propose_batch_remove` /
+    /// `execute_batch_remove` instead (Issue #219).
+    DualControlRequired = 30,
+    /// `propose_batch_remove` was called while a proposal is already pending.
+    /// Cancel it with `cancel_batch_remove` first (Issue #219).
+    BatchRemoveProposalPending = 31,
+    /// `execute_batch_remove` or `cancel_batch_remove` was called with no
+    /// pending proposal (or a proposal that has expired) (Issue #219).
+    NoPendingBatchRemove = 32,
 }
 
 impl ContractError {
@@ -140,6 +150,9 @@ impl ContractError {
             27 => Some(ContractError::AdminTransferDelayActive),
             28 => Some(ContractError::NoPendingAdminTransfer),
             29 => Some(ContractError::AttestationRequired),
+            30 => Some(ContractError::DualControlRequired),
+            31 => Some(ContractError::BatchRemoveProposalPending),
+            32 => Some(ContractError::NoPendingBatchRemove),
             _ => None,
         }
     }
