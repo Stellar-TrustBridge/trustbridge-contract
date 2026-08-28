@@ -24,11 +24,15 @@ PKG_MANAGER  ?= pnpm
 EXPORT_FILE ?= registry-export-$(NETWORK).json
 ADMIN_SOURCE ?=
 WASM_SIZE_LIMIT ?= 204800
+FUTURENET_RPC_URL ?= https://rpc-futurenet.stellar.org
+FUTURENET_FRIENDBOT_URL ?= https://friendbot-futurenet.stellar.org
+FUTURENET_IDENTITY ?= $(SOURCE)
+FUTURENET_DRY_RUN ?= false
 
 .PHONY: help build build-legacy test test-rehearsal fuzz bench bench-export bench-username bench-double-verify bench-register-budget fmt lint docs docs-check check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
-        export-registry validate-registry
+	export-registry validate-registry dr-test futurenet-smoke
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -334,6 +338,14 @@ invoke-set-paused: ## Toggle contract pause state (PAUSED, SOURCE=admin, CONTRAC
 		--send=yes \
 		-- set_paused --paused $(PAUSED)
 
+dr-test: ## Run a non-destructive export/validate round-trip on a disposable instance
+	CONTRACT_ID=$(CONTRACT_ID) SOURCE=$(SOURCE) ADMIN_SOURCE=$(ADMIN_SOURCE) \
+		NETWORK=$(NETWORK) STELLAR=$(STELLAR) ./scripts/dr_test.sh
+
+futurenet-smoke: ## Deploy and smoke-check Futurenet using pinned RPC and Friendbot endpoints
+	ADMIN=$(ADMIN) SOURCE=$(SOURCE) IDENTITY=$(FUTURENET_IDENTITY) \
+		RPC_URL=$(FUTURENET_RPC_URL) FRIENDBOT_URL=$(FUTURENET_FRIENDBOT_URL) \
+		STELLAR=$(STELLAR) DRY_RUN=$(FUTURENET_DRY_RUN) ./scripts/futurenet_smoke_test.sh
 export-registry: require-contract-id ## Export full registry to JSON (admin) — see docs/DEPLOYMENT.md#registry-export--import (SOURCE=admin, CONTRACT_ID, EXPORT_FILE)
 	CONTRACT_ID=$(CONTRACT_ID) SOURCE=$(SOURCE) NETWORK=$(NETWORK) OUTPUT_FILE=$(EXPORT_FILE) ./scripts/export_registry.sh
 

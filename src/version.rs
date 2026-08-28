@@ -208,6 +208,48 @@ mod tests {
     }
 
     #[test]
+    fn test_is_compatible_semver_policy_table() {
+        let cases = [
+            (Version::new(1, 0, 0), Version::new(1, 0, 0), true),
+            (Version::new(1, 0, 1), Version::new(1, 0, 0), true),
+            (Version::new(1, 1, 0), Version::new(1, 0, 1), true),
+            (Version::new(1, 0, 0), Version::new(1, 0, 1), false),
+            (Version::new(1, 0, 9), Version::new(1, 1, 0), false),
+            (Version::new(2, 0, 0), Version::new(1, 1, 0), true),
+            (Version::new(1, 1, 0), Version::new(2, 0, 0), false),
+        ];
+
+        for (deployed, minimum, expected) in cases {
+            assert_eq!(
+                deployed.is_compatible_with(minimum),
+                expected,
+                "compatibility mismatch: deployed={deployed}, minimum={minimum}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_feature_minimum_versions_match_policy_table() {
+        let policy = [
+            ("batch_verify", BATCH_VERIFY_MIN_VERSION, Version::new(1, 1, 0)),
+            (
+                "cross_contract_reads",
+                CROSS_CONTRACT_READ_MIN_VERSION,
+                Version::new(1, 0, 0),
+            ),
+        ];
+
+        for (feature, configured, expected) in policy {
+            assert_eq!(configured, expected, "{feature} minimum version drifted");
+        }
+
+        assert!(!Version::new(1, 0, 9).supports_batch_verify());
+        assert!(Version::new(1, 1, 0).supports_batch_verify());
+        assert!(!Version::new(0, 9, 9).supports_cross_contract_reads());
+        assert!(Version::new(1, 0, 0).supports_cross_contract_reads());
+    }
+
+    #[test]
     fn test_version_bumps() {
         let v1_2_3 = Version::new(1, 2, 3);
 

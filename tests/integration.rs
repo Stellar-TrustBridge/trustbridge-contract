@@ -11,7 +11,7 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, String};
 
 use trustbridge_contract::{ContractError, Role, TrustBridgeContract};
 use soroban_sdk::testutils::Ledger as _;
@@ -32,6 +32,85 @@ fn setup_test_env() -> (Env, Address, Address, Address, Address) {
 
 fn s(env: &Env, text: &str) -> String {
     String::from_str(env, text)
+}
+
+fn record_ttl(env: &Env, contract_id: &Address, username: &String) -> u32 {
+    env.as_contract(contract_id, || {
+        env.storage()
+            .persistent()
+            .get_ttl(&(symbol_short!("reg"), username.clone()))
+    })
+}
+
+fn register_for_ttl_test(env: &Env, contract_id: &Address, user: &Address, username: &str) {
+    env.mock_all_auths();
+    env.as_contract(contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(env, username),
+            user.clone(),
+            Vec::new(env),
+        )
+        .unwrap();
+    });
+}
+
+fn move_to_near_expiry(env: &Env, ttl: u32) {
+    let sequence = env.ledger().sequence();
+    env.ledger()
+        .set_sequence_number(sequence.saturating_add(ttl.saturating_sub(1)));
+}
+
+// ── Persistent storage TTL revival ──────────────────────────────────────────
+
+#[test]
+fn test_near_expiry_record_is_revived_by_read() {
+    let (env, _admin, user1, _user2, contract_id) = setup_test_env();
+    let username = s(&env, "ttl-read");
+    register_for_ttl_test(&env, &contract_id, &user1, "ttl-read");
+
+    let initial_ttl = record_ttl(&env, &contract_id, &username);
+    assert!(initial_ttl > 0);
+    move_to_near_expiry(&env, initial_ttl);
+    let near_expiry_ttl = record_ttl(&env, &contract_id, &username);
+    assert!(near_expiry_ttl < initial_ttl);
+
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::get_address(env.clone(), username.clone()).is_some());
+    });
+
+    let revived_ttl = record_ttl(&env, &contract_id, &username);
+    assert!(revived_ttl > near_expiry_ttl);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence().saturating_add(near_expiry_ttl));
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::get_address(env.clone(), username).is_some());
+    });
+}
+
+#[test]
+fn test_near_expiry_record_is_revived_by_keeper_extension() {
+    let (env, _admin, user1, _user2, contract_id) = setup_test_env();
+    let username = s(&env, "ttl-keeper");
+    register_for_ttl_test(&env, &contract_id, &user1, "ttl-keeper");
+
+    let initial_ttl = record_ttl(&env, &contract_id, &username);
+    move_to_near_expiry(&env, initial_ttl);
+    let near_expiry_ttl = record_ttl(&env, &contract_id, &username);
+
+    env.as_contract(&contract_id, || {
+        let mut usernames = soroban_sdk::Vec::new(&env);
+        usernames.push_back(username.clone());
+        assert_eq!(TrustBridgeContract::extend_registry_ttl(env.clone(), usernames), 1);
+    });
+
+    let revived_ttl = record_ttl(&env, &contract_id, &username);
+    assert!(revived_ttl > near_expiry_ttl);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence().saturating_add(near_expiry_ttl));
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::get_address(env.clone(), username).is_some());
+    });
 }
 
 // ── Full lifecycle ────────────────────────────────────────────────────────────

@@ -1471,6 +1471,35 @@ if (!compatible) {
 Read-only calls simulate against RPC and never submit a transaction, so the
 handshake costs no fees.
 
+### Semver compatibility policy
+
+`is_compatible(major, minor, patch)` treats its arguments as the minimum
+version required by the caller. Compatibility is checked in semver order:
+
+| Deployed version | Minimum requested | Result | Policy |
+|---|---|---:|---|
+| `1.0.0` | `1.0.0` | `true` | Exact version is compatible |
+| `1.0.1` | `1.0.0` | `true` | Patch releases are compatible |
+| `1.1.0` | `1.0.1` | `true` | Newer minor releases are compatible |
+| `1.0.0` | `1.0.1` | `false` | Older patch releases are rejected |
+| `1.0.9` | `1.1.0` | `false` | Older minor releases are rejected |
+| `2.0.0` | `1.1.0` | `true` | A newer major is newer than the minimum gate |
+| `1.1.0` | `2.0.0` | `false` | An older major is rejected |
+
+The current feature gates are kept in sync with the table below. The unit
+tests in `src/version.rs` fail if either constant drifts:
+
+| Capability | Constant | Minimum version |
+|---|---|---:|
+| `batch_verify` | `BATCH_VERIFY_MIN_VERSION` | `1.1.0` |
+| Cross-contract read surface | `CROSS_CONTRACT_READ_MIN_VERSION` | `1.0.0` |
+
+Compatibility is a version-order gate, not permission to make a breaking ABI
+change without review. Any breaking change requires a major `CONTRACT_VERSION`
+bump, an explicit migration story, and updated consumer minimums. Additive
+features use a minor bump and must add or update their own minimum-version
+constant and policy-table case.
+
 ### Regeneration checklist
 
 1. Bump `CONTRACT_VERSION` in `src/lib.rs` for any ABI change.

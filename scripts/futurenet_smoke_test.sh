@@ -6,7 +6,8 @@
 # audit: initialization gating, has_record lookups, and stats reads.
 #
 # Usage:
-#   ADMIN=G... ./scripts/futurenet_smoke_test.sh
+#   ADMIN=G... RPC_URL=https://rpc-futurenet.stellar.org ./scripts/futurenet_smoke_test.sh
+#   DRY_RUN=true ./scripts/futurenet_smoke_test.sh
 #
 # This does not register real data; it is a deploy sanity check, not a
 # functional test suite (see `cargo test` / tests/integration.rs for that).
@@ -17,12 +18,28 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 ADMIN="${ADMIN:-}"
+SOURCE="${SOURCE:-default}"
+RPC_URL="${RPC_URL:-https://rpc-futurenet.stellar.org}"
+FRIENDBOT_URL="${FRIENDBOT_URL:-https://friendbot-futurenet.stellar.org}"
+IDENTITY="${IDENTITY:-$SOURCE}"
+DRY_RUN="${DRY_RUN:-false}"
+STELLAR="${STELLAR:-stellar}"
+
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo "DRY RUN: Futurenet RPC: ${RPC_URL}"
+  echo "DRY RUN: Fund identity '${IDENTITY}' from ${FRIENDBOT_URL}/?addr=<G-address>"
+  echo "DRY RUN: NETWORK=futurenet INIT=true ADMIN=<G-address> SOURCE=${SOURCE} RPC_URL=${RPC_URL} ./scripts/deploy.sh"
+  echo "DRY RUN: stellar contract invoke --network futurenet --rpc-url ${RPC_URL} -- get_stats"
+  echo "DRY RUN: stellar contract invoke --network futurenet --rpc-url ${RPC_URL} -- has_record --github_username smoke-test-user"
+  exit 0
+fi
+
 if [[ -z "$ADMIN" ]]; then
   echo "ERROR: ADMIN must be set to a Futurenet G-address."
   exit 1
 fi
 
-NETWORK=futurenet INIT=true ADMIN="$ADMIN" "$ROOT/scripts/deploy.sh"
+NETWORK=futurenet INIT=true ADMIN="$ADMIN" SOURCE="$SOURCE" RPC_URL="$RPC_URL" STELLAR="$STELLAR" "$ROOT/scripts/deploy.sh"
 
 DEPLOY_FILE="deployments/futurenet.json"
 if [[ ! -f "$DEPLOY_FILE" ]]; then
@@ -37,9 +54,9 @@ if [[ -z "$CONTRACT_ID" ]]; then
 fi
 
 echo "==> Smoke: get_stats on a fresh deploy should be {total: 0, verified: 0}"
-stellar contract invoke --id "$CONTRACT_ID" --source-account "${SOURCE:-default}" --network futurenet -- get_stats
+"$STELLAR" contract invoke --id "$CONTRACT_ID" --source-account "$SOURCE" --network futurenet --rpc-url "$RPC_URL" -- get_stats
 
 echo "==> Smoke: has_record on an unregistered username should be false"
-stellar contract invoke --id "$CONTRACT_ID" --source-account "${SOURCE:-default}" --network futurenet -- has_record --github_username smoke-test-user
+"$STELLAR" contract invoke --id "$CONTRACT_ID" --source-account "$SOURCE" --network futurenet --rpc-url "$RPC_URL" -- has_record --github_username smoke-test-user
 
 echo "==> Futurenet smoke checks passed for ${CONTRACT_ID}"
