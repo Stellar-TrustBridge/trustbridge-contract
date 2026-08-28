@@ -143,6 +143,9 @@ Allowed while paused:
 ## Registration Integrity
 
 - Registering a username requires the Stellar address owner to sign
+- Sponsored registration via `register_sponsored` requires both the sponsor's signature (`sponsor.require_auth()`) and the registrant's signature (`stellar_address.require_auth()`).
+  > [!IMPORTANT]
+  > **Why the sponsor cannot skip address auth:** If a sponsor could register a username on behalf of a Stellar address without that address owner's signature, a malicious sponsor could link a victim's GitHub username to a different Stellar address they control, hijacking their future rewards/payouts. Requiring the registrant's signature ensures self-auth protection is never bypassed.
 - Re-registration with a new address resets verification status
 - There is no on-chain proof of GitHub ownership at registration time — verification is a separate admin step
 - Wave #49 locks the address-update invariant: after a verified username is

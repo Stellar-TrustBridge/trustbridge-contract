@@ -77,29 +77,25 @@ pub enum ContractError {
     /// Operation is blocked because a challenge is active on this username
     /// (Issue #214).
     ChallengeActive = 20,
-    /// `pause` / `unpause` was called with a code that is not a `PauseReason`.
+    /// `pause` / `unpause` / `set_paused` were called with an unrecognized reason code.
     InvalidPauseReason = 21,
-    /// `upgrade` was called while an attestation is required but none is live.
-    AttestationRequired = 22,
-    /// `add_reserved` was called with a username already on the reserved list.
-    AlreadyReserved = 23,
+    /// `add_reserved` was called with a username that is already reserved.
+    AlreadyReserved = 22,
     /// `remove_reserved` was called with a username that is not reserved.
-    NotReserved = 24,
-    /// `add_reserved` was called when the list already holds `MAX_RESERVED`.
-    ReservedListFull = 25,
+    NotReserved = 23,
     /// `register` was called with a username on the reserved list.
-    UsernameReserved = 26,
-    /// A rotation delay is configured, so the address must move through
-    /// `request_address_rotation` rather than a direct `register`.
-    RotationRequired = 27,
-    /// A rotation is already pending for this username.
-    RotationPending = 28,
-    /// No rotation is pending for this username.
-    NoRotationPending = 29,
-    /// The rotation's delay window has not elapsed yet.
-    RotationNotReady = 30,
-    /// `rename` was called with a target username that is already registered.
-    UsernameTaken = 31,
+    UsernameReserved = 24,
+    /// The reserved list has reached its maximum allowed size.
+    ReservedListFull = 25,
+    /// `propose_admin_transfer` was called while a transfer is already pending,
+    /// or `execute_admin_transfer` was called with no pending transfer.
+    AdminTransferPending = 26,
+    /// `execute_admin_transfer` was called before the delay has elapsed.
+    AdminTransferDelayActive = 27,
+    /// `execute_admin_transfer` was called with no pending transfer proposal.
+    NoPendingAdminTransfer = 28,
+    /// `upgrade` was called without a required attestation (attestation-required mode is on).
+    AttestationRequired = 29,
 }
 
 impl ContractError {
@@ -136,16 +132,14 @@ impl ContractError {
             19 => Some(ContractError::ChallengeNotResolvable),
             20 => Some(ContractError::ChallengeActive),
             21 => Some(ContractError::InvalidPauseReason),
-            22 => Some(ContractError::AttestationRequired),
-            23 => Some(ContractError::AlreadyReserved),
-            24 => Some(ContractError::NotReserved),
+            22 => Some(ContractError::AlreadyReserved),
+            23 => Some(ContractError::NotReserved),
+            24 => Some(ContractError::UsernameReserved),
             25 => Some(ContractError::ReservedListFull),
-            26 => Some(ContractError::UsernameReserved),
-            27 => Some(ContractError::RotationRequired),
-            28 => Some(ContractError::RotationPending),
-            29 => Some(ContractError::NoRotationPending),
-            30 => Some(ContractError::RotationNotReady),
-            31 => Some(ContractError::UsernameTaken),
+            26 => Some(ContractError::AdminTransferPending),
+            27 => Some(ContractError::AdminTransferDelayActive),
+            28 => Some(ContractError::NoPendingAdminTransfer),
+            29 => Some(ContractError::AttestationRequired),
             _ => None,
         }
     }

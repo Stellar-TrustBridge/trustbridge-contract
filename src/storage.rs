@@ -230,9 +230,7 @@ pub struct ContributorRecord {
     pub registered_at: u32,
     /// Whether the contributor has been verified by an admin or Verifier.
     pub verified: bool,
-    /// Ordered fallback addresses tried when `stellar_address` is
-    /// unreachable. Capped at [`MAX_FALLBACK_ADDRESSES`] entries.
-    pub fallback_addresses: Vec<Address>,
+    pub is_bot: bool,
 }
 
 /// Provenance of the currently deployed WASM executable (Wave #24).

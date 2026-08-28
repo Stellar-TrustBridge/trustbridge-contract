@@ -338,4 +338,32 @@ mod tests {
 
         assert!(!deployed.is_compatible_with(minimum_required));
     }
+
+    #[test]
+    fn test_export_paginated_requires_admin_auth() {
+        use soroban_sdk::{testutils::Address as _, Address, Env};
+        use crate::TrustBridgeContract;
+
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // Mock all auths to let the call succeed
+        env.mock_all_auths();
+
+        env.as_contract(&contract_id, || {
+            let _page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+        });
+
+        // Verify that get_registered_paginated indeed checked the admin's authorization
+        let auths = env.auths();
+        assert_eq!(auths.len(), 1);
+        let (auth_addr, invocation) = auths.get(0).unwrap();
+        assert_eq!(auth_addr, admin);
+        assert_eq!(invocation.function.name, soroban_sdk::Symbol::new(&env, "get_registered_paginated"));
+    }
 }

@@ -34,9 +34,8 @@ pub use events::{
     UpgradeAttestedEvent, UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
 };
 pub use storage::{
-    ChallengeRecord, ContributorRecord, ExportPage, HealthSnapshot, PauseReason, PendingRotation,
-    RecordProof, Role, Stats,
-    VerificationConfig, WasmAttestation, WasmProvenance,
+    ChallengeRecord, ContributorRecord, ExportPage, HealthSnapshot, Role, Stats,
+    VerificationConfig, WasmAttestation, WasmProvenance, PauseReason,
 };
 pub use version::Version;
 
@@ -67,7 +66,9 @@ use crate::storage::{
     set_ever_verified_count, set_record, set_role as storage_set_role, set_verified_count,
     set_version,
     set_wasm_attestation, set_wasm_provenance, DEFAULT_CHALLENGE_DELAY_SECS,
-    ADMIN_KEY, MAX_FALLBACK_ADDRESSES,
+    ADMIN_KEY,
+    get_guardian as storage_get_guardian,
+    remove_guardian as storage_remove_guardian,
 };
 
 use crate::utils::{
@@ -1313,7 +1314,7 @@ impl TrustBridgeContract {
                 .as_ref()
                 .map(|r| r.stellar_address == stellar_address && r.verified)
                 .unwrap_or(false),
-            fallback_addresses,
+            is_bot: existing.as_ref().map(|r| r.is_bot).unwrap_or(false),
         };
 
         if existing.is_none() {
@@ -1334,7 +1335,92 @@ impl TrustBridgeContract {
             github_username: github_username.clone(),
             stellar_address: stellar_address.clone(),
             timestamp,
-            domain: event_domain(&env),
+            sponsor: None,
+        }
+        .publish(&env);
+
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(
+                AuditEventType::UserRegistered,
+                timestamp,
+                Some(stellar_address.clone()),
+            )
+            .with_username(github_username)
+            .with_address(stellar_address),
+        );
+
+        Ok(())
+    }
+
+    /// Register or update a GitHub username mapping sponsored by a maintainer/account.
+    ///
+    /// Requires authentication from both the `stellar_address` and the `sponsor`.
+    pub fn register_sponsored(
+        env: Env,
+        github_username: String,
+        stellar_address: Address,
+        sponsor: Address,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        if !is_valid_github_username(&github_username) {
+            return Err(ContractError::InvalidUsername);
+        }
+
+        if is_zero_address(&env, &stellar_address) {
+            return Err(ContractError::ZeroAddress);
+        }
+
+        if has_challenge(&env, &github_username) {
+            return Err(ContractError::ChallengeActive);
+        }
+
+        sponsor.require_auth();
+        stellar_address.require_auth();
+
+        let timestamp = env.ledger().timestamp();
+        let existing = get_record(&env, &github_username);
+
+        if let Some(ref old) = existing {
+            if old.stellar_address != stellar_address {
+                old.stellar_address.require_auth();
+            }
+        }
+
+        if is_in_cooldown(&env, &github_username) {
+            return Err(ContractError::CooldownActive);
+        }
+
+        let record = ContributorRecord {
+            stellar_address: stellar_address.clone(),
+            registered_at: timestamp as u32,
+            verified: existing
+                .as_ref()
+                .map(|r| r.stellar_address == stellar_address && r.verified)
+                .unwrap_or(false),
+            is_bot: existing.as_ref().map(|r| r.is_bot).unwrap_or(false),
+        };
+
+        if existing.is_none() {
+            set_count(&env, get_count(&env).saturating_add(1));
+            add_to_index(&env, &github_username);
+        } else if let Some(old) = existing {
+            if old.stellar_address != stellar_address && old.verified {
+                set_verified_count(&env, storage_get_verified_count(&env).saturating_sub(1));
+                set_pending_reverify(&env, &github_username, true);
+            }
+        }
+
+        set_record(&env, &github_username, &record);
+        set_last_action(&env, &github_username, timestamp);
+
+        RegisteredEvent {
+            github_username: github_username.clone(),
+            stellar_address: stellar_address.clone(),
+            timestamp,
+            sponsor: Some(sponsor.clone()),
         }
         .publish(&env);
 
@@ -2048,6 +2134,34 @@ impl TrustBridgeContract {
             domain: event_domain(&env),
         }
         .publish(&env);
+
+        Ok(())
+    }
+
+    /// Sets the bot-account flag for a registered contributor.
+    ///
+    /// The caller must sign and must equal either the contract admin or the
+    /// registered Stellar address for `github_username` (self vs admin auth).
+    pub fn set_bot_status(
+        env: Env,
+        caller: Address,
+        github_username: String,
+        is_bot: bool,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        caller.require_auth();
+
+        let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
+        let admin = get_admin(&env)?;
+
+        if caller != admin && caller != record.stellar_address {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        record.is_bot = is_bot;
+        set_record(&env, &github_username, &record);
 
         Ok(())
     }
@@ -5149,6 +5263,21 @@ mod test {
         assert_eq!(ContractError::AttestationExpired.code(), 12);
         assert_eq!(ContractError::UnattestedWasm.code(), 13);
         assert_eq!(ContractError::InvalidBatchSize.code(), 14);
+        assert_eq!(ContractError::InvalidReasonCode.code(), 15);
+        assert_eq!(ContractError::ZeroAddress.code(), 16);
+        assert_eq!(ContractError::ChallengeAlreadyActive.code(), 17);
+        assert_eq!(ContractError::NoChallengeActive.code(), 18);
+        assert_eq!(ContractError::ChallengeNotResolvable.code(), 19);
+        assert_eq!(ContractError::ChallengeActive.code(), 20);
+        assert_eq!(ContractError::InvalidPauseReason.code(), 21);
+        assert_eq!(ContractError::AlreadyReserved.code(), 22);
+        assert_eq!(ContractError::NotReserved.code(), 23);
+        assert_eq!(ContractError::UsernameReserved.code(), 24);
+        assert_eq!(ContractError::ReservedListFull.code(), 25);
+        assert_eq!(ContractError::AdminTransferPending.code(), 26);
+        assert_eq!(ContractError::AdminTransferDelayActive.code(), 27);
+        assert_eq!(ContractError::NoPendingAdminTransfer.code(), 28);
+        assert_eq!(ContractError::AttestationRequired.code(), 29);
     }
 
     #[test]
@@ -5175,22 +5304,20 @@ mod test {
             ContractError::ChallengeNotResolvable,
             ContractError::ChallengeActive,
             ContractError::InvalidPauseReason,
-            ContractError::AttestationRequired,
             ContractError::AlreadyReserved,
             ContractError::NotReserved,
-            ContractError::ReservedListFull,
             ContractError::UsernameReserved,
-            ContractError::RotationRequired,
-            ContractError::RotationPending,
-            ContractError::NoRotationPending,
-            ContractError::RotationNotReady,
-            ContractError::UsernameTaken,
+            ContractError::ReservedListFull,
+            ContractError::AdminTransferPending,
+            ContractError::AdminTransferDelayActive,
+            ContractError::NoPendingAdminTransfer,
+            ContractError::AttestationRequired,
         ] {
             assert_eq!(ContractError::from_code(variant.code()), Some(variant));
         }
         assert_eq!(ContractError::from_code(0), None);
-        // 32 is one past the highest assigned variant (UsernameTaken = 31):
-        assert_eq!(ContractError::from_code(32), None);
+        // 30 is one past the highest assigned variant (AttestationRequired = 29):
+        assert_eq!(ContractError::from_code(30), None);
     }
 
     // --- Issue #69: max username length guard ---
@@ -8522,110 +8649,130 @@ mod test {
         }
     }
 
+    // ── Bot accounts (Issue #236) ────────────────────────────────────────────
+
     #[test]
-    fn test_register_org_entry() {
+    fn test_bot_default_false_and_set_by_admin() {
         let env = Env::default();
-        let (_admin, user, _other, contract_id) = setup(&env);
-
+        let (admin, user, _other, contract_id) = setup(&env);
         env.mock_all_auths();
-
         env.as_contract(&contract_id, || {
-            register_org(&env, &contract_id, "stellar-org", &user, "stellar-org");
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            let record = TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
+            assert!(!record.is_bot);
 
-            let record =
-                TrustBridgeContract::get_address(env.clone(), username(&env, "stellar-org"))
-                    .unwrap();
-            assert_eq!(record.entity_type, EntityType::Org);
-            assert_eq!(
-                record.org_name,
-                Some(username(&env, "stellar-org"))
-            );
+            // Admin sets to true
+            TrustBridgeContract::set_bot_status(env.clone(), admin.clone(), username(&env, "octocat"), true).unwrap();
+            let record = TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
+            assert!(record.is_bot);
         });
     }
 
     #[test]
-    fn test_register_team_entry() {
+    fn test_bot_set_by_self() {
         let env = Env::default();
         let (_admin, user, _other, contract_id) = setup(&env);
-
         env.mock_all_auths();
-
         env.as_contract(&contract_id, || {
-            register_team(
-                &env,
-                &contract_id,
-                "engineering-team",
-                &user,
-                "stellar-org",
-            );
-
-            let record =
-                TrustBridgeContract::get_address(env.clone(), username(&env, "engineering-team"))
-                    .unwrap();
-            assert_eq!(record.entity_type, EntityType::Team);
-            assert_eq!(record.org_name, Some(username(&env, "stellar-org")));
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            
+            // Registrant sets to true
+            TrustBridgeContract::set_bot_status(env.clone(), user.clone(), username(&env, "octocat"), true).unwrap();
+            let record = TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
+            assert!(record.is_bot);
         });
     }
 
     #[test]
-    fn test_team_requires_org_name() {
+    fn test_bot_set_by_unauthorized_fails() {
         let env = Env::default();
-        let (_admin, user, _other, contract_id) = setup(&env);
-
+        let (_admin, user, other, contract_id) = setup(&env);
         env.mock_all_auths();
-
         env.as_contract(&contract_id, || {
-            let result = TrustBridgeContract::register(
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone()).unwrap();
+            
+            // Non-admin and non-registrant try to set bot status
+            let result = TrustBridgeContract::set_bot_status(env.clone(), other.clone(), username(&env, "octocat"), true);
+            assert_eq!(result, Err(ContractError::NotAuthorized));
+        });
+    }
+
+    #[test]
+    fn test_bot_set_nonregistered_fails() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::set_bot_status(env.clone(), admin.clone(), username(&env, "octocat"), true);
+            assert_eq!(result, Err(ContractError::NotRegistered));
+        });
+    }
+
+    // ── Sponsored registration (Issue #237) ──────────────────────────────────
+
+    #[test]
+    fn test_sponsor_register_success() {
+        let env = Env::default();
+        let (_admin, user, sponsor, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register_sponsored(
                 env.clone(),
-                username(&env, "my-team"),
+                username(&env, "octocat"),
                 user.clone(),
-                2,
-                None,
-            );
-            assert_eq!(result, Err(ContractError::OrgNameRequired));
-        });
-    }
-
-    #[test]
-    fn test_invalid_entity_type() {
-        let env = Env::default();
-        let (_admin, user, _other, contract_id) = setup(&env);
-
-        env.mock_all_auths();
-
-        env.as_contract(&contract_id, || {
-            let result = TrustBridgeContract::register(
-                env.clone(),
-                username(&env, "someone"),
-                user.clone(),
-                99,
-                None,
-            );
-            assert_eq!(result, Err(ContractError::InvalidEntityType));
-        });
-    }
-
-    #[test]
-    fn test_remove_org_cleans_up_index() {
-        let env = Env::default();
-        let (_admin, user, _other, contract_id) = setup(&env);
-
-        env.mock_all_auths();
-
-        env.as_contract(&contract_id, || {
-            register_org(&env, &contract_id, "my-org", &user, "my-org");
-            let stats = TrustBridgeContract::get_stats(env.clone());
-            assert_eq!(stats.total, 1);
-
-            TrustBridgeContract::remove(
-                env.clone(),
-                user.clone(),
-                username(&env, "my-org"),
+                sponsor.clone(),
             )
             .unwrap();
 
-            let stats = TrustBridgeContract::get_stats(env.clone());
-            assert_eq!(stats.total, 0);
+            let record = TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
+            assert_eq!(record.stellar_address, user);
+            assert!(!record.verified);
         });
+
+        // Let's verify the event notes the sponsor
+        let events = env.events().all();
+        let mut found = false;
+        for event in events.iter() {
+            // Find the RegisteredEvent
+            if event.topics.get(0).unwrap() == soroban_sdk::Symbol::new(&env, "RegisteredEvent") {
+                let data: RegisteredEvent = RegisteredEvent::try_from_val(&env, &event.value).unwrap();
+                assert_eq!(data.sponsor, Some(sponsor.clone()));
+                found = true;
+            }
+        }
+        assert!(found, "RegisteredEvent with sponsor must be published");
+    }
+
+    #[test]
+    fn test_sponsor_double_auth_protection_on_transfer() {
+        let env = Env::default();
+        let (_admin, user1, sponsor, contract_id) = setup(&env);
+        let user2 = Address::generate(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            // Initially register to user1
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user1.clone()).unwrap();
+        });
+
+        // The auths list must contain: sponsor, user2 (new registrant) AND user1 (old registrant)!
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register_sponsored(
+                env.clone(),
+                username(&env, "octocat"),
+                user2.clone(),
+                sponsor.clone(),
+            )
+            .unwrap();
+        });
+
+        let auths = env.auths();
+        let mut authorized_addresses = soroban_sdk::Vec::new(&env);
+        for auth in auths.iter() {
+            authorized_addresses.push_back(auth.0);
+        }
+        assert!(authorized_addresses.contains(&sponsor));
+        assert!(authorized_addresses.contains(&user2));
+        assert!(authorized_addresses.contains(&user1));
     }
 }

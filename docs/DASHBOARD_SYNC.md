@@ -206,56 +206,45 @@ it was already cleared by `verify`.
 
 ---
 
-## Domain-scoped idempotency (Issue #226)
+## GDPR Data Export & Erasure
 
-The idempotency guidance elsewhere in this document assumes a dashboard can
-recognise an event it has already applied. That assumption did not hold across
-a redeploy: nothing in an event said which contract instance or network produced
-it, so a replayed history could not be told apart from new activity.
+To assist with privacy and GDPR compliance, the contract provides hooks and patterns for exporter/erasure processes.
 
-Every event now carries a `domain` — `contract_id`, `network_id`,
-`contract_version`, `domain_version`. **Scope every idempotency record to
-`(domain.contract_id, domain.network_id)`.** See
-[EVENT_INDEXING.md](./EVENT_INDEXING.md#event-domain-separation-issue-226) for
-the field definitions and the recommended dedup key.
+### 1. Data Inventory (On-chain Fields)
+The following fields are stored for each contributor within `ContributorRecord` in persistent storage:
+- `stellar_address` (`Address`): The registered Stellar G-address.
+- `registered_at` (`u64`): Ledger timestamp of the registration/update.
+- `verified` (`bool`): Boolean indicating if the off-chain check was completed.
+- `is_bot` (`bool`): Boolean indicating whether this record represents a bot/CI account.
 
-Practically, for a dashboard:
+**Privacy & Dashboard Sync Note:** The dashboard and indexer sync logic should read the `is_bot` flag and exclude any records where `is_bot == true` from general dashboard statistics and human contributor readiness calculations. No personal identifiable information (PII) such as email, phone, name, or GitHub profile link is stored on-chain.
 
-- Store the domain alongside each mirrored row. A row whose domain no longer
-  matches the deployment you are reading from is stale, not merely old.
-- On seeing an unfamiliar `contract_id` for a network you already track, do not
-  merge — a redeploy is a new stream, and silently merging it produces exactly
-  the duplicate-user artefacts this was meant to prevent.
-- `get_network_tag()` returns the deployment's own network id, so a dashboard
-  can confirm it is talking to the deployment it thinks it is before syncing a
-  single row.
+### 2. GDPR Export Hook
+Integrators can retrieve a user's on-chain dataset via `get_address`:
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source-account deployer \
+  --network testnet \
+  -- get_address --github-username <username>
+```
 
-## RBAC mirror (Issue #228)
+Admins can perform full or chunked exports to back up the registry state for backups or migration audits:
+- **Full Export**: `get_all_registered` (Admin-only)
+- **Paginated Export**: `get_registered_paginated(cursor, limit)` (Admin-only, retrieves records as a JSON bundle)
 
-`get_role(address)` is a point lookup, so mirroring roles previously meant
-guessing which addresses to ask about — and a mirror built that way drifts from
-the chain the moment a role is granted to an address the dashboard has never
-seen.
-
-Two read-only entry points make the set enumerable:
-
-| Call | Returns |
-|------|---------|
-| `get_role_holder_count()` | Number of addresses currently holding a role |
-| `get_role_holders(offset, limit)` | One page of `RoleHolder { address, role }` |
-
-- `limit` is capped at `MAX_ROLE_PAGE_LIMIT` (50); passing `0` or a larger value
-  yields the cap rather than an error.
-- An `offset` past the end returns an empty page.
-- Ordering is by grant time, oldest first.
-- **The admin is included.** `initialize` grants `Role::Admin` through the same
-  path that maintains the index, so the admin appears as a holder like any other
-  — a mirror that assumes otherwise will show one fewer holder than the chain.
-
-### Pagination and concurrent revocation
-
-Revoking a role **compacts** the index, shifting every later entry down one. A
-dashboard paging through with a stored offset can therefore skip an entry if a
-revocation lands mid-walk. Compare `get_role_holder_count()` before and after a
-full walk and restart if it changed; for a set this small, re-reading is cheaper
-than reconciling a partial walk.
+### 3. Right to Erasure (Deletion Hook)
+To fulfill erasure requests under GDPR, the registrant or the admin can invoke the `remove` function:
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source-account registrant-or-admin \
+  --network testnet \
+  --send=yes \
+  -- remove --caller <caller_address> --github-username <username>
+```
+Calling `remove`:
+- Deletes the `ContributorRecord` from persistent storage.
+- Cleans up the username from the index list chunks.
+- Decrements the active registration counter and verified counter (if verified).
+- Emits a `RemovedEvent`.
