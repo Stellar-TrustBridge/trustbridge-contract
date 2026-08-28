@@ -42,3 +42,10 @@ Thumbs.db
 push_issues.sh
 issues.md
 issues.d/
+
+issue.md
+pr.md
+
+# MiMoCode
+.mimocode/
+.mimocode

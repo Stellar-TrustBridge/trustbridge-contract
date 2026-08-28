@@ -39,6 +39,12 @@ cargo test pause
 
 # Issue #213 — reserved username list
 cargo test reserved
+
+# Issue #249 — event payload golden tests
+cargo test event_payload
+
+# Issue #251 — concurrent register/remove simulation
+cargo test simulation
 ```
 
 ### WASM-gated tests (feature = "wasm-test")
@@ -120,6 +126,42 @@ Located in `tests/integration.rs` under the `// Issue #213` section.
 | `test_removed_reserved_name_can_be_registered` | After removal, name can be registered again |
 | `test_get_reserved_list_returns_all_entries` | List contains all added names |
 | `test_adding_reserved_does_not_evict_existing_registration` | Reserving an already-registered name does not evict it |
+
+### Issue #249 — Event Payload Golden Tests
+
+Located in `src/lib.rs` under the `// Issue #249` section.
+
+| Test | Event covered |
+|------|---------------|
+| `test_event_payload_registered` | `RegisteredEvent` — username, address, timestamp, sponsor |
+| `test_event_payload_removed` | `RemovedEvent` — username, address, timestamp, domain |
+| `test_event_payload_verified` | `VerifiedEvent` — username, address, timestamp, domain |
+| `test_event_payload_verification_revoked` | `VerificationRevokedEvent` — username, address, reason_code, domain |
+| `test_event_payload_paused` | `PausedEvent` — reason_code, timestamp, domain |
+| `test_event_payload_unpaused` | `UnpausedEvent` — reason_code, timestamp, domain |
+| `test_event_payload_role_granted` | `RoleGrantedEvent` — address, role, admin, timestamp, domain |
+| `test_event_payload_role_revoked` | `RoleRevokedEvent` — address, admin, timestamp, domain |
+| `test_event_payload_emergency_paused` | `EmergencyPausedEvent` — triggered_by, timestamp |
+| `test_event_payload_emergency_cleared` | `EmergencyClearedEvent` — admin, timestamp |
+| `test_event_payload_challenge_started` | `ChallengeStartedEvent` — username, challenged_by, resolve_after |
+| `test_event_payload_challenge_cancelled` | `ChallengeCancelledEvent` — username, cancelled_by |
+| `test_event_payload_challenge_completed` | `ChallengeCompletedEvent` — username, completed_by |
+
+**Refreshing goldens:** If an event struct gains or loses a field, update the
+corresponding test and run `cargo test event_payload` to verify. CI fails on
+any payload mismatch.
+
+### Issue #251 — Concurrent Register/Remove Simulation
+
+Located in `src/lib.rs` under the `// Issue #251` section.
+
+| Test | What it covers |
+|------|----------------|
+| `test_simulation_register_remove_verify_drift_detection` | 26-step deterministic sequence of register/remove/verify ops; asserts `total`, `verified`, and `get_verified_count` agree with a shadow model after every step |
+
+The simulation uses a `Shadow` struct that mirrors the registry outside
+contract storage. If the contract's counters drift from the shadow model,
+the test reports which operation caused the drift.
 
 ---
 

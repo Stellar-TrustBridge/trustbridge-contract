@@ -139,6 +139,31 @@ Update CI to Stellar CLI 26.1.0
 
 ---
 
+## Supply-Chain Audit (Issue #244)
+
+CI runs `cargo audit` and `cargo deny check` on every PR. These catch:
+
+- **Known vulnerabilities** in dependencies (via RustSec advisory database)
+- **Yanked crates** that should not be in the dependency tree
+- **License violations** against the allow-list in `deny.toml`
+- **Untrusted sources** (unknown registries or git dependencies)
+
+### Running locally
+
+```bash
+cargo install --locked cargo-audit cargo-deny
+cargo audit
+cargo deny check
+```
+
+### Adding an exception
+
+If a advisory is a false positive or cannot be patched upstream, add it to the
+`ignore` list in `deny.toml` with a comment explaining why and when it expires.
+Undocumented exceptions are rejected in code review.
+
+---
+
 ## Clippy Lint Policy
 
 The full plan is in `docs/CLIPPY_PEDANTIC_PLAN.md`. Summary:
@@ -330,6 +355,9 @@ GitHub Actions runs on every push and PR to `main`, `master`, and `develop`:
 - `cargo clippy -- -D warnings`
 - `cargo test`
 - `stellar contract build`
+- `cargo audit` (supply-chain vulnerability scan)
+- `cargo deny check` (license bans, yanked crates, advisory policy — see `deny.toml`)
+- `cargo clippy` pedantic Phase 1 (promoted to `-D` — see `CLIPPY_PEDANTIC_PLAN.md`)
 
 See `.github/workflows/ci.yml`.
 

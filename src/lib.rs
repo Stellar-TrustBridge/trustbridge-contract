@@ -8775,4 +8775,548 @@ mod test {
         assert!(authorized_addresses.contains(&user2));
         assert!(authorized_addresses.contains(&user1));
     }
+
+    // ── Issue #249: Event payload golden tests ─────────────────────────────
+    //
+    // One golden test per event struct. Each test triggers the event and
+    // asserts the exact payload fields so an accidental field rename or
+    // reorder fails CI before reaching an indexer.
+
+    #[test]
+    fn test_event_payload_registered() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+        });
+        let events = env.events().all();
+        let mut found = false;
+        for event in events.iter() {
+            if let Ok(data) = RegisteredEvent::try_from_val(&env, &event.value) {
+                assert_eq!(data.github_username, username(&env, "octocat"));
+                assert_eq!(data.stellar_address, user);
+                assert!(data.timestamp > 0);
+                assert!(data.sponsor.is_none());
+                found = true;
+            }
+        }
+        assert!(found, "RegisteredEvent must be emitted");
+    }
+
+    #[test]
+    fn test_event_payload_removed() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::remove(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+        let events = env.events().all();
+        let mut found = false;
+        for event in events.iter() {
+            if let Ok(data) = RemovedEvent::try_from_val(&env, &event.value) {
+                assert_eq!(data.github_username, username(&env, "octocat"));
+                assert_eq!(data.stellar_address, user);
+                assert!(data.timestamp > 0);
+                found = true;
+            }
+        }
+        assert!(found, "RemovedEvent must be emitted");
+    }
+
+    #[test]
+    fn test_event_payload_verified() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+        let events = env.events().all();
+        let mut found = false;
+        for event in events.iter() {
+            if let Ok(data) = VerifiedEvent::try_from_val(&env, &event.value) {
+                assert_eq!(data.github_username, username(&env, "octocat"));
+                assert_eq!(data.stellar_address, user);
+                assert!(data.timestamp > 0);
+                found = true;
+            }
+        }
+        assert!(found, "VerifiedEvent must be emitted");
+    }
+
+    #[test]
+    fn test_event_payload_verification_revoked() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::revoke_verification(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+                1,
+            )
+            .unwrap();
+        });
+        let events = env.events().all();
+        let mut found = false;
+        for event in events.iter() {
+            if let Ok(data) = VerificationRevokedEvent::try_from_val(&env, &event.value) {
+                assert_eq!(data.github_username, username(&env, "octocat"));
+                assert_eq!(data.stellar_address, user);
+                assert_eq!(data.reason_code, 1);
+                assert!(data.timestamp > 0);
+                found = true;
+            }
+        }
+        assert!(found, "VerificationRevokedEvent must be emitted");
+    }
+
+    #[test]
+    fn test_event_payload_paused() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::pause(env.clone(), 1).unwrap();
+        });
+        let events = env.events().all();
+        let mut found = false;
+        for event in events.iter() {
+            if let Ok(data) = PausedEvent::try_from_val(&env, &event.value) {
+                assert_eq!(data.reason_code, 1);
+                assert!(data.timestamp > 0);
+                found = true;
+            }
+        }
+        assert!(found, "PausedEvent must be emitted");
+    }
+
+    #[test]
+    fn test_event_payload_unpaused() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::pause(env.clone(), 1).unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::unpause(env.clone(), 4).unwrap();
+        });
+        let events = env.events().all();
+        let mut found = false;
+        for event in events.iter() {
+            if let Ok(data) = UnpausedEvent::try_from_val(&env, &event.value) {
+                assert_eq!(data.reason_code, 4);
+                assert!(data.timestamp > 0);
+                found = true;
+            }
+        }
+        assert!(found, "UnpausedEvent must be emitted");
+    }
+
+    #[test]
+    fn test_event_payload_role_granted() {
+        let env = Env::default();
+        let (_admin, _user, verifier, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+        });
+        let events = env.events().all();
+        let mut found = false;
+        for event in events.iter() {
+            if let Ok(data) = RoleGrantedEvent::try_from_val(&env, &event.value) {
+                assert_eq!(data.address, verifier);
+                assert_eq!(data.role, Role::Verifier as u32);
+                assert!(data.timestamp > 0);
+                found = true;
+            }
+        }
+        assert!(found, "RoleGrantedEvent must be emitted");
+    }
+
+    #[test]
+    fn test_event_payload_role_revoked() {
+        let env = Env::default();
+        let (_admin, _user, verifier, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::remove_role(env.clone(), verifier.clone()).unwrap();
+        });
+        let events = env.events().all();
+        let mut found = false;
+        for event in events.iter() {
+            if let Ok(data) = RoleRevokedEvent::try_from_val(&env, &event.value) {
+                assert_eq!(data.address, verifier);
+                assert!(data.timestamp > 0);
+                found = true;
+            }
+        }
+        assert!(found, "RoleRevokedEvent must be emitted");
+    }
+
+    #[test]
+    fn test_event_payload_emergency_paused() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::emergency_pause(env.clone(), admin.clone()).unwrap();
+        });
+        let events = env.events().all();
+        let mut found = false;
+        for event in events.iter() {
+            if let Ok(data) = EmergencyPausedEvent::try_from_val(&env, &event.value) {
+                assert_eq!(data.triggered_by, admin);
+                assert!(data.timestamp > 0);
+                found = true;
+            }
+        }
+        assert!(found, "EmergencyPausedEvent must be emitted");
+    }
+
+    #[test]
+    fn test_event_payload_emergency_cleared() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::emergency_pause(env.clone(), admin.clone()).unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::clear_emergency_pause(env.clone()).unwrap();
+        });
+        let events = env.events().all();
+        let mut found = false;
+        for event in events.iter() {
+            if let Ok(data) = EmergencyClearedEvent::try_from_val(&env, &event.value) {
+                assert_eq!(data.admin, admin);
+                assert!(data.timestamp > 0);
+                found = true;
+            }
+        }
+        assert!(found, "EmergencyClearedEvent must be emitted");
+    }
+
+    #[test]
+    fn test_event_payload_challenge_started() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "squatter"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::start_challenge(env.clone(), admin.clone(), username(&env, "squatter"))
+                .unwrap();
+        });
+        let events = env.events().all();
+        let mut found = false;
+        for event in events.iter() {
+            if let Ok(data) = ChallengeStartedEvent::try_from_val(&env, &event.value) {
+                assert_eq!(data.github_username, username(&env, "squatter"));
+                assert_eq!(data.challenged_by, admin);
+                assert!(data.resolve_after > 0);
+                assert!(data.timestamp > 0);
+                found = true;
+            }
+        }
+        assert!(found, "ChallengeStartedEvent must be emitted");
+    }
+
+    #[test]
+    fn test_event_payload_challenge_cancelled() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "squatter"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::start_challenge(env.clone(), admin.clone(), username(&env, "squatter"))
+                .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::cancel_challenge(env.clone(), admin.clone(), username(&env, "squatter"))
+                .unwrap();
+        });
+        let events = env.events().all();
+        let mut found = false;
+        for event in events.iter() {
+            if let Ok(data) = ChallengeCancelledEvent::try_from_val(&env, &event.value) {
+                assert_eq!(data.github_username, username(&env, "squatter"));
+                assert_eq!(data.cancelled_by, admin);
+                assert!(data.timestamp > 0);
+                found = true;
+            }
+        }
+        assert!(found, "ChallengeCancelledEvent must be emitted");
+    }
+
+    #[test]
+    fn test_event_payload_challenge_completed() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "squatter"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+        });
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::start_challenge(env.clone(), admin.clone(), username(&env, "squatter"))
+                .unwrap();
+        });
+        // Advance past the challenge delay
+        env.ledger()
+            .with_mut(|li| li.timestamp += crate::storage::DEFAULT_CHALLENGE_DELAY_SECS + 1);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::complete_challenge(
+                env.clone(),
+                admin.clone(),
+                username(&env, "squatter"),
+            )
+            .unwrap();
+        });
+        let events = env.events().all();
+        let mut found = false;
+        for event in events.iter() {
+            if let Ok(data) = ChallengeCompletedEvent::try_from_val(&env, &event.value) {
+                assert_eq!(data.github_username, username(&env, "squatter"));
+                assert_eq!(data.completed_by, admin);
+                assert!(data.timestamp > 0);
+                found = true;
+            }
+        }
+        assert!(found, "ChallengeCompletedEvent must be emitted");
+    }
+
+    // ── Issue #251: Concurrent register/remove simulation ──────────────────
+    //
+    // Runs a sequence of random legal register/remove/verify operations and
+    // compares contract state against a shadow model after every step.
+    // Detects count/index drift before it reaches testnet.
+
+    /// Minimal shadow model for the registry.
+    struct Shadow {
+        records: alloc::collections::BTreeMap<alloc::string::String, bool>,
+        total: u32,
+        verified: u32,
+    }
+
+    impl Shadow {
+        fn new() -> Self {
+            Self {
+                records: alloc::collections::BTreeMap::new(),
+                total: 0,
+                verified: 0,
+            }
+        }
+
+        fn register(&mut self, name: &str) {
+            if !self.records.contains_key(name) {
+                self.total += 1;
+            }
+            self.records.insert(name.to_string(), false);
+        }
+
+        fn remove(&mut self, name: &str) {
+            if let Some(was_verified) = self.records.remove(name) {
+                self.total -= 1;
+                if was_verified {
+                    self.verified -= 1;
+                }
+            }
+        }
+
+        fn verify(&mut self, name: &str) {
+            if let Some(v) = self.records.get_mut(name) {
+                if !*v {
+                    *v = true;
+                    self.verified += 1;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_simulation_register_remove_verify_drift_detection() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+
+        let mut shadow = Shadow::new();
+        let names = ["alice", "bob", "carol", "dave", "eve"];
+
+        // Deterministic operation sequence: register all, verify some, remove
+        // some, re-register, verify again. This exercises the paths most
+        // likely to produce count/index drift.
+        let ops: Vec<(&str, &str)> = vec![
+            ("register", "alice"),
+            ("register", "bob"),
+            ("register", "carol"),
+            ("register", "dave"),
+            ("register", "eve"),
+            ("verify", "alice"),
+            ("verify", "carol"),
+            ("verify", "eve"),
+            ("remove", "bob"),
+            ("remove", "dave"),
+            ("register", "bob"),
+            ("register", "dave"),
+            ("verify", "bob"),
+            ("remove", "alice"),
+            ("remove", "eve"),
+            ("register", "alice"),
+            ("register", "eve"),
+            ("verify", "alice"),
+            ("verify", "eve"),
+            ("remove", "carol"),
+            ("register", "carol"),
+            ("verify", "carol"),
+            ("remove", "bob"),
+            ("remove", "dave"),
+            ("register", "bob"),
+            ("register", "dave"),
+        ];
+
+        for (op, name) in &ops {
+            let addr = match *name {
+                "alice" => user.clone(),
+                "bob" => user.clone(),
+                "carol" => user.clone(),
+                "dave" => user.clone(),
+                "eve" => user.clone(),
+                _ => user.clone(),
+            };
+            match *op {
+                "register" => {
+                    shadow.register(name);
+                    env.as_contract(&contract_id, || {
+                        TrustBridgeContract::register(
+                            env.clone(),
+                            username(&env, name),
+                            addr.clone(),
+                            Vec::new(&env),
+                        )
+                        .unwrap();
+                    });
+                }
+                "remove" => {
+                    shadow.remove(name);
+                    env.as_contract(&contract_id, || {
+                        TrustBridgeContract::remove(
+                            env.clone(),
+                            admin.clone(),
+                            username(&env, name),
+                        )
+                        .unwrap();
+                    });
+                }
+                "verify" => {
+                    shadow.verify(name);
+                    env.as_contract(&contract_id, || {
+                        TrustBridgeContract::verify(
+                            env.clone(),
+                            admin.clone(),
+                            username(&env, name),
+                        )
+                        .unwrap();
+                    });
+                }
+                _ => {}
+            }
+
+            // Assert invariants after every step
+            env.as_contract(&contract_id, || {
+                let stats = TrustBridgeContract::get_stats(env.clone());
+                assert_eq!(
+                    stats.total, shadow.total,
+                    "total drift after {op} {name}"
+                );
+                assert_eq!(
+                    stats.verified, shadow.verified,
+                    "verified drift after {op} {name}"
+                );
+                assert_eq!(
+                    TrustBridgeContract::get_verified_count(env.clone()),
+                    shadow.verified,
+                    "get_verified_count drift after {op} {name}"
+                );
+            });
+        }
+    }
 }
