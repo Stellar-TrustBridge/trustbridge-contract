@@ -31,6 +31,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check ABI changelog
+        run: bash scripts/check_changelog_abi.sh "${{ github.event.pull_request.base.sha || github.event.before }}"
+
+      - name: Check generated ABI JSON is current
+        run: |
+          make abi
+          git diff --exit-code -- docs/abi.json
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -78,6 +88,23 @@ jobs:
       # Cargo emits underscores for hyphenated crate names (trustbridge-contract → trustbridge_contract.wasm)
       - name: Verify WASM artifact exists
         run: test -f target/wasm32v1-none/release/trustbridge_contract.wasm || test -f target/wasm32-unknown-unknown/release/trustbridge_contract.wasm
+
+      - name: Generate TypeScript bindings
+        run: |
+          if [ -f target/wasm32v1-none/release/trustbridge_contract.wasm ]; then
+            WASM=target/wasm32v1-none/release/trustbridge_contract.wasm
+          else
+            WASM=target/wasm32-unknown-unknown/release/trustbridge_contract.wasm
+          fi
+          make bindings WASM="$WASM"
+
+      - name: Upload TypeScript bindings artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trustbridge-typescript-bindings
+          path: bindings/typescript
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Compute and verify WASM hash pin
         run: |

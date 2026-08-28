@@ -2,7 +2,7 @@
 
 Thank you for your interest in contributing to **trustbridge-contract**! This guide covers setup, workflow, and standards.
 
-Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [ABI](ABI.md) · [DEPLOYMENT](DEPLOYMENT.md) · [Testnet Checklist](TESTNET_CHECKLIST.md)
+Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [ABI](ABI.md) · [CHANGELOG](../CHANGELOG.md) · [DEPLOYMENT](DEPLOYMENT.md) · [Testnet Checklist](TESTNET_CHECKLIST.md)
 
 ---
 
@@ -74,8 +74,35 @@ This runs formatting, clippy, tests, and contract build — the same checks as C
 ### Documentation
 
 - Update `ABI.md` for any interface change
+- Update `CHANGELOG.md` with a new semantic version heading when a public
+  function signature in `ABI.md` changes. Use a minor version for additive
+  signatures, a major version for breaking changes, and a patch version for
+  compatible corrections.
 - Update `ARCHITECTURE.md` for storage or auth model changes
 - Update `README.md` if user-facing behavior changes
+
+### ABI changelog policy
+
+CI compares `docs/ABI.md` with the pull request base revision. Changes to
+public function signature headings require a new versioned `CHANGELOG.md`
+heading, for example `## [1.2.0] - 2026-08-28`, with a description of the
+change. Typo fixes and prose-only ABI edits do not require a changelog entry.
+
+The check is intentionally a heuristic: it watches function signature
+headings rather than trying to understand the complete ABI. If a legitimate
+prose edit is reported as an ABI change, add a reason in the changed changelog
+as an HTML comment:
+
+```markdown
+<!-- changelog-check: skip - explain why this signature-looking edit is not a public ABI change -->
+```
+
+Do not use the skip marker for an actual ABI change; record that change under a
+new version instead. Run the same check locally with the base commit:
+
+```bash
+bash scripts/check_changelog_abi.sh main
+```
 
 ### Rustdoc
 

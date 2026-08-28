@@ -1,0 +1,365 @@
+{
+  "schema_version": 1,
+  "source": "docs/ABI.md",
+  "functions": [
+    {
+      "name": "initialize",
+      "signature": "initialize(admin: Address) -> Result<(), ContractError>"
+    },
+    {
+      "name": "register",
+      "signature": "register(github_username: String, stellar_address: Address, fallback_addresses: Vec<Address>) -> Result<(), ContractError>"
+    },
+    {
+      "name": "register_sponsored",
+      "signature": "register_sponsored(github_username: String, stellar_address: Address, sponsor: Address) -> Result<(), ContractError>"
+    },
+    {
+      "name": "max_username_len",
+      "signature": "max_username_len() -> u32"
+    },
+    {
+      "name": "is_username_valid",
+      "signature": "is_username_valid(github_username: String) -> bool"
+    },
+    {
+      "name": "is_address_zero",
+      "signature": "is_address_zero(address: Address) -> bool"
+    },
+    {
+      "name": "usernames_match",
+      "signature": "usernames_match(a: String, b: String) -> bool"
+    },
+    {
+      "name": "get_address",
+      "signature": "get_address(github_username: String) -> Option<ContributorRecord>"
+    },
+    {
+      "name": "remove",
+      "signature": "remove(caller: Address, github_username: String) -> Result<(), ContractError>"
+    },
+    {
+      "name": "batch_remove",
+      "signature": "batch_remove(caller: Address, usernames: Vec<String>) -> Result<BatchSummary, ContractError>"
+    },
+    {
+      "name": "get_all_registered",
+      "signature": "get_all_registered() -> Result<Vec<(String, Address)>, ContractError>"
+    },
+    {
+      "name": "verify",
+      "signature": "verify(caller: Address, github_username: String) -> Result<(), ContractError>"
+    },
+    {
+      "name": "get_registered_paginated",
+      "signature": "get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>"
+    },
+    {
+      "name": "get_public_paginated",
+      "signature": "get_public_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>"
+    },
+    {
+      "name": "config_verification",
+      "signature": "config_verification(caller: Address, attestation: Symbol, expires_in: u64, threshold: u32) -> Result<(), ContractError>"
+    },
+    {
+      "name": "batch_verify",
+      "signature": "batch_verify(caller: Address, usernames: Vec<String>) -> Result<BatchSummary, ContractError>"
+    },
+    {
+      "name": "revoke_verification",
+      "signature": "revoke_verification(caller: Address, github_username: String, reason_code: u32) -> Result<(), ContractError>"
+    },
+    {
+      "name": "set_bot_status",
+      "signature": "set_bot_status(caller: Address, github_username: String, is_bot: bool) -> Result<(), ContractError>"
+    },
+    {
+      "name": "get_verified_count",
+      "signature": "get_verified_count() -> u32"
+    },
+    {
+      "name": "get_ever_verified_count",
+      "signature": "get_ever_verified_count() -> u32"
+    },
+    {
+      "name": "get_stats",
+      "signature": "get_stats() -> Stats"
+    },
+    {
+      "name": "pause",
+      "signature": "pause() -> Result<(), ContractError>"
+    },
+    {
+      "name": "unpause",
+      "signature": "unpause() -> Result<(), ContractError>"
+    },
+    {
+      "name": "is_paused",
+      "signature": "is_paused() -> bool"
+    },
+    {
+      "name": "set_role",
+      "signature": "set_role(target: Address, role: Role) -> Result<(), ContractError>"
+    },
+    {
+      "name": "remove_role",
+      "signature": "remove_role(target: Address) -> Result<(), ContractError>"
+    },
+    {
+      "name": "get_role",
+      "signature": "get_role(address: Address) -> Option<Role>"
+    },
+    {
+      "name": "set_cooldown",
+      "signature": "set_cooldown(cooldown_seconds: u64) -> Result<(), ContractError>"
+    },
+    {
+      "name": "get_cooldown",
+      "signature": "get_cooldown() -> u64"
+    },
+    {
+      "name": "get_version",
+      "signature": "get_version() -> (u32, u32, u32)"
+    },
+    {
+      "name": "upgrade",
+      "signature": "upgrade(new_wasm_hash: BytesN<32>) -> Result<(), ContractError>"
+    },
+    {
+      "name": "attest_upgrade",
+      "signature": "attest_upgrade(wasm_hash: BytesN<32>, expires_at: u64) -> Result<(), ContractError>"
+    },
+    {
+      "name": "clear_attestation",
+      "signature": "clear_attestation() -> Result<(), ContractError>"
+    },
+    {
+      "name": "get_attestation",
+      "signature": "get_attestation() -> Option<WasmAttestation>"
+    },
+    {
+      "name": "get_provenance",
+      "signature": "get_provenance() -> Option<WasmProvenance>"
+    },
+    {
+      "name": "migrate",
+      "signature": "migrate(new_version: (u32, u32, u32)) -> Result<(), ContractError>"
+    }
+  ],
+  "errors": [
+    {
+      "code": 1,
+      "name": "AlreadyInitialized",
+      "description": "Contract already has an admin"
+    },
+    {
+      "code": 2,
+      "name": "NotInitialized",
+      "description": "Contract not yet initialized"
+    },
+    {
+      "code": 3,
+      "name": "NotAuthorized",
+      "description": "Caller lacks permission"
+    },
+    {
+      "code": 4,
+      "name": "NotRegistered",
+      "description": "Username not in registry"
+    },
+    {
+      "code": 5,
+      "name": "AlreadyVerified",
+      "description": "Username already verified"
+    },
+    {
+      "code": 6,
+      "name": "InvalidEntityType",
+      "description": "Unknown entity type value"
+    },
+    {
+      "code": 7,
+      "name": "OrgNameRequired",
+      "description": "Team registration requires org_name"
+    },
+    {
+      "code": 6,
+      "name": "NotVerified",
+      "description": "Cannot revoke verification because the username is not verified"
+    },
+    {
+      "code": 7,
+      "name": "Paused",
+      "description": "Contract is paused for maintenance or emergency"
+    },
+    {
+      "code": 8,
+      "name": "CooldownActive",
+      "description": "Upgrade cooldown period has not elapsed"
+    },
+    {
+      "code": 9,
+      "name": "InvalidVersion",
+      "description": "Target version is not higher than current version"
+    },
+    {
+      "code": 10,
+      "name": "InvalidRole",
+      "description": "Invalid or unauthorized role assignment"
+    },
+    {
+      "code": 11,
+      "name": "InvalidUsername",
+      "description": "Username is empty, over `max_username_len`, or contains disallowed characters"
+    },
+    {
+      "code": 12,
+      "name": "AttestationExpired",
+      "description": "Upgrade attestation's `expires_at` has passed"
+    },
+    {
+      "code": 13,
+      "name": "UnattestedWasm",
+      "description": "`upgrade` hash does not match the live attestation"
+    },
+    {
+      "code": 14,
+      "name": "InvalidBatchSize",
+      "description": "Batch call supplied zero items or more than the configured max"
+    },
+    {
+      "code": 15,
+      "name": "InvalidReasonCode",
+      "description": "`revoke_verification` reason_code is not a known `RevokeReason` value"
+    },
+    {
+      "code": 16,
+      "name": "ZeroAddress",
+      "description": "Supplied Stellar address is the well-known zero/burn address"
+    },
+    {
+      "code": 17,
+      "name": "ChallengeAlreadyActive",
+      "description": "`start_challenge` called while a challenge is already open"
+    },
+    {
+      "code": 18,
+      "name": "NoChallengeActive",
+      "description": "`cancel_challenge` or `complete_challenge` called with no active challenge"
+    },
+    {
+      "code": 19,
+      "name": "ChallengeNotResolvable",
+      "description": "`complete_challenge` called before the delay has elapsed"
+    },
+    {
+      "code": 20,
+      "name": "ChallengeActive",
+      "description": "`register` attempted while a challenge is active on the username"
+    },
+    {
+      "code": 21,
+      "name": "NetworkMismatch",
+      "description": "Instance state was initialized on a different network than the one executing (Issue #231)"
+    }
+  ],
+  "events": [
+    {
+      "name": "RegisteredEvent",
+      "topics": [
+        "\"registered_event\"",
+        "github_username"
+      ],
+      "data": "{ stellar_address, timestamp, sponsor: Option<Address> }"
+    },
+    {
+      "name": "RemovedEvent",
+      "topics": [
+        "\"removed_event\"",
+        "github_username"
+      ],
+      "data": "{ stellar_address, timestamp }"
+    },
+    {
+      "name": "VerifiedEvent",
+      "topics": [
+        "\"verified_event\"",
+        "github_username"
+      ],
+      "data": "{ stellar_address, timestamp }"
+    },
+    {
+      "name": "VerificationRevokedEvent",
+      "topics": [
+        "\"verification_revoked_event\"",
+        "github_username"
+      ],
+      "data": "{ stellar_address, timestamp, reason_code }"
+    },
+    {
+      "name": "UpgradedEvent",
+      "topics": [
+        "\"upgraded_event\"",
+        "new_wasm_hash"
+      ],
+      "data": "{ version, timestamp }"
+    },
+    {
+      "name": "PausedEvent",
+      "topics": [
+        "\"paused_event\" / \"unpaused_event\"",
+        "admin"
+      ],
+      "data": "{ timestamp }"
+    },
+    {
+      "name": "UnpausedEvent",
+      "topics": [
+        "\"paused_event\" / \"unpaused_event\"",
+        "admin"
+      ],
+      "data": "{ timestamp }"
+    },
+    {
+      "name": "RoleGrantedEvent",
+      "topics": [
+        "\"role_granted_event\"",
+        "address"
+      ],
+      "data": "{ role, admin, timestamp }"
+    },
+    {
+      "name": "RoleRevokedEvent",
+      "topics": [
+        "\"role_revoked_event\"",
+        "address"
+      ],
+      "data": "{ admin, timestamp }"
+    },
+    {
+      "name": "AdminTransferProposedEvent",
+      "topics": [
+        "\"admin_transfer_proposed_event\"",
+        "new_admin"
+      ],
+      "data": "{ proposed_by, executable_at, timestamp }"
+    },
+    {
+      "name": "AdminTransferCancelledEvent",
+      "topics": [
+        "\"admin_transfer_cancelled_event\"",
+        "cancelled_by"
+      ],
+      "data": "{ timestamp }"
+    },
+    {
+      "name": "AdminTransferExecutedEvent",
+      "topics": [
+        "\"admin_transfer_executed_event\"",
+        "new_admin"
+      ],
+      "data": "{ old_admin, timestamp }"
+    }
+  ]
+}

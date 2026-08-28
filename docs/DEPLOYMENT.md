@@ -563,6 +563,51 @@ git add wasm-hash.pin
 git commit -m "chore: bump wasm-hash.pin after <feature>"
 ```
 
+### Explorer verification
+
+After deploying, verify the uploaded WASM on [Stellar Expert](https://stellar.expert/)
+using the explorer for the same network. Stellar Expert displays the hash of the
+WASM code stored for the contract; compare it with the local **SHA-256** hash.
+
+1. Set the deployed contract ID and choose the network used for the deployment:
+
+  ```bash
+  export CONTRACT_ID=$(jq -r .contract_id deployments/testnet.json)
+  export NETWORK=testnet
+  ```
+
+  For mainnet, use `deployments/mainnet.json` and set `NETWORK=mainnet`.
+
+2. Compute the hash of the exact release artifact that was deployed. Use the
+  `wasm32v1-none` path produced by the recommended Stellar CLI build:
+
+  ```bash
+  WASM=target/wasm32v1-none/release/trustbridge-contract.wasm
+  sha256sum "$WASM"
+  grep -v '^#' wasm-hash.pin | grep -v '^$' | tr -d '[:space:]'
+  ```
+
+  The two SHA-256 values must match. If the legacy target was used, compute
+  the hash from `target/wasm32-unknown-unknown/release/trustbridge-contract.wasm`
+  instead. Do not hash a debug or rebuilt artifact that was not deployed.
+
+3. Open the matching contract page:
+
+  - [Stellar Expert Testnet contract explorer](https://stellar.expert/explorer/testnet/contract/)
+  - [Stellar Expert Mainnet contract explorer](https://stellar.expert/explorer/public/contract/)
+
+  Append `$CONTRACT_ID` to the selected URL, or search for the contract ID in
+  Stellar Expert. Confirm that the contract address and network are correct.
+
+4. Open the contract's **Code** or **WASM** details and compare its displayed
+  SHA-256 hash with the value printed in step 2 and the committed
+  `wasm-hash.pin`. Record the contract ID, network, hash, release commit, and
+  explorer URL in the deployment runbook.
+
+Never compare a testnet contract with the mainnet explorer, or vice versa.
+Explorer availability is a convenience check; CI's pinned hash check and the
+local `make wasm-hash-pin` result remain the authoritative artifact checks.
+
 ### Updating the pin (intentional WASM changes)
 
 1. Make your contract changes and build: `make build`.
