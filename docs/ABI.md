@@ -1503,7 +1503,7 @@ admin or any registrant to invoke them:
 | `get_address(github_username)` | `Option<ContributorRecord>` | Core identity lookup |
 | `has_record(github_username)` | `bool` | Cheap existence check, avoids decoding the full record |
 | `get_record_proof(github_username)` | `RecordProof` | Existence proof for light clients: verified bit, storage key, TTL policy |
-| `get_public_paginated(cursor, limit)` | `Result<ExportPage, ContractError>` | Paginated read; fails with `Paused` while the registry is paused |
+| `get_public_paginated(cursor, limit)` | `Result<ExportPage, ContractError>` | Paginated read; **available while the registry is paused** (Issue #294) — only `NotInitialized` can fail it |
 | `get_stats()` | `Stats` | `{ total, verified, ever_verified }` |
 | `get_verified_count()` | `u32` | Live count; drops on revoke |
 | `get_ever_verified_count()` | `u32` | Monotonic; never drops |

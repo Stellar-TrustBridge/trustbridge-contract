@@ -2744,3 +2744,167 @@ fn test_protocol_upgrade_rehearsal() {
         assert_eq!(final_stats.verified, 2, "both alice and bob verified");
     });
 }
+
+// ── Issue #294: public reads must stay available while paused ────────────────
+//
+// The pause circuit breaker freezes state mutations only. Every no-auth read
+// must keep working while `paused == true` so indexers, the GitHub Action, and
+// the dashboard can keep syncing through a maintenance or security freeze.
+//
+// This is the conformance matrix. It pauses the contract and drives every
+// public read, asserting none of them returns `Err(Paused)`. The doc table it
+// mirrors lives in `docs/ARCHITECTURE.md`
+// ("Public reads vs. pause: conformance matrix"). A new public read must be
+// added here; a `require_not_paused` slipped into one of these paths fails
+// this test.
+//
+// Admin-only reads (`get_all_registered`, `get_registered_page`,
+// `get_registered_paginated`) are covered separately below — they are not
+// pause-gated but still require admin auth.
+
+#[test]
+fn test_conformance_public_reads_available_while_paused() {
+    let (env, admin, user1, _user2, contract_id) = setup_test_env();
+    env.ledger().set_timestamp(1_000);
+
+    // Seed one record so the lookups have something real to return.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env))
+            .unwrap();
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
+    });
+
+    // Freeze the contract (reason 2 = SecurityIncident).
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::pause(env.clone(), 2).unwrap();
+        assert!(TrustBridgeContract::is_paused(env.clone()));
+    });
+
+    // Sanity: a mutation really is blocked right now.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::register(env.clone(), s(&env, "mallory"), user1.clone(), Vec::new(&env)),
+            Err(ContractError::Paused),
+            "a state mutation must still be blocked while paused"
+        );
+    });
+
+    // ── Fallible public reads: must NOT return `Err(Paused)` while paused ────
+    env.as_contract(&contract_id, || {
+        // The regression this issue is really about.
+        let page = TrustBridgeContract::get_public_paginated(env.clone(), 0, 10);
+        assert_ne!(
+            page, Err(ContractError::Paused),
+            "get_public_paginated MUST work while paused (Issue #294)"
+        );
+        assert_eq!(page.unwrap().records.len(), 1);
+
+        assert_ne!(
+            TrustBridgeContract::get_health(env.clone()),
+            Err(ContractError::Paused),
+            "get_health must work while paused"
+        );
+        assert_ne!(
+            TrustBridgeContract::get_reserved_list(env.clone()),
+            Err(ContractError::Paused),
+            "get_reserved_list must work while paused"
+        );
+    });
+
+    // ── Infallible public reads ─────────────────────────────────────────────
+    //
+    // These have no `ContractError` return, so they *cannot* be pause-gated as
+    // written. Calling each while paused proves it does not panic; if a future
+    // PR adds `require_not_paused` it must change the signature to `Result<..>`,
+    // which breaks this block's compilation — the guard this matrix provides.
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::get_address(env.clone(), s(&env, "alice")).is_some());
+        assert!(TrustBridgeContract::get_address(env.clone(), s(&env, "ghost")).is_none());
+        assert!(TrustBridgeContract::has_record(env.clone(), s(&env, "alice")));
+        let _ = TrustBridgeContract::get_record_proof(env.clone(), s(&env, "alice"));
+
+        let _ = TrustBridgeContract::get_stats(env.clone());
+        let _ = TrustBridgeContract::get_verified_count(env.clone());
+        let _ = TrustBridgeContract::get_ever_verified_count(env.clone());
+
+        let _ = TrustBridgeContract::version(env.clone());
+        let _ = TrustBridgeContract::get_version(env.clone());
+        let _ = TrustBridgeContract::is_compatible(env.clone(), 1, 0, 0);
+
+        assert!(TrustBridgeContract::is_paused(env.clone()));
+        let _ = TrustBridgeContract::is_contract_paused(env.clone());
+        let _ = TrustBridgeContract::is_emergency_paused(env.clone());
+        let _ = TrustBridgeContract::emergency_pause_timestamp(env.clone());
+        let _ = TrustBridgeContract::get_pause_reason(env.clone());
+
+        let _ = TrustBridgeContract::get_role(env.clone(), admin.clone());
+        let _ = TrustBridgeContract::get_role_holders(env.clone(), 0, 10);
+        let _ = TrustBridgeContract::get_role_holder_count(env.clone());
+
+        let _ = TrustBridgeContract::get_cooldown(env.clone());
+        let _ = TrustBridgeContract::get_rotation_delay(env.clone());
+        let _ = TrustBridgeContract::get_pending_rotation(env.clone(), s(&env, "alice"));
+        let _ = TrustBridgeContract::get_guardian(env.clone());
+        let _ = TrustBridgeContract::get_attestation(env.clone());
+        let _ = TrustBridgeContract::get_provenance(env.clone());
+        let _ = TrustBridgeContract::get_verification_config(env.clone());
+        let _ = TrustBridgeContract::get_challenge(env.clone(), s(&env, "alice"));
+        let _ = TrustBridgeContract::is_reserved(env.clone(), s(&env, "alice"));
+        let _ = TrustBridgeContract::get_network_tag(env.clone());
+        let _ = TrustBridgeContract::is_registration_in_cooldown(env.clone(), s(&env, "alice"));
+
+        let _ = TrustBridgeContract::max_username_len(env.clone());
+        let _ = TrustBridgeContract::is_username_valid(env.clone(), s(&env, "alice"));
+        let _ = TrustBridgeContract::is_address_zero(env.clone(), user1.clone());
+        let _ = TrustBridgeContract::usernames_match(env.clone(), s(&env, "alice"), s(&env, "alice"));
+
+        let _ = TrustBridgeContract::get_audit_logs(env.clone());
+        let _ = TrustBridgeContract::get_audit_stats(env.clone());
+    });
+
+    // Unpause and confirm mutations resume (the pause was reversible, not a
+    // one-way trip that also broke reads).
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::unpause(env.clone(), 4).unwrap();
+        assert!(
+            TrustBridgeContract::register(env.clone(), s(&env, "carol"), user1.clone(), Vec::new(&env)).is_ok()
+        );
+    });
+}
+
+/// Admin-only reads are not pause-gated, but they still require admin auth —
+/// so while paused an admin caller succeeds and a non-admin caller gets
+/// `NotAuthorized` (never `Paused`). Listed separately from the no-auth
+/// conformance set (Issue #294).
+#[test]
+fn test_conformance_admin_reads_while_paused_need_auth_not_pause() {
+    let (env, admin, user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1.clone(), Vec::new(&env))
+            .unwrap();
+        TrustBridgeContract::pause(env.clone(), 1).unwrap();
+    });
+
+    // Admin caller — succeeds while paused.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::get_all_registered(env.clone()).is_ok());
+        assert!(TrustBridgeContract::get_registered_page(env.clone(), 0, 10).is_ok());
+        assert!(TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).is_ok());
+    });
+
+    // None of them fail with `Paused` (they fail auth, not pause, for a
+    // non-admin — exercised by the existing RBAC negative tests).
+    env.as_contract(&contract_id, || {
+        assert_ne!(
+            TrustBridgeContract::get_all_registered(env.clone()),
+            Err(ContractError::Paused)
+        );
+    });
+}

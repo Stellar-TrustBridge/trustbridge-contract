@@ -1815,20 +1815,23 @@ impl TrustBridgeContract {
     /// making it suitable for public dashboard sync and off-chain indexers. Returns an
     /// [`ExportPage`] with records and a `next_cursor`.
     ///
-    /// Blocked by the pause state — returns [`ContractError::Paused`] while the circuit
-    /// breaker is active.
+    /// **Available while paused (Issue #294).** This is a public read: the pause
+    /// circuit breaker only stops state mutations, and an indexer or dashboard
+    /// must be able to keep syncing the registry during a maintenance or
+    /// security pause. Previously this path called `require_not_paused` and
+    /// returned [`ContractError::Paused`] — that gate was the exact regression
+    /// this issue's conformance matrix now guards against, and it has been
+    /// removed.
     ///
     /// # Errors
     ///
     /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
-    /// - [`ContractError::Paused`] if the contract is paused.
     pub fn get_public_paginated(
         env: Env,
         cursor: u32,
         limit: u32,
     ) -> Result<ExportPage, ContractError> {
         require_initialized(&env)?;
-        require_not_paused(&env)?;
 
         get_registered_paginated_internal(&env, cursor, limit)
     }

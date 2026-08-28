@@ -127,16 +127,22 @@ Paused function matrix:
 | `upgrade` | Rejected with `Paused` |
 | `migrate` | Rejected with `Paused` |
 | `set_role` / `remove_role` | Rejected with `Paused` |
-| `get_public_paginated` | Rejected with `Paused` |
 
 Allowed while paused:
 
 | Function | Behavior while paused |
 |---------|------------------------|
-| `get_address`, `has_record`, `get_stats` | Allowed read-only lookups |
-| `get_all_registered`, `get_registered_page`, `get_registered_paginated` | Allowed for admin/export workflows |
-| `is_paused`, `is_contract_paused`, `version`, `is_compatible` | Allowed status and compatibility reads |
+| `get_address`, `has_record`, `get_record_proof`, `get_stats`, `get_verified_count`, `get_ever_verified_count` | Allowed read-only lookups |
+| `get_public_paginated` | **Allowed (Issue #294).** Public read — an indexer/dashboard must keep syncing during a pause. The `require_not_paused` gate that used to sit here was removed. |
+| `get_all_registered`, `get_registered_page`, `get_registered_paginated` | Allowed, but **require admin auth** — see the conformance matrix in [ARCHITECTURE.md](ARCHITECTURE.md#public-reads-vs-pause-conformance-matrix-issue-294) |
+| `get_health`, `is_paused`, `is_contract_paused`, `get_pause_reason`, `version`, `get_version`, `is_compatible` | Allowed status and compatibility reads |
 | `pause`, `unpause`, `set_paused` | Allowed admin controls for freeze lifecycle |
+
+The full, test-enforced list of public reads that must succeed while paused is
+the conformance matrix in
+[ARCHITECTURE.md](ARCHITECTURE.md#public-reads-vs-pause-conformance-matrix-issue-294),
+checked by `test_conformance_public_reads_available_while_paused` in
+`tests/integration.rs`.
 
 ---
 
