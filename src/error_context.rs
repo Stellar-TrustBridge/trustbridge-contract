@@ -92,6 +92,10 @@ pub fn classify_error(error: ContractError) -> ErrorCategory {
         ContractError::AlreadyVerified => ErrorCategory::Validation,
         ContractError::NotVerified => ErrorCategory::Validation,
         ContractError::Paused => ErrorCategory::Transient,
+        // Permanent: the contract's state was initialized on a different
+        // network. Retrying cannot change which ledger the caller is on — the
+        // deployment has to be corrected.
+        ContractError::NetworkMismatch => ErrorCategory::Permanent,
         ContractError::CooldownActive => ErrorCategory::Transient,
         ContractError::InvalidVersion => ErrorCategory::Validation,
         ContractError::InvalidRole => ErrorCategory::Validation,

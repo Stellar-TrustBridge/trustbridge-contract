@@ -272,3 +272,75 @@ for the full onboarding path.
 
 To graduate to testnet, replace `NETWORK=futurenet` with `NETWORK=testnet` and re-run
 from Step 1. Testnet also provides free XLM via Friendbot.
+
+---
+
+## Network tagging (Issue #231)
+
+### The failure this prevents
+
+A Stellar G-address is network-agnostic — the same keypair is valid on
+Futurenet, testnet, and the public network. Nothing about a stored
+`ContributorRecord` says which network its registration was meant for, so a
+consumer holding a record had to infer the network from whichever RPC URL it
+happened to dial. Get that wrong and a contributor is paid on the wrong ledger,
+with no error anywhere along the way: the address is valid, the record is
+well-formed, and the payout succeeds.
+
+The same hazard appears when a state snapshot is stood up somewhere else — a
+mainnet dump restored onto Futurenet for testing, say. Every record in it
+silently becomes a claim about a ledger it was never registered against.
+
+### How it works
+
+`initialize` records `env.ledger().network_id()` — the SHA-256 of the network
+passphrase — in instance storage.
+
+The value is read from the host rather than supplied by the deployer, on
+purpose: an operator-supplied network tag is exactly the sort of field that gets
+copy-pasted from a testnet runbook into a mainnet deploy. There is nothing to
+pass and nothing to get wrong.
+
+`require_initialized`, which every gated entry point already calls, compares the
+recorded id against the live one. A mismatch returns `NetworkMismatch` (code 21)
+from every gated function, read or write — the contract fails closed rather than
+serving records that belong to another network.
+
+### Reading the tag
+
+```
+get_network_tag() -> Option<BytesN<32>>
+```
+
+Compare this against the network you believe you are talking to **before**
+syncing or paying anything. `None` means the instance predates network tagging.
+
+### Onboarding checklist
+
+1. Deploy and `initialize` on the target network. The tag is recorded
+   automatically — no extra step, no parameter.
+2. Call `get_network_tag()` and confirm it equals the SHA-256 of the passphrase
+   for the network you intended. For Futurenet that is the hash of
+   `Test SDF Future Network ; October 2022`.
+3. Record the value alongside the contract id in your deployment manifest.
+   Dashboards and indexers should assert on it — see
+   [DASHBOARD_SYNC.md](./DASHBOARD_SYNC.md).
+
+### Migrating an instance deployed before this change
+
+An instance with no recorded tag keeps working: refusing it would brick every
+contract deployed before the field existed. Tag it in place:
+
+```
+adopt_network_tag()   # admin-only
+```
+
+This is **not** a re-tagging entry point. If a tag is already present and
+disagrees with the live network it returns `NetworkMismatch` instead of
+overwriting — a function that could rewrite the tag would defeat the check
+entirely, since anyone restoring state onto the wrong network could simply
+re-stamp it. Re-adopting the same network is a no-op and succeeds, so a
+migration script can call it unconditionally.
+
+Existing `ContributorRecord`s are untouched: the tag lives at the instance
+level, so no record needs rewriting and no stored layout changed.

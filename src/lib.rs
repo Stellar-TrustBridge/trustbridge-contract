@@ -11,6 +11,7 @@
 
 mod audit;
 mod batch;
+mod domain;
 mod error;
 mod error_context;
 mod events;
@@ -20,7 +21,8 @@ mod utils;
 mod version;
 
 pub use audit::{AuditConfig, AuditEventType, AuditLogEntry, AuditStats};
-pub use batch::{BatchConfig, BatchOperationResult, BatchSummary};
+pub use batch::{BatchConfig, BatchOperationResult, BatchSummary, MAX_WRITE_BATCH};
+pub use domain::{EventDomain, EVENT_DOMAIN_VERSION};
 pub use error::ContractError;
 pub use events::{
     ChallengeCancelledEvent, ChallengeCompletedEvent, ChallengeStartedEvent, PausedEvent,
@@ -28,8 +30,8 @@ pub use events::{
     UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
 };
 pub use storage::{
-    ChallengeRecord, ContributorRecord, ExportPage, HealthSnapshot, Role, Stats,
-    VerificationConfig, WasmAttestation, WasmProvenance,
+    ChallengeRecord, ContributorRecord, ExportPage, HealthSnapshot, Role, RoleHolder, Stats,
+    VerificationConfig, WasmAttestation, WasmProvenance, MAX_ROLE_PAGE_LIMIT,
 };
 pub use version::Version;
 
@@ -39,6 +41,8 @@ use crate::storage::{
     add_to_index, clear_pending_reverify, get_admin, get_audit_logs, get_audit_stats,
     get_challenge, get_cooldown as storage_get_cooldown, get_count, get_index, get_last_upgrade,
     get_record, get_registered_paginated_internal, get_role as storage_get_role,
+    get_network_id as storage_get_network_id,
+    get_role_holder_count as storage_get_role_holder_count, get_role_holders_internal,
     get_stats as read_stats, get_verification_config, get_verified_count as storage_get_verified_count,
     get_version as storage_get_version, get_wasm_attestation, get_wasm_provenance, has_challenge,
     has_record, is_admin_caller, is_in_cooldown, is_paused as storage_is_paused, push_audit_entry,
@@ -47,7 +51,7 @@ use crate::storage::{
     run_migration_steps, set_challenge, set_cooldown as storage_set_cooldown, set_count,
     set_last_action, set_last_upgrade, set_paused as set_paused_state, set_pending_reverify,
     set_record, set_role as storage_set_role, set_verified_count, set_version,
-    set_wasm_attestation, set_wasm_provenance, DEFAULT_CHALLENGE_DELAY_SECS,
+    set_network_id, set_wasm_attestation, set_wasm_provenance, DEFAULT_CHALLENGE_DELAY_SECS,
     ADMIN_KEY,
 };
 
@@ -94,6 +98,20 @@ pub const CONTRACT_VERSION: Version = Version {
     patch: 0,
 };
 
+/// Builds the [`EventDomain`] stamped onto every event this contract emits
+/// (Issue #226).
+///
+/// The version is read from instance storage rather than [`CONTRACT_VERSION`]
+/// so an instance deployed before version tracking, or one mid-upgrade, still
+/// reports the version its state actually claims. `CONTRACT_VERSION` is the
+/// fallback for instances that have no stored version at all — the same
+/// resolution `get_version` uses, so the value in an event always matches what
+/// a reader would see from a contract call.
+fn event_domain(env: &Env) -> EventDomain {
+    let version = storage_get_version(env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple());
+    EventDomain::new(env, version)
+}
+
 #[contract]
 pub struct TrustBridgeContract;
 
@@ -118,6 +136,9 @@ impl TrustBridgeContract {
         }
 
         env.storage().instance().set(&ADMIN_KEY, &admin);
+        // Record the network before anything else is written, so every record
+        // this instance goes on to hold is covered by the tag (Issue #231).
+        set_network_id(&env, &env.ledger().network_id());
         set_count(&env, 0);
         set_verified_count(&env, 0);
         set_paused_state(&env, false);
@@ -172,6 +193,7 @@ impl TrustBridgeContract {
             admin: admin.clone(),
             timestamp,
             reason_code,
+            domain: event_domain(&env),
         }
         .publish(&env);
 
@@ -215,6 +237,7 @@ impl TrustBridgeContract {
             admin: admin.clone(),
             timestamp,
             reason_code,
+            domain: event_domain(&env),
         }
         .publish(&env);
 
@@ -432,6 +455,7 @@ impl TrustBridgeContract {
             role: role as u32,
             admin,
             timestamp,
+            domain: event_domain(&env),
         }
         .publish(&env);
 
@@ -468,6 +492,7 @@ impl TrustBridgeContract {
             address: target,
             admin,
             timestamp,
+            domain: event_domain(&env),
         }
         .publish(&env);
 
@@ -481,6 +506,100 @@ impl TrustBridgeContract {
     #[must_use]
     pub fn get_role(env: Env, address: Address) -> Option<Role> {
         storage_get_role(&env, &address)
+    }
+
+    /// Lists addresses that currently hold a role, as `(address, role)` pairs
+    /// (Issue #228).
+    ///
+    /// `get_role` is a point lookup, so a dashboard mirroring RBAC had no way
+    /// to answer "who is a Verifier?" without already knowing every address to
+    /// ask about. It could only drift from the chain. This enumerates the set.
+    ///
+    /// Ordered by grant time, oldest first. The order is stable across calls
+    /// except that revoking a role compacts the index, shifting everything
+    /// after it down one — so a paginating caller should treat a concurrent
+    /// revocation as a reason to restart, not to trust the next offset.
+    ///
+    /// The admin **is** included: `initialize` grants `Role::Admin` through the
+    /// same path that maintains this index, so the admin appears as a holder
+    /// like any other.
+    ///
+    /// `limit` is capped at [`MAX_ROLE_PAGE_LIMIT`]; `0` means "use the cap".
+    /// An `offset` past the end returns an empty page rather than an error.
+    ///
+    /// Read-only; no auth required. Role assignments are public information —
+    /// they are already visible in `RoleGrantedEvent`.
+    #[must_use]
+    pub fn get_role_holders(env: Env, offset: u32, limit: u32) -> Vec<RoleHolder> {
+        get_role_holders_internal(&env, offset, limit)
+    }
+
+    /// Network id this instance was initialized on, or `None` for an instance
+    /// initialized before network tagging existed (Issue #231).
+    ///
+    /// The value is `env.ledger().network_id()` — the SHA-256 of the network
+    /// passphrase — captured at `initialize`. Consumers should compare it
+    /// against the network they believe they are talking to instead of
+    /// inferring the network from an RPC URL, which is what a bindings consumer
+    /// had to do before: the same G-address is valid everywhere, so a record
+    /// read off the wrong deployment looks entirely legitimate.
+    ///
+    /// Read-only; no auth required.
+    #[must_use]
+    pub fn get_network_tag(env: Env) -> Option<BytesN<32>> {
+        storage_get_network_id(&env)
+    }
+
+    /// Tags an untagged instance with the network it is running on. Admin-only.
+    ///
+    /// Only for instances initialized before network tagging existed. It is
+    /// deliberately **not** a way to re-tag: once a tag is present this returns
+    /// [`ContractError::NetworkMismatch`] if it disagrees with the live
+    /// network, rather than overwriting it. An entry point that could rewrite
+    /// the tag would defeat the check entirely — anyone restoring state onto
+    /// the wrong network could simply re-stamp it and carry on.
+    ///
+    /// Re-tagging with the *same* network is a no-op and succeeds, so this is
+    /// safe to call unconditionally from a migration script.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NetworkMismatch`] if a tag is already recorded and
+    ///   does not match the executing network.
+    pub fn adopt_network_tag(env: Env) -> Result<(), ContractError> {
+        // `get_admin` runs `require_initialized`, which already enforces the
+        // network check — so a mismatched instance is rejected here with
+        // exactly the NetworkMismatch this function would otherwise return,
+        // and an untagged one passes through to be tagged below.
+        let admin = get_admin(&env)?;
+        require_not_paused(&env)?;
+        admin.require_auth();
+
+        let live = env.ledger().network_id();
+        match storage_get_network_id(&env) {
+            Some(recorded) if recorded != live => Err(ContractError::NetworkMismatch),
+            Some(_) => Ok(()),
+            None => {
+                set_network_id(&env, &live);
+                Ok(())
+            }
+        }
+    }
+
+    /// Number of addresses currently holding a role (Issue #228).
+    ///
+    /// Lets a caller size its pagination loop before fetching, and gives a
+    /// dashboard a cheap way to detect that its RBAC mirror has drifted
+    /// without walking every page.
+    #[must_use]
+    pub fn get_role_holder_count(env: Env) -> u32 {
+        storage_get_role_holder_count(&env)
     }
 
     /// Sets the minimum number of seconds that must elapse between WASM upgrades. Admin-only.
@@ -678,6 +797,7 @@ impl TrustBridgeContract {
             new_wasm_hash,
             version,
             timestamp: now,
+            domain: event_domain(&env),
         }
         .publish(&env);
 
@@ -1027,6 +1147,7 @@ impl TrustBridgeContract {
             github_username: github_username.clone(),
             stellar_address: stellar_address.clone(),
             timestamp,
+            domain: event_domain(&env),
         }
         .publish(&env);
 
@@ -1133,7 +1254,8 @@ impl TrustBridgeContract {
         require_initialized(&env)?;
         require_not_paused(&env)?;
 
-        let config = BatchConfig::default();
+        // Budget cap, not just a shape check — see `MAX_WRITE_BATCH` (Issue #227).
+        let config = BatchConfig::for_writes();
         if !config.is_valid_batch_size(usernames.len()) {
             return Err(ContractError::InvalidBatchSize);
         }
@@ -1148,6 +1270,8 @@ impl TrustBridgeContract {
 
         let total = usernames.len();
         let mut successful: u32 = 0;
+        let mut removed: u32 = 0;
+        let mut unverified: u32 = 0;
 
         for username in usernames.iter() {
             // Attempt the remove. Silently skip failures (not registered, etc.)
@@ -1164,16 +1288,20 @@ impl TrustBridgeContract {
 
             remove_record(&env, &username);
             remove_from_index(&env, &username);
-            set_count(&env, get_count(&env).saturating_sub(1));
 
+            // Counters are accumulated and written once after the loop, so
+            // `count` and `vcount` move together exactly once per batch rather
+            // than 2N times — see the note at the end of this function.
+            removed = removed.saturating_add(1);
             if record.verified {
-                set_verified_count(&env, storage_get_verified_count(&env).saturating_sub(1));
+                unverified = unverified.saturating_add(1);
             }
 
             RemovedEvent {
                 github_username: username.clone(),
                 stellar_address: stellar_address.clone(),
                 timestamp,
+                domain: event_domain(&env),
             }
             .publish(&env);
 
@@ -1185,6 +1313,20 @@ impl TrustBridgeContract {
             );
 
             successful = successful.saturating_add(1);
+        }
+
+        // Single write per counter for the whole batch (Issue #227). The
+        // read-modify-write that used to sit inside the loop cost 2 storage
+        // operations per entry, and left `count` and `vcount` briefly
+        // inconsistent with each other partway through.
+        if removed > 0 {
+            set_count(&env, get_count(&env).saturating_sub(removed));
+        }
+        if unverified > 0 {
+            set_verified_count(
+                &env,
+                storage_get_verified_count(&env).saturating_sub(unverified),
+            );
         }
 
         Ok(BatchSummary::new(total, successful))
@@ -1259,6 +1401,7 @@ impl TrustBridgeContract {
             github_username: github_username.clone(),
             stellar_address: stellar_address.clone(),
             timestamp,
+            domain: event_domain(&env),
         }
         .publish(&env);
 
@@ -1431,12 +1574,14 @@ impl TrustBridgeContract {
             PausedEvent {
                 admin: admin.clone(),
                 timestamp,
+                domain: event_domain(&env),
             }
             .publish(&env);
         } else {
             UnpausedEvent {
                 admin: admin.clone(),
                 timestamp,
+                domain: event_domain(&env),
             }
             .publish(&env);
         }
@@ -1494,6 +1639,7 @@ impl TrustBridgeContract {
             github_username: github_username.clone(),
             stellar_address: record.stellar_address.clone(),
             timestamp,
+            domain: event_domain(&env),
         }
         .publish(&env);
 
@@ -1530,7 +1676,8 @@ impl TrustBridgeContract {
         require_initialized(&env)?;
         require_not_paused(&env)?;
 
-        let config = BatchConfig::default();
+        // Budget cap, not just a shape check — see `MAX_WRITE_BATCH` (Issue #227).
+        let config = BatchConfig::for_writes();
         if !config.is_valid_batch_size(usernames.len()) {
             return Err(ContractError::InvalidBatchSize);
         }
@@ -1544,28 +1691,52 @@ impl TrustBridgeContract {
         }
 
         let total = usernames.len();
-        let mut successful: u32 = 0;
         let timestamp = env.ledger().timestamp();
 
+        // ── Phase 1: decide, without writing ────────────────────────────────
+        //
+        // Resolve every entry first and collect only those that will actually
+        // change. Nothing is written here, so if the batch is going to be
+        // rejected it is rejected having touched no state at all — the
+        // fail-before-write property this issue asks for.
+        //
+        // Skipping duplicates matters for the counter: the same username twice
+        // in one batch would otherwise be counted twice against `vcount` even
+        // though only one record changes.
+        let mut pending: Vec<String> = Vec::new(&env);
         for username in usernames.iter() {
-            let mut record = match get_record(&env, &username) {
-                Some(r) => r,
-                None => continue,
+            let Some(record) = get_record(&env, &username) else {
+                continue;
             };
-
             if record.verified {
                 continue;
             }
+            if pending.iter().any(|u| u == username) {
+                continue;
+            }
+            pending.push_back(username);
+        }
+
+        // ── Phase 2: apply ──────────────────────────────────────────────────
+        let mut successful: u32 = 0;
+        for username in pending.iter() {
+            // Re-read rather than carrying the record from phase 1: cloning a
+            // record per pending entry would hold the whole batch in memory,
+            // and the value cannot have changed in between — nothing else runs
+            // inside this invocation.
+            let Some(mut record) = get_record(&env, &username) else {
+                continue;
+            };
 
             record.verified = true;
             set_record(&env, &username, &record);
-            set_verified_count(&env, storage_get_verified_count(&env).saturating_add(1));
             clear_pending_reverify(&env, &username);
 
             VerifiedEvent {
                 github_username: username.clone(),
                 stellar_address: record.stellar_address.clone(),
                 timestamp,
+                domain: event_domain(&env),
             }
             .publish(&env);
 
@@ -1581,6 +1752,17 @@ impl TrustBridgeContract {
             );
 
             successful = successful.saturating_add(1);
+        }
+
+        // One counter write for the whole batch instead of a read-modify-write
+        // per entry. That is 2 storage operations rather than 2N, and it means
+        // `vcount` moves exactly once — there is no intermediate state in which
+        // it has been advanced for some entries but not others.
+        if successful > 0 {
+            set_verified_count(
+                &env,
+                storage_get_verified_count(&env).saturating_add(successful),
+            );
         }
 
         Ok(BatchSummary::new(total, successful))
@@ -1645,6 +1827,7 @@ impl TrustBridgeContract {
             stellar_address: record.stellar_address.clone(),
             timestamp,
             reason_code,
+            domain: event_domain(&env),
         }
         .publish(&env);
 
@@ -1786,6 +1969,7 @@ impl TrustBridgeContract {
             challenged_by: caller,
             resolve_after,
             timestamp: now,
+            domain: event_domain(&env),
         }
         .publish(&env);
 
@@ -1835,6 +2019,7 @@ impl TrustBridgeContract {
             github_username,
             cancelled_by: caller,
             timestamp,
+            domain: event_domain(&env),
         }
         .publish(&env);
 
@@ -1898,6 +2083,7 @@ impl TrustBridgeContract {
             github_username: github_username.clone(),
             stellar_address: record.stellar_address.clone(),
             timestamp: now,
+            domain: event_domain(&env),
         }
         .publish(&env);
 
@@ -1905,6 +2091,7 @@ impl TrustBridgeContract {
             github_username,
             completed_by: caller,
             timestamp: now,
+            domain: event_domain(&env),
         }
         .publish(&env);
 
@@ -3642,6 +3829,7 @@ mod test {
             github_username: name.clone(),
             stellar_address: user.clone(),
             timestamp: 1_600_000_000,
+            domain: env.as_contract(&contract_id, || event_domain(&env)),
         };
 
         assert_eq!(
@@ -3713,6 +3901,7 @@ mod test {
             github_username: name.clone(),
             stellar_address: user.clone(),
             timestamp: 1_700_000_000,
+            domain: env.as_contract(&contract_id, || event_domain(&env)),
         };
 
         assert_eq!(
@@ -5745,6 +5934,7 @@ mod test {
                 stellar_address: user.clone(),
                 timestamp: env.ledger().timestamp(),
                 reason_code: 2,
+                domain: event_domain(&env),
             };
 
             assert_eq!(
@@ -6800,4 +6990,530 @@ mod test {
             assert_eq!(stats.verified, 0, "I8 violated: verified counter underflowed");
         }
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Issue #226 — domain-separated event payloads
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// Every event carries a domain naming the deployment that emitted it.
+    #[test]
+    fn test_event_carries_domain() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
+                .unwrap();
+
+            let domain = event_domain(&env);
+            assert_eq!(domain.contract_id, contract_id);
+            assert_eq!(domain.network_id, env.ledger().network_id());
+            assert_eq!(domain.domain_version, EVENT_DOMAIN_VERSION);
+            assert_eq!(domain.contract_version, (1, 0, 0));
+        });
+    }
+
+    /// The point of the domain: two deployments on the same network emit
+    /// events that a replaying indexer can tell apart.
+    ///
+    /// Without `contract_id` in the payload, the same username registered on a
+    /// redeployed contract is indistinguishable from a replay of the original —
+    /// which is the collision this issue is about.
+    #[test]
+    fn test_domain_distinguishes_two_deployments() {
+        let env = Env::default();
+        let admin_a = Address::generate(&env);
+        let admin_b = Address::generate(&env);
+        let contract_a = env.register(TrustBridgeContract, ());
+        let contract_b = env.register(TrustBridgeContract, ());
+        env.mock_all_auths();
+
+        let domain_a = env.as_contract(&contract_a, || {
+            TrustBridgeContract::initialize(env.clone(), admin_a).unwrap();
+            event_domain(&env)
+        });
+        let domain_b = env.as_contract(&contract_b, || {
+            TrustBridgeContract::initialize(env.clone(), admin_b).unwrap();
+            event_domain(&env)
+        });
+
+        assert_ne!(
+            domain_a.contract_id, domain_b.contract_id,
+            "two deployments must not share a domain"
+        );
+        assert_ne!(domain_a, domain_b);
+        // Same network, so that half of the domain is deliberately equal.
+        assert_eq!(domain_a.network_id, domain_b.network_id);
+    }
+
+    /// The domain reports the version the instance actually claims, not the
+    /// compiled-in constant, so an event can be attributed to the build that
+    /// emitted it.
+    #[test]
+    fn test_domain_tracks_stored_version() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            set_version(&env, (2, 7, 3));
+            assert_eq!(event_domain(&env).contract_version, (2, 7, 3));
+        });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Issue #228 — role holder enumeration
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// The admin is a role holder from `initialize` onward, because
+    /// `initialize` grants the role through the same path that maintains the
+    /// index.
+    #[test]
+    fn test_role_index_includes_admin_after_initialize() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::get_role_holder_count(env.clone()), 1);
+            let holders = TrustBridgeContract::get_role_holders(env.clone(), 0, 10);
+            assert_eq!(holders.len(), 1);
+            let holder = holders.get(0).unwrap();
+            assert_eq!(holder.address, admin);
+            assert_eq!(holder.role, Role::Admin);
+        });
+    }
+
+    /// Granting adds one entry; the reported role matches `get_role`.
+    #[test]
+    fn test_role_index_tracks_grants() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role(env.clone(), user.clone(), Role::Verifier).unwrap();
+            TrustBridgeContract::set_role(env.clone(), other.clone(), Role::Revoker).unwrap();
+
+            assert_eq!(TrustBridgeContract::get_role_holder_count(env.clone()), 3);
+            let holders = TrustBridgeContract::get_role_holders(env.clone(), 0, 50);
+            for holder in holders.iter() {
+                assert_eq!(
+                    Some(holder.role),
+                    TrustBridgeContract::get_role(env.clone(), holder.address.clone()),
+                    "enumerated role must agree with the point lookup"
+                );
+            }
+        });
+    }
+
+    /// Re-granting a different role to the same address must not create a
+    /// second index entry.
+    #[test]
+    fn test_role_index_regrant_does_not_duplicate() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role(env.clone(), user.clone(), Role::Verifier).unwrap();
+            TrustBridgeContract::set_role(env.clone(), user.clone(), Role::Revoker).unwrap();
+            TrustBridgeContract::set_role(env.clone(), user.clone(), Role::Upgrader).unwrap();
+
+            assert_eq!(
+                TrustBridgeContract::get_role_holder_count(env.clone()),
+                2,
+                "admin + user, not admin + three copies of user"
+            );
+            let holders = TrustBridgeContract::get_role_holders(env.clone(), 0, 50);
+            let matches = holders.iter().filter(|h| h.address == user).count();
+            assert_eq!(matches, 1);
+            assert_eq!(
+                holders.iter().find(|h| h.address == user).unwrap().role,
+                Role::Upgrader,
+                "the latest grant wins"
+            );
+        });
+    }
+
+    /// Revoking compacts the index and leaves the other holders intact.
+    #[test]
+    fn test_role_index_compacts_on_revoke() {
+        let env = Env::default();
+        let (admin, user, other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role(env.clone(), user.clone(), Role::Verifier).unwrap();
+            TrustBridgeContract::set_role(env.clone(), other.clone(), Role::Revoker).unwrap();
+            TrustBridgeContract::remove_role(env.clone(), user.clone()).unwrap();
+
+            assert_eq!(TrustBridgeContract::get_role_holder_count(env.clone()), 2);
+            let holders = TrustBridgeContract::get_role_holders(env.clone(), 0, 50);
+            assert!(holders.iter().all(|h| h.address != user));
+            assert!(holders.iter().any(|h| h.address == other));
+            assert!(holders.iter().any(|h| h.address == admin));
+        });
+    }
+
+    /// Revoking an address that never held a role is a no-op on the index.
+    #[test]
+    fn test_role_index_revoke_unknown_is_noop() {
+        let env = Env::default();
+        let (_admin, _user, other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let before = TrustBridgeContract::get_role_holder_count(env.clone());
+            TrustBridgeContract::remove_role(env.clone(), other.clone()).unwrap();
+            assert_eq!(TrustBridgeContract::get_role_holder_count(env.clone()), before);
+        });
+    }
+
+    /// Pagination: pages tile the index without gaps or repeats, and a limit
+    /// above the cap is clamped rather than honoured.
+    #[test]
+    fn test_role_holders_pagination_and_cap() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            for _ in 0..5 {
+                let addr = Address::generate(&env);
+                TrustBridgeContract::set_role(env.clone(), addr, Role::Verifier).unwrap();
+            }
+            // admin + 5 grants
+            assert_eq!(TrustBridgeContract::get_role_holder_count(env.clone()), 6);
+
+            let first = TrustBridgeContract::get_role_holders(env.clone(), 0, 4);
+            let second = TrustBridgeContract::get_role_holders(env.clone(), 4, 4);
+            assert_eq!(first.len(), 4);
+            assert_eq!(second.len(), 2, "final page is short, not padded");
+
+            // No address appears in both pages.
+            for a in first.iter() {
+                assert!(second.iter().all(|b| b.address != a.address));
+            }
+
+            // Over-cap and zero limits both fall back to the cap.
+            let capped = TrustBridgeContract::get_role_holders(env.clone(), 0, u32::MAX);
+            assert!(capped.len() <= MAX_ROLE_PAGE_LIMIT);
+            assert_eq!(capped.len(), 6);
+            assert_eq!(
+                TrustBridgeContract::get_role_holders(env.clone(), 0, 0).len(),
+                6
+            );
+
+            // Offset past the end is an empty page, not an error.
+            assert_eq!(
+                TrustBridgeContract::get_role_holders(env.clone(), 999, 10).len(),
+                0
+            );
+        });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Issue #231 — network-tagged records
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// `initialize` records the network it ran on.
+    #[test]
+    fn test_initialize_records_network_tag() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_network_tag(env.clone()),
+                Some(env.ledger().network_id())
+            );
+        });
+    }
+
+    /// A tag matching the live network lets everything through.
+    #[test]
+    fn test_matching_network_allows_operations() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            assert!(
+                TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user).is_ok()
+            );
+        });
+    }
+
+    /// A tag from another network fails every gated entry point closed.
+    ///
+    /// This is the restored-onto-the-wrong-network case: the records are
+    /// intact, the addresses are valid, and nothing else would notice.
+    #[test]
+    fn test_mismatched_network_rejects_operations() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            // Simulate state restored onto a different network by rewriting the
+            // recorded tag to one this ledger will never report.
+            set_network_id(&env, &BytesN::from_array(&env, &[7u8; 32]));
+
+            assert_eq!(
+                TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user),
+                Err(ContractError::NetworkMismatch)
+            );
+            assert_eq!(
+                TrustBridgeContract::get_all_registered(env.clone()).err(),
+                Some(ContractError::NetworkMismatch)
+            );
+        });
+    }
+
+    /// An instance predating the tag keeps working, and can adopt one.
+    #[test]
+    fn test_untagged_instance_can_adopt_tag() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            // Strip the tag to imitate an instance initialized before #231.
+            env.storage().instance().remove(&crate::storage::NETWORK_KEY);
+            assert_eq!(TrustBridgeContract::get_network_tag(env.clone()), None);
+
+            // Untagged still works — the check must not brick old deployments.
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user).unwrap();
+
+            TrustBridgeContract::adopt_network_tag(env.clone()).unwrap();
+            assert_eq!(
+                TrustBridgeContract::get_network_tag(env.clone()),
+                Some(env.ledger().network_id())
+            );
+        });
+    }
+
+    /// Adopting is idempotent on the right network and refuses to re-tag a
+    /// mismatch — otherwise the check could be trivially defeated.
+    #[test]
+    fn test_adopt_network_tag_cannot_retag_a_mismatch() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            // Same network: no-op, succeeds.
+            TrustBridgeContract::adopt_network_tag(env.clone()).unwrap();
+            assert_eq!(
+                TrustBridgeContract::get_network_tag(env.clone()),
+                Some(env.ledger().network_id())
+            );
+
+            let foreign = BytesN::from_array(&env, &[9u8; 32]);
+            set_network_id(&env, &foreign);
+            assert_eq!(
+                TrustBridgeContract::adopt_network_tag(env.clone()),
+                Err(ContractError::NetworkMismatch)
+            );
+            assert_eq!(
+                TrustBridgeContract::get_network_tag(env.clone()),
+                Some(foreign),
+                "a refused adoption must not overwrite the tag"
+            );
+        });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Issue #227 — per-ledger batch budget
+    // ══════════════════════════════════════════════════════════════════════
+
+    fn long_username(env: &Env, seed: usize) -> String {
+        // 39 chars = MAX_USERNAME_LEN, the worst case for a batch entry.
+        let names = [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa5",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa6",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa7",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa8",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa9",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb0",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb3",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb4",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb5",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb6",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb7",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb8",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb9",
+            "cccccccccccccccccccccccccccccccccccccc0",
+            "cccccccccccccccccccccccccccccccccccccc1",
+            "cccccccccccccccccccccccccccccccccccccc2",
+            "cccccccccccccccccccccccccccccccccccccc3",
+            "cccccccccccccccccccccccccccccccccccccc4",
+        ];
+        String::from_str(env, names[seed])
+    }
+
+    /// The write-batch cap is enforced, and it is tighter than the old one.
+    #[test]
+    fn test_batch_verify_rejects_over_write_cap() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let mut names: Vec<String> = Vec::new(&env);
+            for i in 0..=MAX_WRITE_BATCH {
+                let name = String::from_str(&env, "u");
+                let _ = i;
+                names.push_back(name);
+            }
+            assert_eq!(
+                TrustBridgeContract::batch_verify(env.clone(), admin.clone(), names),
+                Err(ContractError::InvalidBatchSize)
+            );
+            // Nothing was written — the rejection happens before any work.
+            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0);
+            let _ = user;
+        });
+    }
+
+    /// `vcount` moves exactly once and lands on the right value, including
+    /// when the batch contains misses and already-verified entries.
+    #[test]
+    fn test_batch_verify_counter_is_exact() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            for i in 0..5usize {
+                TrustBridgeContract::register(env.clone(), long_username(&env, i), user.clone())
+                    .unwrap();
+            }
+            // Verify one up front so the batch has an already-verified entry.
+            TrustBridgeContract::verify(env.clone(), admin.clone(), long_username(&env, 0))
+                .unwrap();
+            assert_verified_parity(&env, 1);
+
+            let mut names: Vec<String> = Vec::new(&env);
+            names.push_back(long_username(&env, 0)); // already verified
+            names.push_back(long_username(&env, 1));
+            names.push_back(long_username(&env, 2));
+            names.push_back(String::from_str(&env, "never-registered"));
+
+            let summary =
+                TrustBridgeContract::batch_verify(env.clone(), admin.clone(), names).unwrap();
+            assert_eq!(summary.total, 4);
+            assert_eq!(summary.successful, 2, "only the two fresh records change");
+            assert_verified_parity(&env, 3);
+        });
+    }
+
+    /// A username repeated inside one batch is counted once.
+    ///
+    /// The old per-entry read-modify-write would advance `vcount` on the first
+    /// occurrence and then skip the second only because the record was already
+    /// verified — correct by accident. Phase 1 now de-duplicates explicitly.
+    #[test]
+    fn test_batch_verify_duplicate_entries_counted_once() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), long_username(&env, 0), user).unwrap();
+
+            let mut names: Vec<String> = Vec::new(&env);
+            names.push_back(long_username(&env, 0));
+            names.push_back(long_username(&env, 0));
+            names.push_back(long_username(&env, 0));
+
+            let summary =
+                TrustBridgeContract::batch_verify(env.clone(), admin, names).unwrap();
+            assert_eq!(summary.successful, 1);
+            assert_verified_parity(&env, 1);
+        });
+    }
+
+    /// A rejected batch writes nothing at all (fail-before-write).
+    #[test]
+    fn test_batch_verify_rejection_leaves_no_partial_state() {
+        let env = Env::default();
+        let (_admin, user, other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), long_username(&env, 0), user).unwrap();
+
+            let mut names: Vec<String> = Vec::new(&env);
+            names.push_back(long_username(&env, 0));
+
+            // `other` holds no role, so authorization fails after the size
+            // check but before any record is touched.
+            assert_eq!(
+                TrustBridgeContract::batch_verify(env.clone(), other, names),
+                Err(ContractError::NotAuthorized)
+            );
+            assert_verified_parity(&env, 0);
+            assert!(
+                !TrustBridgeContract::get_address(env.clone(), long_username(&env, 0))
+                    .unwrap()
+                    .verified
+            );
+        });
+    }
+
+    /// Benchmark: a full write-batch of maximum-length usernames completes
+    /// without trapping, and `vcount` is exact afterwards.
+    ///
+    /// This is the worst case the budget cap is sized for (Issue #227). If a
+    /// future change makes a full batch too expensive, this is where it shows
+    /// up — as a trap here rather than on-chain.
+    #[test]
+    fn test_bench_batch_verify_max() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let mut names: Vec<String> = Vec::new(&env);
+            for i in 0..(MAX_WRITE_BATCH as usize) {
+                TrustBridgeContract::register(env.clone(), long_username(&env, i), user.clone())
+                    .unwrap();
+                names.push_back(long_username(&env, i));
+            }
+            assert_eq!(names.len(), MAX_WRITE_BATCH);
+
+            let summary =
+                TrustBridgeContract::batch_verify(env.clone(), admin, names).unwrap();
+            assert_eq!(summary.total, MAX_WRITE_BATCH);
+            assert_eq!(summary.successful, MAX_WRITE_BATCH);
+            assert_verified_parity(&env, MAX_WRITE_BATCH);
+        });
+    }
+
+    /// Benchmark: a full `batch_remove` of maximum-length usernames, with a mix
+    /// of verified and unverified records so both counters are exercised.
+    #[test]
+    fn test_bench_batch_remove_max() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let mut names: Vec<String> = Vec::new(&env);
+            for i in 0..(MAX_WRITE_BATCH as usize) {
+                TrustBridgeContract::register(env.clone(), long_username(&env, i), user.clone())
+                    .unwrap();
+                names.push_back(long_username(&env, i));
+                if i % 2 == 0 {
+                    TrustBridgeContract::verify(
+                        env.clone(),
+                        admin.clone(),
+                        long_username(&env, i),
+                    )
+                    .unwrap();
+                }
+            }
+
+            let summary =
+                TrustBridgeContract::batch_remove(env.clone(), admin, names).unwrap();
+            assert_eq!(summary.successful, MAX_WRITE_BATCH);
+            assert_eq!(
+                TrustBridgeContract::get_stats(env.clone()).total,
+                0,
+                "count must return to zero"
+            );
+            assert_verified_parity(&env, 0);
+        });
+    }
+
 }

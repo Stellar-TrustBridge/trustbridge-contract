@@ -1,5 +1,7 @@
 use soroban_sdk::{contractevent, Address, BytesN, String};
 
+use crate::domain::EventDomain;
+
 /// Emitted when a GitHub username is registered or re-registered to a Stellar address.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -8,6 +10,9 @@ pub struct RegisteredEvent {
     pub github_username: String,
     pub stellar_address: Address,
     pub timestamp: u64,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
 }
 
 /// Emitted when a registration is removed by the registrant or admin.
@@ -18,6 +23,9 @@ pub struct RemovedEvent {
     pub github_username: String,
     pub stellar_address: Address,
     pub timestamp: u64,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
 }
 
 /// Emitted when an admin or Verifier marks a contributor as verified.
@@ -28,6 +36,9 @@ pub struct VerifiedEvent {
     pub github_username: String,
     pub stellar_address: Address,
     pub timestamp: u64,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
 }
 
 /// Emitted when an admin or Verifier revokes a contributor's verified status.
@@ -40,6 +51,9 @@ pub struct VerificationRevokedEvent {
     pub timestamp: u64,
     /// Numeric reason code explaining why verification was revoked.
     pub reason_code: u32,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
 }
 
 /// Emitted when the contract WASM is upgraded via `upgrade`.
@@ -50,6 +64,9 @@ pub struct UpgradedEvent {
     pub new_wasm_hash: BytesN<32>,
     pub version: (u32, u32, u32),
     pub timestamp: u64,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
 }
 
 /// Emitted when the contract is paused via `pause`.
@@ -61,6 +78,9 @@ pub struct PausedEvent {
     pub timestamp: u64,
     /// Numeric reason code from `PauseReason` explaining why the contract was paused.
     pub reason_code: u32,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
 }
 
 /// Emitted when the contract is unpaused via `unpause`.
@@ -72,6 +92,9 @@ pub struct UnpausedEvent {
     pub timestamp: u64,
     /// Numeric reason code from `PauseReason` explaining why the contract was unpaused.
     pub reason_code: u32,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
 }
 
 /// Emitted when a role is granted to an address via `set_role`.
@@ -84,6 +107,9 @@ pub struct RoleGrantedEvent {
     pub role: u32,
     pub admin: Address,
     pub timestamp: u64,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
 }
 
 /// Emitted when a role is revoked from an address via `remove_role`.
@@ -94,6 +120,9 @@ pub struct RoleRevokedEvent {
     pub address: Address,
     pub admin: Address,
     pub timestamp: u64,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
 }
 
 /// Emitted when an admin starts a challenge on a squatted username (Issue #214).
@@ -105,6 +134,9 @@ pub struct ChallengeStartedEvent {
     pub challenged_by: Address,
     pub resolve_after: u64,
     pub timestamp: u64,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
 }
 
 /// Emitted when an admin cancels a pending challenge (Issue #214).
@@ -115,6 +147,9 @@ pub struct ChallengeCancelledEvent {
     pub github_username: String,
     pub cancelled_by: Address,
     pub timestamp: u64,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
 }
 
 /// Emitted when an admin completes a challenge and removes the squatted
@@ -126,6 +161,9 @@ pub struct ChallengeCompletedEvent {
     pub github_username: String,
     pub completed_by: Address,
     pub timestamp: u64,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
 }
 
 #[cfg(test)]
