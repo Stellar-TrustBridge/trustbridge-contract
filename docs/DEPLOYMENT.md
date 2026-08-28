@@ -52,6 +52,24 @@ make build
 # Output: target/wasm32v1-none/release/trustbridge-contract.wasm
 ```
 
+### WASM size budget
+
+The optimized release WASM must remain at or below **204,800 bytes (200 KiB)**.
+This is the deployment budget enforced by CI and mirrored by the Makefile's
+`WASM_SIZE_LIMIT` value. The check uses the same release artifact produced by
+`stellar contract build`, preferring `wasm32v1-none` and falling back to
+`wasm32-unknown-unknown`.
+
+Inspect the current artifact locally with:
+
+```bash
+make wasm-size
+```
+
+CI runs this check immediately after the release build. A size increase beyond
+the budget fails the job; intentional increases must update the documented
+budget, `WASM_SIZE_LIMIT` in the Makefile, and the CI limit together.
+
 ### 3. Deploy and initialize
 
 ```bash
@@ -96,6 +114,23 @@ Required environment variables:
 | `CONTRACT_ID` | After deploy | Recorded from `deployments/testnet.json` |
 
 The checklist covers deploy → initialize → register → verify → export → remove, ending with cleanup. Defaults are safe: `NETWORK` defaults to `testnet`, so a mainnet run requires explicit configuration.
+
+### Optional CI live smoke
+
+Maintainers can opt into the invoke-only live testnet smoke job by setting the
+repository variable `TRUSTBRIDGE_LIVE_TESTNET=true`. Configure the existing
+testnet contract and a funded source account using these values:
+
+- Secret `TRUSTBRIDGE_TESTNET_CONTRACT_ID`: pre-deployed testnet contract ID.
+- Secret `TRUSTBRIDGE_TESTNET_SECRET_KEY`: source account secret key, used only
+  to create an ephemeral CI identity.
+- Variable `TRUSTBRIDGE_TESTNET_USERNAME`: an existing username to query.
+
+The job runs `get_stats` and `get_address` against `testnet`; it does not deploy
+or initialize anything. It is restricted to non-pull-request events in the
+canonical repository, which prevents fork PRs from accessing organization
+secrets. Enabling the variable without all required values fails the job
+immediately rather than silently skipping the smoke.
 
 ---
 

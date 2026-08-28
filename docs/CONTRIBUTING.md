@@ -249,6 +249,19 @@ CI does not compare snapshots against a baseline — snapshots are gitignored an
 
 ## Writing Contract Tests
 
+### Authorization matrix
+
+The checked-in [auth matrix](../tests/auth_matrix.csv) is the source of truth
+for actor coverage across public mutating entrypoints. Each row contains an
+entrypoint, an actor class (`admin`, `verifier`, `revoker`, `upgrader`, `user`,
+`random`, or `none`), and an optional expected `ContractError` variant.
+
+When adding a mutating public function, add it to the matrix and to the
+coverage list in `tests/integration.rs`. Add rows for every meaningful actor
+boundary, especially Admin, Verifier, Revoker, Upgrader, registrant, and an
+unrelated address. Leave `expected_error` empty for a successful cell. The
+driver fails when an entrypoint is missing from the table.
+
 This repo uses the Soroban SDK test host. Tests live in `src/lib.rs` inside `#[cfg(test)] mod test` for unit tests and in `tests/integration.rs` for integration tests.
 
 ### Test host setup

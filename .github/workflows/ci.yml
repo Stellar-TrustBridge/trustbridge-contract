@@ -75,6 +75,26 @@ jobs:
       - name: stellar contract build
         run: stellar contract build
 
+      - name: Verify WASM size budget
+        run: |
+          if [ -f target/wasm32v1-none/release/trustbridge_contract.wasm ]; then
+            WASM=target/wasm32v1-none/release/trustbridge_contract.wasm
+          elif [ -f target/wasm32-unknown-unknown/release/trustbridge_contract.wasm ]; then
+            WASM=target/wasm32-unknown-unknown/release/trustbridge_contract.wasm
+          else
+            echo "ERROR: No release WASM artifact found."
+            exit 1
+          fi
+          SIZE=$(wc -c < "$WASM")
+          echo "WASM size: $SIZE bytes"
+          echo "WASM budget: $WASM_SIZE_LIMIT bytes"
+          if [ "$SIZE" -gt "$WASM_SIZE_LIMIT" ]; then
+            echo "ERROR: WASM size exceeds the documented budget by $(( SIZE - WASM_SIZE_LIMIT )) bytes."
+            echo "Inspect locally with: make wasm-size"
+            exit 1
+          fi
+          echo "OK: WASM size is within budget."
+
       # Cargo emits underscores for hyphenated crate names (trustbridge-contract → trustbridge_contract.wasm)
       - name: Verify WASM artifact exists
         run: test -f target/wasm32v1-none/release/trustbridge_contract.wasm || test -f target/wasm32-unknown-unknown/release/trustbridge_contract.wasm
@@ -148,3 +168,60 @@ jobs:
         run: |
           cargo test --features wasm-test --test integration -- \
             test_integration_wasm_upgrade_cooldown -- --list | grep "test_integration_wasm_upgrade_cooldown"
+
+  live-testnet-smoke:
+    name: Opt-in Testnet Smoke
+    runs-on: ubuntu-latest
+    needs: quality
+    # Never expose repository secrets to fork pull requests. The repository
+    # variable is an explicit maintainer opt-in for pushes to this repository.
+    if: >-
+      github.event_name != 'pull_request' &&
+      github.repository == 'Stellar-TrustBridge/trustbridge-contract' &&
+      vars.TRUSTBRIDGE_LIVE_TESTNET == 'true'
+    env:
+      TESTNET_CONTRACT_ID: ${{ secrets.TRUSTBRIDGE_TESTNET_CONTRACT_ID }}
+      TESTNET_SECRET_KEY: ${{ secrets.TRUSTBRIDGE_TESTNET_SECRET_KEY }}
+      TESTNET_USERNAME: ${{ vars.TRUSTBRIDGE_TESTNET_USERNAME }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli@26.1.0
+
+      - name: Validate live testnet configuration
+        run: |
+          set -eu
+          if [ -z "$TESTNET_CONTRACT_ID" ]; then
+            echo "ERROR: TRUSTBRIDGE_TESTNET_CONTRACT_ID is required when live testnet is enabled."
+            exit 1
+          fi
+          if [ -z "$TESTNET_SECRET_KEY" ]; then
+            echo "ERROR: TRUSTBRIDGE_TESTNET_SECRET_KEY is required when live testnet is enabled."
+            exit 1
+          fi
+          if [ -z "$TESTNET_USERNAME" ]; then
+            echo "ERROR: TRUSTBRIDGE_TESTNET_USERNAME is required when live testnet is enabled."
+            exit 1
+          fi
+
+      - name: Configure ephemeral testnet identity
+        run: |
+          set -eu
+          stellar keys add ci-testnet --secret-key "$TESTNET_SECRET_KEY" >/dev/null
+
+      - name: Invoke live testnet smoke
+        run: |
+          set -eu
+          stellar contract invoke \
+            --id "$TESTNET_CONTRACT_ID" \
+            --source-account ci-testnet \
+            --network testnet \
+            -- get_stats
+          stellar contract invoke \
+            --id "$TESTNET_CONTRACT_ID" \
+            --source-account ci-testnet \
+            --network testnet \
+            -- get_address --github-username "$TESTNET_USERNAME"

@@ -11,6 +11,35 @@ Related docs: [SECURITY](SECURITY.md) · [ABI](ABI.md) · [DEPLOYMENT](DEPLOYMEN
 - Export registered records before large dashboard migrations.
 - Keep the admin account in a secure wallet or multisig flow.
 
+## Python operator client
+
+The client in `scripts/trustbridge_client.py` provides typed wrappers around
+the Stellar CLI for `get_address`, `get_stats`, paginated registry reads, and
+batch operations. It uses only Python's standard library, so no package
+installation is required beyond Python 3.10+ and the Stellar CLI.
+
+The existing export command delegates to the Python implementation while
+keeping its environment-variable interface:
+
+```bash
+CONTRACT_ID=C... SOURCE=admin NETWORK=testnet \
+  ./scripts/export_registry.sh
+```
+
+Equivalent direct invocation:
+
+```bash
+PYTHONPATH=scripts python3 scripts/export_registry.py \
+  --contract C... --source admin --network testnet \
+  --output registry-export-testnet.json
+```
+
+The client passes `--send=yes` only for mutating batch methods. CLI failures,
+non-JSON responses, pagination stalls, and malformed response shapes stop the
+operation with an actionable error instead of being inferred with `grep` or
+`jq`. Keep the Stellar CLI identity and network explicit for every operation;
+the WASM hash remains independently checked by `make wasm-hash-pin`.
+
 ---
 
 ## Storage TTL Maintenance (Keeper)

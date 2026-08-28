@@ -51,6 +51,7 @@ This contract provides that mapping **on-chain**:
 - `revoke_verification` — admin or `Verifier`-role holder revokes verified status
 - `get_all_registered` — admin-only full export for dashboard sync
 - `scripts/export_registry.sh` / `scripts/validate_registry.sh` — CLI export to JSON and validate-only diff against live state (see [Registry Export & Import](docs/DEPLOYMENT.md#registry-export--import))
+- `scripts/trustbridge_client.py` — typed Python wrappers for operator reads and batch operations
 - `get_stats` — total and verified registration counts
 - `pause` / `unpause` / `is_paused` — emergency circuit breaker to pause mutating contract state
 - `set_role` / `remove_role` / `get_role` — Role-Based Access Control (`Admin`, `Upgrader`, `Verifier`)
@@ -108,7 +109,9 @@ trustbridge-contract/
 ├── tests/
 │   └── integration.rs  # End-to-end integration test suite & event tracking
 ├── scripts/
-│   └── deploy.sh       # Network-aware deploy + initialize script
+│   ├── deploy.sh       # Network-aware deploy + initialize script
+│   ├── export_registry.py # Typed registry exporter
+│   └── trustbridge_client.py # Python client backed by Stellar CLI
 ├── docs/
 │   ├── ARCHITECTURE.md # Design, storage, auth, events
 │   ├── ABI.md          # Function & event reference
