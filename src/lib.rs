@@ -2876,19 +2876,19 @@ impl TrustBridgeContract {
         is_admin_caller(&env, &caller)
     }
 
-    /// Records that `github_username` performed a registry-mutating action at the current
-    /// ledger timestamp, for use by cooldown enforcement logic.
-    ///
-    /// Off-chain callers use this alongside `is_registration_in_cooldown` to implement
-    /// per-contributor rate limiting without requiring a contract upgrade.
-    pub fn record_action(env: Env, github_username: String) {
-        set_last_action(&env, &github_username, env.ledger().timestamp());
-    }
-
     /// Returns `true` if `github_username` is still within the registration cooldown window.
     ///
     /// Read-only; no auth required. The cooldown period is set by `set_cooldown`. Returns
-    /// `false` if no action has been recorded or the cooldown has elapsed.
+    /// `false` if no mutating action has been recorded for the username or the cooldown has
+    /// elapsed.
+    ///
+    /// The cooldown is enforced **automatically** by the contract: `register`, `verify`,
+    /// and the username/address change paths stamp the username's last-action timestamp on
+    /// success and reject a follow-up mutation with [`ContractError::CooldownActive`] until
+    /// the window elapses. This function is the read-only view of that state for off-chain
+    /// tooling and cross-contract callers — there is no separate `record_action` entry
+    /// point to call (it was removed in Issue #296: an unauthenticated public timestamp
+    /// setter let any caller push an arbitrary username into cooldown).
     #[must_use]
     pub fn is_registration_in_cooldown(env: Env, github_username: String) -> bool {
         is_in_cooldown(&env, &github_username)
@@ -7965,6 +7965,61 @@ mod test {
             // After cooldown elapses, re-registration succeeds
             TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user2.clone(), Vec::new(&env))
                 .unwrap();
+        });
+    }
+
+    // Issue #296: `is_registration_in_cooldown` is the read-only view of the
+    // cooldown that `register` enforces inline. It must flip to `true` purely as
+    // a side effect of a successful `register` — with no `record_action` call,
+    // which no longer exists — and back to `false` once the window elapses.
+    #[test]
+    fn test_is_registration_in_cooldown_tracks_auto_enforcement() {
+        let env = Env::default();
+        let (_admin, user1, user2, contract_id) = setup(&env);
+
+        env.ledger().set_timestamp(5_000);
+        env.mock_all_auths();
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_cooldown(env.clone(), 100).unwrap();
+
+            // Unknown username: never in cooldown.
+            assert!(!TrustBridgeContract::is_registration_in_cooldown(
+                env.clone(),
+                username(&env, "octocat")
+            ));
+
+            // A successful register stamps the cooldown with no extra call.
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user1.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+            assert!(TrustBridgeContract::is_registration_in_cooldown(
+                env.clone(),
+                username(&env, "octocat")
+            ));
+
+            // And the enforced mutation agrees with the read.
+            assert_eq!(
+                TrustBridgeContract::register(
+                    env.clone(),
+                    username(&env, "octocat"),
+                    user2.clone(),
+                    Vec::new(&env),
+                ),
+                Err(ContractError::CooldownActive)
+            );
+        });
+
+        env.ledger().set_timestamp(5_000 + 101);
+        env.as_contract(&contract_id, || {
+            assert!(!TrustBridgeContract::is_registration_in_cooldown(
+                env.clone(),
+                username(&env, "octocat")
+            ));
         });
     }
 

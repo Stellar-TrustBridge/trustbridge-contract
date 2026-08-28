@@ -159,8 +159,15 @@ The contract enforces per-username action rate-limiting during `register()`:
 
 - When `cooldown` is non-zero, `register()` checks whether `is_in_cooldown()` is true for `github_username`.
 - If the configured cooldown window has not elapsed since the username's last mutating action, `register()` fails with `CooldownActive` (code 8).
-- Upon a successful `register()`, the username's last action timestamp is updated via `set_last_action()`.
+- Upon a successful `register()`, the username's last action timestamp is updated via `set_last_action()`. `verify()` and the username/address-change paths stamp it the same way.
 - First-time registrations have no recorded prior action timestamp (0), allowing initial registration to succeed immediately.
+
+**Enforcement is inline and automatic.** There is no public `record_action`
+entry point. An earlier build exported an unauthenticated
+`record_action(github_username)` timestamp setter; because it required no auth,
+any caller could push an arbitrary username into cooldown and block its
+registration. It was removed in Issue #296. `is_registration_in_cooldown()`
+remains as the read-only view of the enforced state.
 
 ---
 

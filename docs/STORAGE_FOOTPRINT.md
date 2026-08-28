@@ -70,10 +70,11 @@ or the target network's resource config changes:
 - **Role grants:** 1 (the initial admin — `initialize` calls `set_role` for
   it). Each additional `set_role` call adds one fixed-size persistent entry,
   independent of N.
-- **Cooldown tracking (`lastact`):** 0 by default. These entries are only
-  created when `record_action` is called for a username, so they track a
-  subset of active users, not all N — add `52 bytes × (tracked usernames)`
-  if cooldown enforcement is in active use.
+- **Cooldown tracking (`lastact`):** 0 by default. An entry is created the
+  first time a username completes a mutating action (`register`, `verify`, or a
+  username/address change) while a non-zero cooldown is configured, so they
+  track a subset of active users, not all N — add `52 bytes × (tracked
+  usernames)` if cooldown enforcement is in active use.
 - **All N registrations are live** (none removed). A `remove` frees its
   `(reg, *)` and chunk-slot bytes but the flat `idx` rewrite cost (see below)
   is the same regardless of net growth or churn.
