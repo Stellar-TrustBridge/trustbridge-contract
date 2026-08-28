@@ -192,6 +192,77 @@ If a rightful owner discovers that their GitHub username has been squatted on-ch
 - **How do I reclaim my username?** Open a support ticket / dispute with the TrustBridge administrators. They will remove the squatter's record so you can register your address.
 - **Does the contract verify my GitHub handle automatically?** No. There is **no on-chain verification proof** of GitHub identity at registration time. Verification is entirely off-chain/administrative.
 
+### 5. Username Case-Folding (Issue #194)
+
+GitHub logins are case-insensitive: `Alice` and `alice` are the same GitHub
+account. Before this fix, persistent storage keys were built from the raw
+input string, so registering `alice` and later `Alice` created **two
+independent records** — a squatter could register a case variant of an
+already-registered, already-verified username and siphon future payouts sent
+to that variant, since the contract had no way to know the two strings named
+the same account.
+
+**The fold.** Every persistent key namespaced by a username —
+`(reg, username)`, `(chllng, username)`, `(pend_rev, username)`,
+`(lastact, username)`, `(pendrot, username)`, and the flat/chunked enumeration
+index — is built from `utils::canonicalize_username`, which ASCII-lowercases
+the input (`crate::storage`'s private `canon` helper wraps it at the point
+every key is constructed). The fold is byte-wise and ASCII-only: only
+`b'A'..=b'Z'` bytes are lowered, so it can never change the byte length of an
+already-ASCII-validated username, and it never attempts a Unicode-aware case
+fold. `register` already rejects non-ASCII usernames outright
+(`is_valid_github_username`), so every key this fold ever runs on is pure
+ASCII by construction.
+
+**What this closes.** `Alice`, `ALICE`, and `alice` all resolve to the same
+underlying record: registering any case variant of an existing login updates
+that same record rather than creating a new one, so the existing
+double-auth transfer protection (`old.stellar_address.require_auth()`) applies
+to a case-variant "takeover" attempt exactly as it would to a same-case
+re-registration. Lookups (`get_address`, `has_record`, `remove`, `verify`,
+`revoke_verification`, …) resolve the same way regardless of the casing the
+caller passes in.
+
+**Canonical vs raw.** Storage, the enumeration index, and every paginated
+export (`get_registered_paginated`, `get_public_paginated`,
+`get_all_registered`) all report the **canonical (lowercased)** form of a
+username, since that is what the storage key actually is. Domain events
+(`RegisteredEvent`, `VerifiedEvent`, …) still carry the **raw** string exactly
+as the caller submitted it in that call, for display/audit fidelity —
+indexers that need to correlate an event against export/lookup data should
+fold the event's username themselves before comparing.
+
+**Explicitly out of scope** (tracked as separate work): Unicode case folding
+(`IDNA`/`UTS46`-style normalization) and homoglyph detection (e.g. Cyrillic
+`а` vs ASCII `a`) — see **Unicode Rejection Policy** below, which already
+rejects all non-ASCII bytes outright, so homoglyph substitution cannot reach
+the storage layer in the first place.
+
+**Migration note for a deployment with existing mixed-case keys.** This
+contract has not been deployed to mainnet (see **Audit Status** below), so no
+runtime migration function ships with this fix. If a future deployment ever
+needs to reconcile pre-existing `Alice`/`alice`-style duplicate records, the
+recommended procedure is fully off-chain and uses tooling that already
+exists:
+
+1. Walk the full registry with `get_registered_paginated` (admin-gated) or
+   `get_public_paginated`, paging until `has_more == false`.
+2. Group the exported `(github_username, ContributorRecord)` pairs by
+   `canonicalize_username`-equivalent key (i.e. ASCII-lowercased) off-chain.
+   Any group with more than one entry is a pre-fix duplicate.
+3. For each duplicate group, an operator decides the surviving record —
+   typically the `verified` one, or the one with the earliest
+   `registered_at` if none is verified — following the existing dispute
+   process in **Username Squatting Mitigations** above.
+4. `remove` every losing entry in the group (admin-authorized; `batch_remove`
+   for more than a handful), then confirm via `has_record` that only the
+   canonical key remains before re-verifying the survivor if needed.
+
+Because canonicalization happens inside `set_record`/`get_record` themselves,
+once a deployment is running this fix a fresh registration can never
+recreate a duplicate — the reconciliation above is a one-time cleanup for
+data written before the fix, not an ongoing concern.
+
 ---
 
 ## Input Validation

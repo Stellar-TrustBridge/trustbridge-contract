@@ -15,6 +15,7 @@ mod domain;
 mod error;
 mod error_context;
 mod events;
+mod merkle;
 mod registry_read_stub;
 mod storage;
 mod utils;
@@ -24,8 +25,6 @@ pub use audit::{AuditConfig, AuditEventType, AuditLogEntry, AuditStats};
 pub use batch::{BatchConfig, BatchOperationResult, BatchSummary, MAX_WRITE_BATCH};
 pub use domain::{EventDomain, EVENT_DOMAIN_VERSION};
 pub use error::ContractError;
-pub use events::{RegisteredEvent, RemovedEvent, VerifiedEvent};
-pub use storage::{ContributorRecord, EntityType, Stats};
 pub use events::{
     AttestationClearedEvent, ChallengeCancelledEvent, ChallengeCompletedEvent, RenamedEvent,
     RotationCancelledEvent, RotationExecutedEvent, RotationRequestedEvent,
@@ -34,41 +33,37 @@ pub use events::{
     UpgradeAttestedEvent, UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
 };
 pub use storage::{
-    ChallengeRecord, ContributorRecord, ExportPage, HealthSnapshot, Role, Stats,
-    VerificationConfig, WasmAttestation, WasmProvenance, PauseReason,
+    ChallengeRecord, ContributorRecord, EntityType, ExportPage, HealthSnapshot,
+    PendingRotation, RecordProof, Role, RoleHolder, Stats, VerificationConfig, WasmAttestation,
+    WasmProvenance, PauseReason, MAX_FALLBACK_ADDRESSES,
 };
 pub use version::Version;
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, Vec};
 
 use crate::storage::{
-    add_to_index, add_to_org_index, add_to_team_index, get_admin, get_count, get_index,
-    get_record, get_stats as read_stats, get_verified_count, remove_from_index,
-    remove_from_org_index, remove_from_team_index, remove_record, require_initialized, set_count,
-    set_record, set_verified_count, team_key, ADMIN_KEY,
-    add_to_index, clear_pending_reverify, get_admin, get_audit_logs, get_audit_stats,
-    get_challenge, get_cooldown as storage_get_cooldown, get_count, get_index, get_last_upgrade,
-    get_record, get_registered_paginated_internal, get_role as storage_get_role,
-    bump_ever_verified_count, get_emergency_pause, get_emergency_pause_ts,
+    add_to_index, bump_ever_verified_count, build_record_proof, clear_pending_reverify,
+    get_admin, get_audit_logs, get_audit_stats, get_challenge, get_count,
+    get_cooldown as storage_get_cooldown, get_emergency_pause, get_emergency_pause_ts,
     get_ever_verified_count as storage_get_ever_verified_count, get_guardian as storage_get_guardian,
-    get_stats as read_stats, get_verification_config, get_verified_count as storage_get_verified_count,
-    is_attestation_required, is_guardian, remove_guardian as storage_remove_guardian,
-    set_emergency_pause, set_emergency_pause_ts, set_guardian_address,
+    get_index, get_last_upgrade, get_network_id as storage_get_network_id,
+    get_pending_rotation as storage_get_pending_rotation, get_record,
+    get_registered_paginated_internal, get_role as storage_get_role,
+    get_role_holder_count as storage_get_role_holder_count, get_role_holders_internal,
+    get_rotation_delay as storage_get_rotation_delay, get_stats as read_stats,
+    get_verification_config, get_verified_count as storage_get_verified_count,
     get_version as storage_get_version, get_wasm_attestation, get_wasm_provenance, has_challenge,
-    build_record_proof, get_pending_rotation as storage_get_pending_rotation,
-    get_rotation_delay as storage_get_rotation_delay, has_pending_rotation, has_record,
-    is_admin_caller, is_in_cooldown, is_paused as storage_is_paused, push_audit_entry,
-    remove_pending_rotation, set_pending_rotation, set_rotation_delay as storage_set_rotation_delay,
-    remove_challenge, remove_from_index, remove_record, remove_role as storage_remove_role,
-    remove_wasm_attestation, require_initialized, require_not_paused,
-    run_migration_steps, set_challenge, set_cooldown as storage_set_cooldown, set_count,
-    set_last_action, set_last_upgrade, set_paused as set_paused_state, set_pending_reverify,
-    set_ever_verified_count, set_record, set_role as storage_set_role, set_verified_count,
-    set_version,
-    set_wasm_attestation, set_wasm_provenance, DEFAULT_CHALLENGE_DELAY_SECS,
-    ADMIN_KEY,
-    get_guardian as storage_get_guardian,
-    remove_guardian as storage_remove_guardian,
+    has_pending_rotation, has_record, is_admin_caller, is_attestation_required, is_guardian,
+    is_in_cooldown, is_paused as storage_is_paused, push_audit_entry, remove_challenge,
+    remove_from_index, remove_guardian as storage_remove_guardian, remove_pending_rotation,
+    remove_record, remove_role as storage_remove_role, remove_wasm_attestation,
+    require_initialized, require_not_paused, run_migration_steps, set_challenge,
+    set_cooldown as storage_set_cooldown, set_count, set_emergency_pause, set_emergency_pause_ts,
+    set_ever_verified_count, set_guardian_address, set_last_action, set_last_upgrade,
+    set_network_id, set_paused as set_paused_state, set_pending_reverify, set_pending_rotation,
+    set_record, set_role as storage_set_role, set_rotation_delay as storage_set_rotation_delay,
+    set_verified_count, set_version, set_wasm_attestation, set_wasm_provenance,
+    DEFAULT_CHALLENGE_DELAY_SECS, ADMIN_KEY,
 };
 
 use crate::utils::{
@@ -172,17 +167,6 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Registers or updates a GitHub username → Stellar address mapping.
-    /// The caller must authenticate as `stellar_address`.
-    /// `entity_type`: 0 = Personal, 1 = Org, 2 = Team.
-    /// For teams, `org_name` must be provided.
-    pub fn register(
-        env: Env,
-        github_username: String,
-        stellar_address: Address,
-        entity_type: u32,
-        org_name: Option<String>,
-    ) -> Result<(), ContractError> {
     /// Pauses all state-mutating contract functions. Admin-only.
     ///
     /// While paused, any call to `register`, `remove`, `verify`, `revoke_verification`,
@@ -214,17 +198,6 @@ impl TrustBridgeContract {
         }
         let reason = PauseReason::from_code(reason_code).unwrap_or(PauseReason::Other);
 
-        let etype = match entity_type {
-            0 => EntityType::Personal,
-            1 => EntityType::Org,
-            2 => EntityType::Team,
-            _ => return Err(ContractError::InvalidEntityType),
-        };
-
-        if etype == EntityType::Team && org_name.is_none() {
-            return Err(ContractError::OrgNameRequired);
-        }
-
         set_paused_state(&env, true);
         crate::storage::set_pause_reason(&env, reason);
         let timestamp = env.ledger().timestamp();
@@ -236,39 +209,6 @@ impl TrustBridgeContract {
         }
         .publish(&env);
 
-        let record = ContributorRecord {
-            stellar_address: stellar_address.clone(),
-            registered_at: timestamp,
-            verified: existing
-                .as_ref()
-                .map(|r| r.stellar_address == stellar_address && r.verified)
-                .unwrap_or(false),
-            entity_type: etype,
-            org_name: org_name.clone(),
-        };
-
-        if existing.is_none() {
-            set_count(&env, get_count(&env).saturating_add(1));
-            add_to_index(&env, &github_username);
-            match etype {
-                EntityType::Org => {
-                    if let Some(ref oname) = org_name {
-                        add_to_org_index(&env, oname);
-                    }
-                }
-                EntityType::Team => {
-                    if let Some(ref oname) = org_name {
-                        let tk = team_key(&env, oname, &github_username);
-                        add_to_team_index(&env, &tk);
-                    }
-                }
-                _ => {}
-            }
-        } else if let Some(old) = existing {
-            if old.stellar_address != stellar_address && old.verified {
-                set_verified_count(&env, get_verified_count(&env).saturating_sub(1));
-            }
-        }
         push_audit_entry(
             &env,
             AuditLogEntry::new(AuditEventType::AdminAction, timestamp, Some(admin)),
@@ -423,23 +363,6 @@ impl TrustBridgeContract {
             return Err(ContractError::NotAuthorized);
         }
 
-        match record.entity_type {
-            EntityType::Org => {
-                if let Some(ref oname) = record.org_name {
-                    remove_from_org_index(&env, oname);
-                }
-            }
-            EntityType::Team => {
-                if let Some(ref oname) = record.org_name {
-                    let tk = team_key(&env, oname, &github_username);
-                    remove_from_team_index(&env, &tk);
-                }
-            }
-            _ => {}
-        }
-
-        if record.verified {
-            set_verified_count(&env, get_verified_count(&env).saturating_sub(1));
         // Idempotent: no-op if already emergency-paused.
         if get_emergency_pause(&env) {
             return Ok(());
@@ -722,68 +645,6 @@ impl TrustBridgeContract {
         storage_get_cooldown(&env)
     }
 
-    fn register_personal(env: &Env, contract_id: &soroban_sdk::Address, name: &str, addr: &Address) {
-        TrustBridgeContract::register(
-            env.clone(),
-            username(env, name),
-            addr.clone(),
-            0,
-            None,
-        )
-        .unwrap();
-    }
-
-    fn register_org(
-        env: &Env,
-        contract_id: &soroban_sdk::Address,
-        name: &str,
-        addr: &Address,
-        org: &str,
-    ) {
-        TrustBridgeContract::register(
-            env.clone(),
-            username(env, name),
-            addr.clone(),
-            1,
-            Some(username(env, org)),
-        )
-        .unwrap();
-    }
-
-    fn register_team(
-        env: &Env,
-        contract_id: &soroban_sdk::Address,
-        name: &str,
-        addr: &Address,
-        org: &str,
-    ) {
-        TrustBridgeContract::register(
-            env.clone(),
-            username(env, name),
-            addr.clone(),
-            2,
-            Some(username(env, org)),
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn test_register_and_get_address_roundtrip() {
-        let env = Env::default();
-        let (_admin, user, _other, contract_id) = setup(&env);
-
-        env.mock_all_auths();
-
-        env.as_contract(&contract_id, || {
-            register_personal(&env, &contract_id, "octocat", &user);
-
-            let record =
-                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
-            assert_eq!(record.stellar_address, user);
-            assert!(!record.verified);
-            assert_eq!(record.entity_type, EntityType::Personal);
-        });
-    }
     /// Returns the stored contract schema version as `(major, minor, patch)`.
     ///
     /// Falls back to the compile-time [`CONTRACT_VERSION`] constant on instances
@@ -837,8 +698,6 @@ impl TrustBridgeContract {
             },
         );
 
-        env.as_contract(&contract_id, || {
-            register_personal(&env, &contract_id, "octocat", &user);
         UpgradeAttestedEvent {
             wasm_hash,
             expires_at,
@@ -864,8 +723,6 @@ impl TrustBridgeContract {
         let admin = get_admin(&env)?;
         admin.require_auth();
 
-        env.as_contract(&contract_id, || {
-            register_personal(&env, &contract_id, "octocat", &user);
         if let Some(attestation) = get_wasm_attestation(&env) {
             remove_wasm_attestation(&env);
             
@@ -1213,6 +1070,30 @@ impl TrustBridgeContract {
         eq_ignore_ascii_case(&a, &b)
     }
 
+    /// Computes the Merkle leaf hash for one `(github_username,
+    /// stellar_address, verified)` export entry (Issue #216).
+    ///
+    /// Every `ExportPage` returned by `get_registered_paginated` /
+    /// `get_public_paginated` carries a `merkle_root` over its `records` in
+    /// page order. This function exposes the exact leaf encoding that root
+    /// is built from, so off-chain tooling (a treasury, a dashboard) can
+    /// verify its own reimplementation matches before trusting inclusion
+    /// proofs it builds from an exported page. See `crate::merkle` for the
+    /// full leaf/node encoding and the odd-node promotion rule used above
+    /// the leaf layer.
+    ///
+    /// Read-only; no auth required — this is a pure function of its inputs
+    /// and reads no contract state.
+    #[must_use]
+    pub fn merkle_leaf_hash(
+        env: Env,
+        github_username: String,
+        stellar_address: Address,
+        verified: bool,
+    ) -> BytesN<32> {
+        crate::merkle::leaf_hash(&env, &github_username, &stellar_address, verified)
+    }
+
     /// Registers or updates a GitHub username → Stellar address mapping.
     ///
     /// The caller must authenticate as `stellar_address`. The username must be
@@ -1306,6 +1187,14 @@ impl TrustBridgeContract {
             }
         }
 
+        // Defaults to `stellar_address` for a first-time registration; a
+        // re-registration preserves whatever payout address was already on
+        // file rather than resetting it back to identity every time.
+        let resolved_payout = existing
+            .as_ref()
+            .map(|r| r.payout_address.clone())
+            .unwrap_or_else(|| stellar_address.clone());
+
         let record = ContributorRecord {
             stellar_address: stellar_address.clone(),
             payout_address: resolved_payout,
@@ -1393,8 +1282,14 @@ impl TrustBridgeContract {
             return Err(ContractError::CooldownActive);
         }
 
+        let resolved_payout = existing
+            .as_ref()
+            .map(|r| r.payout_address.clone())
+            .unwrap_or_else(|| stellar_address.clone());
+
         let record = ContributorRecord {
             stellar_address: stellar_address.clone(),
+            payout_address: resolved_payout,
             registered_at: timestamp as u32,
             verified: existing
                 .as_ref()
@@ -1780,14 +1675,26 @@ impl TrustBridgeContract {
         Ok(result)
     }
 
-    /// Exports a page of registry records using a cursor. Admin-only.
+    /// Exports a page of registry records using an opaque cursor. Admin-only.
     ///
-    /// `cursor` is the zero-based record index to start from; `limit` is the maximum
-    /// number of records to return (capped at `MAX_PAGE_LIMIT`). Returns an [`ExportPage`]
-    /// containing the records and a `next_cursor` for subsequent calls.
+    /// `cursor` is `None` to start from the beginning, or the exact
+    /// `next_cursor` value a previous call returned to continue — it is an
+    /// **opaque token** (Issue #215): never construct or decode one
+    /// yourself, and never persist one across a contract upgrade that
+    /// changes this encoding. `limit` is the maximum number of records to
+    /// return (capped at `MAX_PAGE_LIMIT`). Returns an [`ExportPage`]
+    /// containing the records, a `next_cursor` for the following call, and a
+    /// `merkle_root` over the page (Issue #216).
     ///
     /// Use this instead of `get_all_registered` for large registries — it avoids
     /// materializing the full index in one transaction.
+    ///
+    /// A cursor issued before a username was removed from the registry no
+    /// longer decodes: continuing to walk the registry with a stale offset
+    /// after a middle entry is removed would silently skip or duplicate
+    /// records for a consumer that isn't reconciling by upsert, so this
+    /// fails loudly instead. See `docs/DASHBOARD_SYNC.md` for the recommended
+    /// restart-from-`None` recovery.
     ///
     /// # Auth
     ///
@@ -1797,9 +1704,11 @@ impl TrustBridgeContract {
     ///
     /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
     /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
+    /// - [`ContractError::InvalidCursor`] if `cursor` is `Some` and no longer
+    ///   decodes against the current registry state.
     pub fn get_registered_paginated(
         env: Env,
-        cursor: u32,
+        cursor: Option<BytesN<8>>,
         limit: u32,
     ) -> Result<ExportPage, ContractError> {
         require_initialized(&env)?;
@@ -1811,9 +1720,15 @@ impl TrustBridgeContract {
 
     /// Public paginated read for indexers and dashboard consumers.
     ///
-    /// Same cursor/limit semantics as `get_registered_paginated` but requires no auth,
-    /// making it suitable for public dashboard sync and off-chain indexers. Returns an
-    /// [`ExportPage`] with records and a `next_cursor`.
+    /// Same opaque-cursor/limit semantics as `get_registered_paginated`
+    /// (Issue #215) but requires no auth, making it suitable for public
+    /// dashboard sync and off-chain indexers. Returns an [`ExportPage`] with
+    /// records, a `next_cursor`, and a `merkle_root` over the page.
+    ///
+    /// A cursor issued by `get_registered_paginated` may be passed here and
+    /// vice versa — both read the same underlying index and generation
+    /// counter, so cursors are interchangeable between the admin and public
+    /// variants.
     ///
     /// Blocked by the pause state — returns [`ContractError::Paused`] while the circuit
     /// breaker is active.
@@ -1822,9 +1737,11 @@ impl TrustBridgeContract {
     ///
     /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
     /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::InvalidCursor`] if `cursor` is `Some` and no longer
+    ///   decodes against the current registry state.
     pub fn get_public_paginated(
         env: Env,
-        cursor: u32,
+        cursor: Option<BytesN<8>>,
         limit: u32,
     ) -> Result<ExportPage, ContractError> {
         require_initialized(&env)?;
@@ -1876,6 +1793,7 @@ impl TrustBridgeContract {
                 admin: admin.clone(),
                 timestamp,
                 reason_code,
+                domain: event_domain(&env),
             }
             .publish(&env);
         } else {
@@ -1883,6 +1801,7 @@ impl TrustBridgeContract {
                 admin: admin.clone(),
                 timestamp,
                 reason_code,
+                domain: event_domain(&env),
             }
             .publish(&env);
         }
@@ -2276,8 +2195,10 @@ impl TrustBridgeContract {
 
         let moved = ContributorRecord {
             stellar_address: record.stellar_address.clone(),
+            payout_address: record.payout_address.clone(),
             registered_at: timestamp as u32,
             verified: false,
+            is_bot: record.is_bot,
         };
 
         // Write the new key and drop the old one in the same invocation: the
@@ -3015,6 +2936,13 @@ mod test {
 
     fn username(env: &Env, name: &str) -> String {
         String::from_str(env, name)
+    }
+
+    /// Registers `name` to `addr` with no fallback addresses. Must be called
+    /// from inside an `env.as_contract(&contract_id, || { .. })` closure.
+    fn register_personal(env: &Env, _contract_id: &Address, name: &str, addr: &Address) {
+        TrustBridgeContract::register(env.clone(), username(env, name), addr.clone(), Vec::new(env))
+            .unwrap();
     }
 
     /// Asserts `get_verified_count()` and `get_stats().verified` agree on

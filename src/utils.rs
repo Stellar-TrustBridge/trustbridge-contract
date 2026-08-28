@@ -171,6 +171,46 @@ pub fn eq_ignore_ascii_case(a: &String, b: &String) -> bool {
         .all(|(x, y)| x.eq_ignore_ascii_case(y))
 }
 
+/// Folds a GitHub username to its canonical storage-key form.
+///
+/// GitHub logins are case-insensitive, so `Alice` and `alice` name the same
+/// account. Every persistent storage key keyed by a username is built from
+/// this canonical form (ASCII-lowercased), so a case variant of an existing
+/// login can never create a second, independent record — see
+/// `docs/SECURITY.md#username-case-folding`.
+///
+/// The fold is byte-wise ASCII-only: only bytes in `b'A'..=b'Z'` are lowered.
+/// Any byte `>= 0x80` (part of a multi-byte UTF-8 sequence) is left
+/// untouched, so this never changes the byte length of its input and never
+/// performs a Unicode-aware case fold — GitHub usernames are ASCII-only
+/// (`is_valid_github_username`), and this function does not attempt to
+/// canonicalize non-ASCII input beyond leaving it as-is. Homoglyph
+/// normalization is explicitly out of scope (tracked separately).
+///
+/// A username too long for the fixed stack buffer (longer than
+/// `MAX_USERNAME_LEN` could ever be, since registration already rejects
+/// those) is returned unchanged rather than folded, since it can never be a
+/// valid registration key anyway.
+#[must_use]
+pub fn canonicalize_username(env: &Env, s: &String) -> String {
+    let len = s.len() as usize;
+    if len == 0 || len > USERNAME_BUF {
+        return s.clone();
+    }
+
+    let mut buf = [0u8; USERNAME_BUF];
+    s.copy_into_slice(&mut buf[..len]);
+    buf[..len].make_ascii_lowercase();
+
+    match core::str::from_utf8(&buf[..len]) {
+        Ok(lowered) => String::from_str(env, lowered),
+        // Unreachable for any input that was valid UTF-8 going in: lowercasing
+        // ASCII bytes in place can never break UTF-8 validity. Kept as a safe
+        // fallback rather than a panic on the no_std validation path.
+        Err(_) => s.clone(),
+    }
+}
+
 /// Calculate the percentage of verified contributors out of total.
 pub fn calculate_verification_percentage(verified: u32, total: u32) -> u32 {
     if total == 0 {
@@ -504,6 +544,77 @@ mod tests {
         assert!(eq_ignore_ascii_case(&s(&env, "BOB-1"), &s(&env, "bob-1")));
         assert!(!eq_ignore_ascii_case(&s(&env, "alice"), &s(&env, "bob")));
         assert!(!eq_ignore_ascii_case(&s(&env, "alice"), &s(&env, "alice1")));
+    }
+
+    // ── Username case-folding (Issue #194) ────────────────────────────────────
+
+    #[test]
+    fn test_canonicalize_username_lowercases() {
+        let env = Env::default();
+        assert_eq!(
+            canonicalize_username(&env, &s(&env, "Alice")),
+            s(&env, "alice")
+        );
+        assert_eq!(
+            canonicalize_username(&env, &s(&env, "OCTOCAT")),
+            s(&env, "octocat")
+        );
+        assert_eq!(
+            canonicalize_username(&env, &s(&env, "Bob-Smith_42")),
+            s(&env, "bob-smith_42")
+        );
+    }
+
+    #[test]
+    fn test_canonicalize_username_already_lower_is_unchanged() {
+        let env = Env::default();
+        assert_eq!(
+            canonicalize_username(&env, &s(&env, "octocat")),
+            s(&env, "octocat")
+        );
+    }
+
+    #[test]
+    fn test_canonicalize_username_idempotent() {
+        let env = Env::default();
+        let once = canonicalize_username(&env, &s(&env, "MixedCase"));
+        let twice = canonicalize_username(&env, &once);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn test_canonicalize_username_case_variants_collide() {
+        let env = Env::default();
+        let variants = ["alice", "Alice", "ALICE", "aLiCe"];
+        let canonical = canonicalize_username(&env, &s(&env, variants[0]));
+        for v in &variants {
+            assert_eq!(
+                canonicalize_username(&env, &s(&env, v)),
+                canonical,
+                "{v} must fold to the same canonical key as {}",
+                variants[0]
+            );
+        }
+    }
+
+    #[test]
+    fn test_canonicalize_username_never_changes_byte_length() {
+        let env = Env::default();
+        for name in ["a", "Z", "MixedCase123", "foo-BAR_baz", "OCTOCAT"] {
+            let original = s(&env, name);
+            let folded = canonicalize_username(&env, &original);
+            assert_eq!(
+                folded.len(),
+                original.len(),
+                "ASCII case-folding must never change byte length ({name})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_canonicalize_username_empty_is_unchanged() {
+        let env = Env::default();
+        assert_eq!(canonicalize_username(&env, &s(&env, "")), s(&env, ""));
     }
 
     // ── Percentage helper ─────────────────────────────────────────────────────

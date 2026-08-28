@@ -275,6 +275,16 @@ instead of an opaque auth failure. Use `is_address_zero` to pre-check.
 | First and last character alphanumeric | `alice`, `7` | `-invalid`, `invalid-`, `_leading`, `trailing_` |
 | No consecutive hyphens | `foo-bar-baz` | `foo--bar` |
 
+**Case folding (Issue #194).** GitHub logins are case-insensitive, so every
+persistent storage key built from `github_username` uses its ASCII-lowercased
+canonical form — `Alice`, `ALICE`, and `alice` all resolve to one record.
+Registering a case variant of an existing login updates that record (subject
+to the same `old.stellar_address.require_auth()` protection a same-case
+re-registration requires) rather than creating a second, independent entry.
+Paginated exports and `get_all_registered` report the canonical (lowercased)
+username; domain events report the raw string as submitted. See
+[SECURITY.md § Username Case-Folding](SECURITY.md#5-username-case-folding-issue-194).
+
 Two deliberate choices:
 
 - **Underscores are accepted** even though GitHub itself rejects them. Records
@@ -607,6 +617,51 @@ that budget while still allowing full export via a cursor loop.
 | `next_cursor` | `Option<u32>` | Next zero-based index offset, or `None` when done |
 | `total` | `u32` | Live registration count |
 | `has_more` | `bool` | `true` when another page exists |
+| `merkle_root` | `BytesN<32>` | Merkle root over `records`, in page order (Issue #216) |
+
+### Merkle root over an export page (Issue #216)
+
+`merkle_root` lets a treasury or dashboard prove a specific
+`(github_username, stellar_address, verified)` triple was present in a given
+export page without republishing the whole registry, and lets anyone detect
+an edited off-chain CSV copy of that page (its recomputed root would not
+match the one the contract returned).
+
+**Leaf encoding:**
+
+```text
+leaf = SHA256("trustbridge/export-leaf/v1:" || username_bytes || 0x00 || address_strkey_bytes || verified_byte)
+```
+
+- `username_bytes` — raw bytes of the entry's `github_username` exactly as it
+  appears in `records` (its canonical, lowercased form — see
+  [SECURITY.md § Username Case-Folding](SECURITY.md#5-username-case-folding-issue-194)).
+- `0x00` — fixed separator between the username and address byte strings.
+- `address_strkey_bytes` — raw bytes of `record.stellar_address`'s Stellar
+  strkey (the `G...` string), not its internal binary encoding.
+- `verified_byte` — `0x01` if `record.verified`, else `0x00`. The verified
+  flag is part of the leaf, so a proof attests to verification status at
+  export time, not just membership.
+
+`merkle_leaf_hash(github_username, stellar_address, verified) -> BytesN<32>`
+is a read-only, no-auth contract call exposing this exact computation, so
+off-chain tooling can check its own reimplementation against the on-chain one
+before trusting proofs built from it.
+
+**Tree construction:** a standard bottom-up binary tree,
+`node = SHA256("trustbridge/export-node/v1:" || left || right)`, over the
+page's leaves in page order. When a level has an odd number of nodes, the
+last one is promoted to the next level **unchanged** — never duplicated or
+re-hashed with itself. An empty page's root is 32 zero bytes; a one-record
+page's root is that single leaf's hash unchanged (every level promotes it).
+
+**Scope:** one root per page, not a historic accumulator over the registry's
+lifetime, and no zero-knowledge proof — a verifier needs the leaf's plaintext
+fields and a sibling-hash path, like any standard Merkle proof. See
+`src/merkle.rs` for the reference implementation and
+`tests/merkle_export.rs` for a worked inclusion proof (built independently of
+the contract's own tree code) that verifies for a member and fails for a
+non-member.
 
 ### `get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
 
