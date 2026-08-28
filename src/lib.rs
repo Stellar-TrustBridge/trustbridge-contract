@@ -13,7 +13,6 @@ mod audit;
 mod batch;
 mod domain;
 mod error;
-mod error_context;
 mod events;
 mod registry_read_stub;
 mod storage;
@@ -23,7 +22,7 @@ mod version;
 pub use audit::{AuditConfig, AuditEventType, AuditLogEntry, AuditStats};
 pub use batch::{BatchConfig, BatchOperationResult, BatchSummary, MAX_WRITE_BATCH};
 pub use domain::{EventDomain, EVENT_DOMAIN_VERSION};
-pub use error::ContractError;
+pub use error::{ContractError, ErrorCategory};
 pub use events::{RegisteredEvent, RemovedEvent, VerifiedEvent};
 pub use storage::{ContributorRecord, EntityType, Stats};
 pub use events::{
