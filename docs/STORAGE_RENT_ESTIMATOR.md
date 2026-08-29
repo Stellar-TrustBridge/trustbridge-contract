@@ -147,6 +147,11 @@ from the current Stellar protocol (write fee, rent rate, TTL). Those prices are
 Machine-readable copy:
 [`docs/storage-rent-estimator.inputs.v1.json`](storage-rent-estimator.inputs.v1.json).
 
+CLI: [`scripts/storage_rent_estimator.py`](../scripts/storage_rent_estimator.py)
+consumes the v1 JSON and prints entry counts for a given contributor count
+(`python3 scripts/storage_rent_estimator.py --users 250`). It warns if
+`chunk_size` in the JSON drifts from `CHUNK_SIZE` in `src/storage.rs`.
+
 Logical schema:
 
 ```json

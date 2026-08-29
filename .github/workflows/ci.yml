@@ -42,6 +42,9 @@ jobs:
           make abi
           git diff --exit-code -- docs/abi.json
 
+      - name: Storage rent estimator golden test
+        run: bash scripts/test_storage_rent_estimator.sh
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

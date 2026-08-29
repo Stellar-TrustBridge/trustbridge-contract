@@ -15,6 +15,7 @@ out of the repo, and default to **testnet** (never mainnet).
 | `bulk_verify.sh` / `bulk_revoke.sh` | Batched verify / revoke from a username list, with RPC pacing. |
 | `simulate_pause.sh` | Exercise the pause / unpause lifecycle. |
 | `futurenet_smoke_test.sh` | End-to-end smoke test against futurenet. |
+| `storage_rent_estimator.py` | Estimate on-chain storage entry counts from `docs/storage-rent-estimator.inputs.v1.json`; warns on `CHUNK_SIZE` drift vs `src/storage.rs` (Issue #290). |
 
 ---
 
@@ -103,3 +104,24 @@ Each line of `events-<network>.jsonl`:
 key described in `docs/DASHBOARD_SYNC.md`. Topic/value XDR decoding is left to
 the consumer (`stellar xdr decode`, or the SDK of your dashboard's language) —
 this script is deliberately decode-agnostic so it stays dependency-light.
+
+---
+
+## `storage_rent_estimator.py` — on-chain storage rent estimator
+
+Turns `docs/storage-rent-estimator.inputs.v1.json` (spec: `docs/STORAGE_RENT_ESTIMATOR.md`)
+into concrete entry counts so you do not have to reverse-engineer the docs.
+
+```bash
+# Persistent + instance entry counts for 250 contributors, 3 role holders:
+python3 scripts/storage_rent_estimator.py --users 250 --roles 3 --lastact 100
+
+python3 scripts/storage_rent_estimator.py --users 1000 --json
+```
+
+The estimator is a pure function over the versioned JSON: it counts entries
+only (XLM conversion needs operator-supplied `network_rent_params`). It also
+compares `chunk_size` in the inputs JSON against `CHUNK_SIZE` in
+`src/storage.rs` and prints a warning to stderr on any drift.
+
+Golden-output test: `bash scripts/test_storage_rent_estimator.sh`.
