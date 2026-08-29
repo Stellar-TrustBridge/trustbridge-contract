@@ -14,6 +14,7 @@ mod batch;
 mod domain;
 mod error;
 mod events;
+mod oracle_proof;
 mod storage;
 mod utils;
 mod version;
@@ -38,6 +39,7 @@ pub use storage::{
     MAX_VERIFIERS,
 };
 pub use version::Version;
+pub use oracle_proof::{get_oracle_allowlist, set_oracle_allowlist, verify_with_proof, OracleProof};
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, Vec};
 

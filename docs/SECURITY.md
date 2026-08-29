@@ -754,6 +754,58 @@ only create a denial-of-service against recovery.
 
 ---
 
+## Oracle-Signed Proof Interface (Signature Check)
+
+`verify()` and `revoke_verification()` are, today, "admin said so": the admin
+or a `Role::Verifier` holder calls `verify`, and the contract trusts that they
+checked GitHub ownership off-chain. There are no proof bytes anywhere in that
+path. (This is distinct from the attestation-hash flow in
+[Two-step WASM upgrade](#two-step-wasm-upgrade-issue-198), which binds a WASM
+hash for upgrades, not an identity claim.)
+
+`src/oracle_proof.rs` adds the missing signature-check primitive:
+
+- `set_oracle_allowlist(env, admin, pubkeys)` — admin-gated; replaces the set
+  of Ed25519 public keys whose signatures are accepted.
+- `get_oracle_allowlist(env)` — public read of the current allowlist.
+- `OracleProof { oracle_pubkey, message, signature, expires_at }` — a signed
+  attestation from an off-chain oracle.
+- `verify_with_proof(env, proof)` — checks, in order: the signing key is on
+  the allowlist (`NotAuthorized` if not, including an empty allowlist),
+  the proof has not expired (`expires_at == 0` disables the check —
+  production callers should always set a real value), and finally that
+  `signature` is a valid Ed25519 signature over `message` under
+  `oracle_pubkey`.
+
+**Invalid proof fails.** An unallowlisted key or an expired proof returns
+`Err(ContractError::NotAuthorized)`. An allowlisted key with a signature that
+does not verify traps the host invocation instead of returning `Err` —
+`soroban_sdk`'s `Env::crypto().ed25519_verify` has no non-panicking form, so
+this fails the exact same way an invalid `require_auth()` signature already
+does everywhere else in this contract. Tests in `src/oracle_proof.rs` cover
+both failure shapes with a fixed test keypair (`valid_allowlisted_proof_passes`,
+`non_allowlisted_key_is_rejected`, `expired_proof_is_rejected`,
+`tampered_signature_traps`).
+
+**This is a signature-check interface, not GitHub verification.** The
+contract has no way to talk to the GitHub API and this change does not give
+it one — see **Out of Scope** above, which still applies unchanged. What an
+oracle signs, and how it constructs `message` (e.g. binding a specific
+`github_username` + `stellar_address` + expiry into the signed bytes so a
+proof can't be replayed against a different subject), is an off-chain
+contract between the oracle operator and whoever consumes its proofs; it is
+not parsed or enforced by `verify_with_proof` itself.
+
+**Explicitly out of scope:**
+
+- Wiring a valid `OracleProof` into `verify()`/`batch_verify()` as an
+  alternative to admin/`Role::Verifier` auth. This module ships the
+  primitive and its tests; integrating it into the verification entry
+  points is separate follow-up work.
+- Running a production GitHub oracle service that produces these proofs.
+
+---
+
 ## Responsible Disclosure
 
 If you discover a security vulnerability:
