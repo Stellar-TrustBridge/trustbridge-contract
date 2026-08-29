@@ -14,3 +14,6 @@ compatible corrections.
   attestation, admin transfer, challenge-period, health, and network-tagging
   interfaces.
 - Initial event and public type reference captured in [docs/ABI.md](docs/ABI.md).
+
+<!-- changelog-check: skip - Added get_verification_config() docs entry and VerificationConfiguredEvent to docs/ABI.md; both were already implemented under the 1.0.0 ABI (config observability follow-up), no version bump. -->
+

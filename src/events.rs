@@ -1,4 +1,4 @@
-use soroban_sdk::{contractevent, Address, BytesN, String};
+use soroban_sdk::{contractevent, Address, BytesN, String, Symbol};
 
 use crate::domain::EventDomain;
 
@@ -313,6 +313,19 @@ pub struct RotationCancelledEvent {
     #[topic]
     pub github_username: String,
     pub cancelled_by: Address,
+    pub timestamp: u64,
+}
+
+/// Emitted when the verification parameters are configured via
+/// `config_verification`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerificationConfiguredEvent {
+    #[topic]
+    pub admin: Address,
+    pub attestation: Symbol,
+    pub expires_in: u64,
+    pub threshold: u32,
     pub timestamp: u64,
 }
 

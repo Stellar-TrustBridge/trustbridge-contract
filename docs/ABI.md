@@ -841,18 +841,25 @@ Boundary tests: `test_paginated_export_at_max_page_limit`,
 
 ### `config_verification(caller: Address, attestation: Symbol, expires_in: u64, threshold: u32) -> Result<(), ContractError>`
 
-Stores the verification configuration parameters (attestation symbol, expiration window, and threshold). Can only be called once by the contract admin.
+Stores the verification configuration parameters (attestation symbol, expiration window, and threshold). Can only be called once by the contract admin. Emits `VerificationConfiguredEvent` on success.
 
 | | |
 |---|---|
 | **Auth** | Admin |
 | **Mutates** | Yes |
+| **Events** | `VerificationConfiguredEvent` |
 | **Errors** | `NotInitialized`, `Paused`, `NotAuthorized`, `AlreadyInitialized` |
 
 ```bash
 stellar contract invoke --id $ID --source admin --network testnet --send=yes \
   -- config_verification --caller G... --attestation github_att --expires-in 3600 --threshold 2
 ```
+
+---
+
+### `get_verification_config() -> Option<VerificationConfig>`
+
+Returns the stored verification configuration (`attestation`, `expires_in`, `threshold`), or `None` if `config_verification` has not been called yet. Read-only; no auth required.
 
 ---
 
@@ -1423,6 +1430,21 @@ compatibility surface.
 |------|----------------|
 | `test_verification_revoked_event_payload_is_complete` | Full event list matches: topic symbol, `github_username` topic, `stellar_address`, `timestamp`, and `reason_code` in data |
 | `test_verification_revoked_event_not_published_on_not_verified` | **Failure path**: `NotVerified` must not publish an event |
+
+### VerificationConfiguredEvent
+
+```
+topics: ["verification_configured_event", admin]
+data:   { attestation, expires_in, threshold, timestamp }
+```
+
+Emitted by `config_verification` on the (one-time) successful write of the
+verification parameters. The same values are readable afterwards via
+`get_verification_config`.
+
+| Test | What it checks |
+|------|----------------|
+| `test_config_verification_emits_event_and_getter_reflects_it` | Full event payload/topics match, and `get_verification_config` returns the values just configured |
 
 ### UpgradedEvent
 

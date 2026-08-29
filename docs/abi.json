@@ -63,6 +63,10 @@
       "signature": "config_verification(caller: Address, attestation: Symbol, expires_in: u64, threshold: u32) -> Result<(), ContractError>"
     },
     {
+      "name": "get_verification_config",
+      "signature": "get_verification_config() -> Option<VerificationConfig>"
+    },
+    {
       "name": "batch_verify",
       "signature": "batch_verify(caller: Address, usernames: Vec<String>) -> Result<BatchSummary, ContractError>"
     },
@@ -296,6 +300,14 @@
         "github_username"
       ],
       "data": "{ stellar_address, timestamp, reason_code }"
+    },
+    {
+      "name": "VerificationConfiguredEvent",
+      "topics": [
+        "\"verification_configured_event\"",
+        "admin"
+      ],
+      "data": "{ attestation, expires_in, threshold, timestamp }"
     },
     {
       "name": "UpgradedEvent",
