@@ -40,6 +40,8 @@ pub use storage::{
 pub use events::{PayoutDelegatedEvent, PayoutDelegationRevokedEvent};
 pub use version::Version;
 
+use crate::storage::get_public_paginated_internal;
+
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, Vec};
 
 use crate::storage::{
@@ -2468,6 +2470,14 @@ impl TrustBridgeContract {
     /// this issue's conformance matrix now guards against, and it has been
     /// removed.
     ///
+    /// **Persistent-chunk reads only (dual-index audit).** This reads from
+    /// [`get_public_paginated_internal`], which walks the persistent chunked
+    /// index directly, rather than [`get_registered_paginated_internal`],
+    /// which loads the whole legacy flat index out of instance storage on
+    /// every call. Being unauthenticated and pause-exempt, this is the path
+    /// most exposed to that cost, so it must never fall back to the flat-index
+    /// scan. See the dual-index audit note in `docs/DASHBOARD_SYNC.md`.
+    ///
     /// # Errors
     ///
     /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
@@ -2478,7 +2488,7 @@ impl TrustBridgeContract {
     ) -> Result<ExportPage, ContractError> {
         require_initialized(&env)?;
 
-        get_registered_paginated_internal(&env, cursor, limit)
+        get_public_paginated_internal(&env, cursor, limit)
     }
 
     /// Toggles contract pause state. Admin-only (Issue #3).
@@ -10936,6 +10946,92 @@ mod test {
                 delegate.clone(),
             );
             assert_eq!(res, Err(ContractError::NotAuthorized));
+        });
+    }
+
+    // ── Dual-index audit: get_public_paginated must read persistent chunks ────
+
+    #[test]
+    fn test_get_public_paginated_returns_all_records_from_chunked_index() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        let names = register_batch(&env, &contract_id, 5);
+
+        env.as_contract(&contract_id, || {
+            let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
+            assert_eq!(page.total, 5);
+            assert_eq!(page.records.len(), 5);
+            assert!(!page.has_more);
+            assert!(page.next_cursor.is_none());
+
+            for i in 0..names.len() {
+                let expected_name = names.get(i).unwrap();
+                let found = page
+                    .records
+                    .iter()
+                    .any(|(name, _record)| name == expected_name);
+                assert!(
+                    found,
+                    "get_public_paginated must surface every chunked-index entry"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn test_get_public_paginated_pages_across_chunk_reads_without_duplicates_or_gaps() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        let names = register_batch(&env, &contract_id, 5);
+
+        let mut collected: Vec<String> = Vec::new(&env);
+        let mut cursor = None;
+        loop {
+            let page = env.as_contract(&contract_id, || {
+                TrustBridgeContract::get_public_paginated(env.clone(), cursor.clone(), 2).unwrap()
+            });
+            for i in 0..page.records.len() {
+                let (name, _record) = page.records.get(i).unwrap();
+                collected.push_back(name);
+            }
+            if !page.has_more {
+                break;
+            }
+            cursor = page.next_cursor;
+        }
+
+        assert_eq!(
+            collected.len(),
+            names.len(),
+            "paging by small limits over the chunked index must yield every record exactly once"
+        );
+        for i in 0..names.len() {
+            let expected_name = names.get(i).unwrap();
+            assert!(collected.iter().any(|n| n == expected_name));
+        }
+    }
+
+    #[test]
+    fn test_get_public_paginated_cursor_from_admin_path_is_interchangeable() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        register_batch(&env, &contract_id, 5);
+
+        env.as_contract(&contract_id, || {
+            // A cursor minted by the admin (flat-index-backed) path must still
+            // decode against the public (chunk-backed) path — both share the
+            // same opaque cursor format and index generation.
+            let admin_page =
+                TrustBridgeContract::get_registered_paginated(env.clone(), None, 2).unwrap();
+            assert!(admin_page.next_cursor.is_some());
+
+            let public_page = TrustBridgeContract::get_public_paginated(
+                env.clone(),
+                admin_page.next_cursor,
+                2,
+            )
+            .unwrap();
+            assert_eq!(public_page.records.len(), 2);
         });
     }
 }

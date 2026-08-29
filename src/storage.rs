@@ -1014,6 +1014,102 @@ pub fn get_registered_paginated_internal(
     })
 }
 
+/// Bounded page of `(username, record)` pairs read only from the
+/// **persistent chunked index** — never the legacy flat index.
+///
+/// Audit finding (DASHBOARD_SYNC.md dual-index audit): `get_registered_paginated_internal`
+/// above loads the *entire* flat index (`INDEX_KEY`, one `env.storage().instance()`
+/// entry) via `get_index` on every call, before slicing out the requested
+/// window. That instance-storage entry grows with the whole registry, so
+/// every paginated read pays a cost proportional to registry size — exactly
+/// what the chunked index (Issue #2) was introduced to avoid. `get_public_paginated`
+/// is unauthenticated and stays callable while the contract is paused, which
+/// makes it the path most exposed to that cost, so it reads from here instead:
+/// this function walks only the persistent chunks needed to cover
+/// `[offset, offset + limit)` and never deserializes the flat index.
+///
+/// Uses the same opaque cursor encoding and the same index-generation
+/// invalidation as `get_registered_paginated_internal`, so a cursor issued by
+/// either path decodes here (see [`decode_cursor`]).
+///
+/// # Errors
+///
+/// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+/// - [`ContractError::InvalidCursor`] if `cursor` is `Some` and fails to
+///   decode against the current index generation or registry size.
+pub fn get_public_paginated_internal(
+    env: &Env,
+    cursor: Option<BytesN<8>>,
+    limit: u32,
+) -> Result<ExportPage, ContractError> {
+    require_initialized(env)?;
+
+    let offset = match cursor {
+        Some(c) => decode_cursor(env, &c)?,
+        None => 0,
+    };
+
+    let effective_limit = if limit == 0 {
+        DEFAULT_PAGE_LIMIT
+    } else {
+        limit.min(MAX_PAGE_LIMIT)
+    };
+
+    let total_count = get_count(env);
+    let mut records = Vec::new(env);
+
+    if offset >= total_count {
+        return Ok(ExportPage {
+            records,
+            next_cursor: None,
+            total: total_count,
+            has_more: false,
+            merkle_root: crate::merkle::empty_root(env),
+        });
+    }
+
+    let chunk_cnt = get_chunk_count(env);
+    let mut seen: u32 = 0;
+    let mut end: u32 = offset;
+
+    'chunks: for c in 0..chunk_cnt {
+        let chunk = get_chunk(env, c);
+        for i in 0..chunk.len() {
+            if seen >= offset && records.len() < effective_limit {
+                if let Some(username) = chunk.get(i) {
+                    if let Some(record) = get_record(env, &username) {
+                        records.push_back((username, record));
+                    }
+                }
+            }
+            seen = seen.saturating_add(1);
+            if records.len() >= effective_limit {
+                end = seen;
+                break 'chunks;
+            }
+        }
+    }
+    if records.len() < effective_limit {
+        end = seen;
+    }
+
+    let next_cursor = if end < total_count {
+        Some(encode_cursor(env, end))
+    } else {
+        None
+    };
+    let has_more = next_cursor.is_some();
+    let merkle_root = crate::merkle::root_of_records(env, &records);
+
+    Ok(ExportPage {
+        records,
+        next_cursor,
+        total: total_count,
+        has_more,
+        merkle_root,
+    })
+}
+
 /// Builds the deterministic digest used by [`ExportAttestation`] (Issue #223).
 ///
 /// Hashes `page`'s full XDR encoding with SHA-256. XDR encoding of a

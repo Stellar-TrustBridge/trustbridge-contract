@@ -248,3 +248,59 @@ Calling `remove`:
 - Cleans up the username from the index list chunks.
 - Decrements the active registration counter and verified counter (if verified).
 - Emits a `RemovedEvent`.
+
+---
+
+## Dual-index audit: public pagination and instance-storage scans (archival note)
+
+The registry maintains **two** parallel username indexes (`storage.rs`):
+
+1. **Legacy flat index** (`INDEX_KEY`) — a single `Vec<String>` in
+   **instance** storage. Every username ever added lives in one entry.
+2. **Chunked index** (`CHUNK_KEY`, 50 usernames per chunk, Issue #2) — split
+   across many **persistent** storage entries specifically so no single
+   storage entry grows unbounded with the registry.
+
+### Audit finding
+
+Before this fix, both `get_registered_paginated` (admin) and
+`get_public_paginated` (public, unauthenticated, available even while
+paused) resolved through the same internal helper,
+`get_registered_paginated_internal`, which calls `get_index(env)` —
+deserializing the **entire flat instance-storage index** on every single
+call, then slicing out the requested `[offset, limit)` window in memory.
+That is an instance scan: its cost scales with total registry size
+regardless of how small a page is requested, which is precisely the
+failure mode the chunked index was introduced to avoid.
+
+`get_public_paginated` is the higher-risk half of that shared path — it
+takes no auth and stays callable during a pause, so anyone can trigger the
+full-index deserialization on every dashboard/indexer poll.
+
+### Fix
+
+`get_public_paginated` now reads from a new `get_public_paginated_internal`
+(`storage.rs`), which walks only the **persistent chunks** needed to cover
+the requested page and never touches `INDEX_KEY`. It:
+
+- Uses the identical opaque cursor encoding and index-generation
+  invalidation as the admin path (`decode_cursor`/`encode_cursor`), so a
+  cursor minted by either endpoint decodes correctly on the other —
+  callers do not need to know which path issued a cursor.
+- Leaves `get_registered_paginated` (admin, already access-gated and far
+  lower call volume) on the existing flat-index path unchanged.
+
+**Confirmed by audit:** no other public/unauthenticated read path performs
+a flat-index or full-registry scan. `has_record`, `get_address`,
+`get_address_if_verified`, and `get_pending_reverify` all key directly on
+`(REG_KEY, github_username)` and never touch either index. `get_all_registered`
+and `get_registered_paginated` are admin-gated exports, not public reads, and
+are out of scope for this audit.
+
+### What this means for indexers
+
+No behavior change is required on the consumer side — `get_public_paginated`'s
+request/response shape, cursor semantics, and pause-availability are
+unchanged. This note exists so a future audit of read-path costs can
+confirm the public path stays chunk-backed rather than regressing back to
+an instance-storage scan.
