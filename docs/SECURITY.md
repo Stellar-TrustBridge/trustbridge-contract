@@ -26,6 +26,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Compromised or unpinned RPC client dependency | Crate validation checklist below |
 | Compromised Verifier key silently revoking payout eligibility | `Role::Verifier` and `Role::Revoker` are distinct — Issue #212 |
 | Admin force-removing a name without a grace period | Challenge flow enforces on-chain `resolve_after` delay — Issue #214 |
+| A deployed contract calling an admin export to exfiltrate the full registry | `admin.require_auth()` runs before any read; a cross-contract caller executes in its own auth context and cannot present the admin's signature — see [Cross-Contract Callers and Admin Exports](#cross-contract-callers-and-admin-exports) (Issue #295 / #149) |
 
 ### Out of Scope (handled off-chain)
 
@@ -35,6 +36,58 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Username squatting policy | Social/process layer; contract allows first-come registration |
 | Admin key compromise | Operational security; use multisig for admin address |
 | GitHub username changes | Off-chain mapping updates; may require re-registration |
+
+---
+
+## Cross-Contract Callers and Admin Exports
+
+A sibling contract (for example, a payout contract) may call this registry
+cross-contract. `src/version.rs` exposes `CROSS_CONTRACT_READ_MIN_VERSION` /
+`Version::supports_cross_contract_reads()` so such a caller can assert
+compatibility the same way it does for `batch_verify`.
+
+### Read surface exposed to a contract caller (Issue #149)
+
+These functions are read-only (no `.set` / `.remove`) and require **no
+authorization** beyond the standard pause guard where noted, so a calling
+contract can invoke them with no signature from the registry admin or any
+registrant:
+
+| Function | Notes |
+|---|---|
+| `get_address(github_username)` | Core identity lookup |
+| `has_record(github_username)` | Cheap existence check |
+| `get_record_proof(github_username)` | Light-client existence proof |
+| `get_public_paginated(cursor, limit)` | Paginated read; returns `Paused` while the registry is paused |
+| `get_stats()` | `{ total, verified, ever_verified }` |
+| `get_verified_count()` / `get_ever_verified_count()` | Live / monotonic counts |
+| `get_role(address)` | RBAC lookup, e.g. to gate a payout on `Role::Verifier` |
+| `is_paused()` / `is_contract_paused()` | Pause-state check |
+| `is_registration_in_cooldown(github_username)` | Cooldown-window check |
+| `version()` / `is_compatible(major, minor, patch)` | Version handshake |
+| `max_username_len()` / `is_username_valid(...)` / `usernames_match(...)` | Pure validation helpers |
+
+The canonical copy of this list lives in `docs/ABI.md` §
+*Cross-Contract Read Interface*; keep the two in sync.
+
+### Admin exports are **not** part of that surface
+
+`get_all_registered`, `get_registered_page`, and `get_registered_paginated`
+each call `admin.require_auth()` before touching storage. A cross-contract
+invocation executes in the **calling** contract's authorization context — it
+cannot supply the registry admin's signature — so these calls fail auth when
+invoked from another contract, regardless of the caller's identity or how the
+test environment mocks auth. This is deliberate: the registry has no
+"trusted contract" allowlist, so a widened export surface would let *any*
+deployed contract exfiltrate the entire registry, not just an intended
+consumer. A sibling contract that needs a bulk export must go through the
+admin's own off-chain tooling.
+
+This is enforced by tests, not left as a comment:
+`tests/integration.rs::cross_contract_caller_cannot_run_get_registered_paginated`,
+`…_get_registered_page`, `…_get_all_registered`, and
+`cross_contract_public_read_surface_is_reachable` (the positive control), plus
+`src/version.rs::test_export_paginated_requires_admin_auth`.
 
 ---
 

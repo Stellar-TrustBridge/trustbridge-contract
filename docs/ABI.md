@@ -1607,6 +1607,14 @@ cross-contract call. This is deliberate: the registry has no notion of a
 deployed contract could exfiltrate the full registry, not just the intended
 consumer.
 
+This deny is covered by tests, not just this note:
+`tests/integration.rs::cross_contract_caller_cannot_run_get_registered_paginated`,
+`…_get_registered_page`, and `…_get_all_registered` assert a contract caller
+fails auth on every admin export, while
+`cross_contract_public_read_surface_is_reachable` confirms the read surface
+above stays callable. See also `docs/SECURITY.md` §
+*Cross-Contract Callers and Admin Exports*.
+
 ### Example: a hypothetical payout contract reading verification status
 
 ```rust
