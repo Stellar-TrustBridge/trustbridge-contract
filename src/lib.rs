@@ -37,6 +37,7 @@ pub use storage::{
     VerificationConfig, VerifierAllowEntry, WasmAttestation, WasmProvenance, PauseReason,
     MAX_VERIFIERS,
 };
+pub use storage::RepairReport;
 pub use version::Version;
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, Vec};
@@ -3723,6 +3724,32 @@ impl TrustBridgeContract {
 
         let chunks_written = crate::storage::compact_chunked_index(&env);
         Ok(chunks_written)
+    }
+
+    // ── Index repair (admin) ────────────────────────────────────────────────
+
+    /// Recomputes `count` and `verified` from the chunked username index and
+    /// each entry's stored record, independent of the counters themselves.
+    /// Admin-only.
+    ///
+    /// Pass `apply = false` for a dry run: nothing is written, only the
+    /// [`RepairReport`] comparing stored vs. recomputed values is returned.
+    /// Pass `apply = true` to have any drift corrected in the same call — a
+    /// call that finds no drift never writes, even with `apply = true`.
+    /// This is never run automatically on any other entry point; see
+    /// `docs/SECURITY.md#index-repair-repair_index` for when an operator
+    /// should reach for it.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
+    pub fn repair_index(env: Env, apply: bool) -> Result<RepairReport, ContractError> {
+        require_initialized(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        Ok(crate::storage::repair_index(&env, apply))
     }
 }
 

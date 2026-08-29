@@ -2291,3 +2291,81 @@ pub fn is_batch_remove_proposal_expired(env: &Env, proposal: &PendingBatchRemove
             .proposed_at
             .saturating_add(BATCH_REMOVE_PROPOSAL_TTL_SECS)
 }
+
+// ── Index repair (admin) ──────────────────────────────────────────────────────
+
+/// Report returned by `repair_index`: what `count` / `verified` currently say
+/// on chain versus what a fresh walk of the chunked index and every stored
+/// record says they should be.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+pub struct RepairReport {
+    /// `count` as stored on chain before this call.
+    pub stored_count: u32,
+    /// `count` recomputed by walking every chunk and counting entries that
+    /// still have a live record.
+    pub recomputed_count: u32,
+    /// `verified` as stored on chain before this call.
+    pub stored_verified: u32,
+    /// `verified` recomputed the same way, counting only entries whose
+    /// record has `verified == true`.
+    pub recomputed_verified: u32,
+    /// Whether either stored counter disagreed with the recomputed value.
+    pub drifted: bool,
+    /// Whether the stored counters were overwritten with the recomputed
+    /// values by this call. Always `false` when `apply` was `false` (dry
+    /// run) or when no drift was found — a clean report never writes, even
+    /// with `apply == true`.
+    pub applied: bool,
+}
+
+/// Recomputes `count` and `verified` from the chunked username index and
+/// each entry's stored record, independent of the counters themselves — so
+/// it reports correctly even if `count` or `verified` have already drifted.
+///
+/// With `apply == false` this is a dry run: nothing is written, only a
+/// [`RepairReport`] is returned. With `apply == true`, the stored counters
+/// are corrected to the recomputed values, but only if drift was actually
+/// found. Never touches the flat index, individual records, or the chunked
+/// index itself — only the two aggregate counters.
+///
+/// See `docs/SECURITY.md#index-repair-repair_index` for when an operator
+/// should reach for this instead of trusting the live counters.
+pub fn repair_index(env: &Env, apply: bool) -> RepairReport {
+    let chunk_count = get_chunk_count(env);
+    let mut recomputed_count: u32 = 0;
+    let mut recomputed_verified: u32 = 0;
+
+    for c in 0..chunk_count {
+        let chunk = get_chunk(env, c);
+        for i in 0..chunk.len() {
+            if let Some(username) = chunk.get(i) {
+                if let Some(record) = get_record(env, &username) {
+                    recomputed_count = recomputed_count.saturating_add(1);
+                    if record.verified {
+                        recomputed_verified = recomputed_verified.saturating_add(1);
+                    }
+                }
+            }
+        }
+    }
+
+    let stored_count = get_count(env);
+    let stored_verified = get_verified_count(env);
+    let drifted = stored_count != recomputed_count || stored_verified != recomputed_verified;
+    let applied = apply && drifted;
+
+    if applied {
+        set_count(env, recomputed_count);
+        set_verified_count(env, recomputed_verified);
+    }
+
+    RepairReport {
+        stored_count,
+        recomputed_count,
+        stored_verified,
+        recomputed_verified,
+        drifted,
+        applied,
+    }
+}
