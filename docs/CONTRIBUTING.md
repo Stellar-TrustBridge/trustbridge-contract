@@ -252,6 +252,27 @@ cargo test --features wasm-test --test integration -- \
 
 This test is automatically run in CI as part of the `wasm-integration-test` job.
 
+### Register instruction budget report
+
+`test_report_register_budget_samples` (in `src/lib.rs`) measures the metered CPU
+instructions and memory used by `register`, for a baseline username and a
+max-length username, and prints them as CSV.
+
+Run it locally, checked against the configured thresholds:
+
+```bash
+make bench-register-budget
+```
+
+Thresholds are configurable via `REGISTER_BUDGET_CPU_MAX` / `REGISTER_BUDGET_MEM_MAX`
+make variables (see `Makefile`).
+
+In CI, the `quality` job runs this test, publishes the results as a job summary
+table, and uploads the raw CSV as the `register-budget-report` build artifact
+(14-day retention). This check is **advisory**: the step is allowed to fail
+(`continue-on-error`) without failing the overall job, so a cap breach is
+visible in the CI summary and artifact without blocking merges.
+
 ---
 
 ## Snapshot Stabilization Policy
