@@ -38,7 +38,18 @@ reference and migration guide from manual probing.
 | `src/lib.rs` | Public contract interface (`TrustBridgeContract`), business logic, unit tests |
 | `src/storage.rs` | Storage keys, `ContributorRecord` / `Stats` types, persistence helpers |
 | `src/events.rs` | Soroban contract events with topics |
-| `src/error.rs` | Typed error enum (`ContractError`) |
+| `src/error.rs` | Typed error enum (`ContractError`) and off-chain retry classification (`ErrorCategory`) |
+| `src/audit.rs` | Append-only audit-log entry type and helpers |
+| `src/batch.rs` | Batch-operation config and size limits (`BatchConfig`) |
+| `src/domain.rs` | `EventDomain` (contract id, network id, version) attached to every event |
+| `src/utils.rs` | Username validation and other pure helpers |
+| `src/version.rs` | Contract version type, compatibility checks, cross-contract read gating |
+
+> There is no separate registry-read module. During a migration window the
+> on-chain registry is the single source of truth and off-chain consumers read
+> it directly through the public read surface (see `docs/ABI.md` §
+> Cross-Contract Read Interface); a `registry_read_stub.rs` trait fixture was
+> staged for this and removed as unused (Issue #297).
 
 ---
 

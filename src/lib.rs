@@ -14,8 +14,6 @@ mod batch;
 mod domain;
 mod error;
 mod events;
-mod merkle;
-mod registry_read_stub;
 mod storage;
 mod utils;
 mod version;
