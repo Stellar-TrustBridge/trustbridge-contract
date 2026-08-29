@@ -33,6 +33,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+exec python3 "$ROOT/scripts/export_registry.py" "$@"
+
 NETWORK="${NETWORK:-testnet}"
 SOURCE="${SOURCE:-}"
 CONTRACT_ID="${CONTRACT_ID:-}"

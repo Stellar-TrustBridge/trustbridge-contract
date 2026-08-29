@@ -56,6 +56,29 @@ Before sharing a testnet deployment, confirm the full registry lifecycle. Run ev
     make invoke-lookup GITHUB_USER=testuser SOURCE=deployer CONTRACT_ID=$CONTRACT_ID
     ```
 
+## Optional CI live smoke
+
+The repository has an opt-in GitHub Actions job for checking Stellar RPC and
+argument encoding against a pre-deployed testnet contract. It is invoke-only:
+it does not deploy or initialize a contract, so it cannot accidentally call
+`initialize` twice. Enable it by setting the repository variable
+`TRUSTBRIDGE_LIVE_TESTNET` to `true`.
+
+Configure these repository values before enabling it:
+
+| Name | Type | Description |
+|------|------|-------------|
+| `TRUSTBRIDGE_LIVE_TESTNET` | Variable | Must be `true` to enable the job |
+| `TRUSTBRIDGE_TESTNET_USERNAME` | Variable | Existing username used by `get_address` |
+| `TRUSTBRIDGE_TESTNET_CONTRACT_ID` | Secret | Pre-deployed testnet contract ID |
+| `TRUSTBRIDGE_TESTNET_SECRET_KEY` | Secret | Testnet source account secret key |
+
+The job imports the secret key into an ephemeral `ci-testnet` Stellar CLI
+identity, then invokes `get_stats` and `get_address` on `testnet`. It runs only
+for non-PR events in the canonical repository, so fork pull requests never
+receive repository secrets. If the opt-in variable is enabled and any required
+value is missing, the job fails closed.
+
 ## Post-checklist
 
 - Record the contract ID, network passphrase, deployer address, admin address, and commit hash used. Store these in `deployments/testnet.json` or a runbook.
