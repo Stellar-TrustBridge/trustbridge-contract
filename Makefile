@@ -24,8 +24,9 @@ PKG_MANAGER  ?= pnpm
 EXPORT_FILE ?= registry-export-$(NETWORK).json
 ADMIN_SOURCE ?=
 WASM_SIZE_LIMIT ?= 204800
+WASM ?=
 
-.PHONY: help build build-legacy test test-rehearsal test-scale fuzz bench bench-export bench-username bench-double-verify bench-register-budget fmt lint docs docs-check check ci clean \
+.PHONY: help build build-legacy test test-rehearsal fuzz bench bench-export bench-username bench-double-verify bench-register-budget fmt lint docs docs-check abi check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
         export-registry validate-registry
@@ -104,6 +105,9 @@ docs: ## Build rustdoc for public API (opens in browser)
 docs-check: ## Build rustdoc without opening browser (CI-equivalent)
 	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 
+abi: ## Generate the machine-readable ABI JSON artifact
+	python3 scripts/generate_abi_json.py
+
 wasm-size: build ## Report release WASM size and check against budget (WASM_SIZE_LIMIT)
 	@if [ -f $(WASM_V1) ]; then \
 		WASM=$(WASM_V1); \
@@ -164,15 +168,21 @@ clean: ## Remove build artifacts
 	cargo clean
 	rm -rf target/wasm32v1-none target/wasm32-unknown-unknown $(BINDINGS_DIR)
 
-bindings: ## Generate the TypeScript bindings package (CONTRACT_ID required)
-	@if [ -z "$(CONTRACT_ID)" ]; then \
-		echo "Set CONTRACT_ID=<C...> to generate bindings."; exit 1; \
+bindings: ## Generate TypeScript bindings from WASM or CONTRACT_ID
+	@if [ -n "$(WASM)" ]; then \
+		$(STELLAR) contract bindings typescript \
+			--wasm "$(WASM)" \
+			--output-dir $(BINDINGS_DIR) \
+			--overwrite; \
+	elif [ -n "$(CONTRACT_ID)" ]; then \
+		$(STELLAR) contract bindings typescript \
+			--network $(NETWORK) \
+			--contract-id $(CONTRACT_ID) \
+			--output-dir $(BINDINGS_DIR) \
+			--overwrite; \
+	else \
+		echo "Set WASM=<path> or CONTRACT_ID=<C...> to generate bindings."; exit 1; \
 	fi
-	$(STELLAR) contract bindings typescript \
-		--network $(NETWORK) \
-		--contract-id $(CONTRACT_ID) \
-		--output-dir $(BINDINGS_DIR) \
-		--overwrite
 
 bindings-build: bindings ## Generate and build the TypeScript bindings package
 	cd $(BINDINGS_DIR) && $(PKG_MANAGER) install && $(PKG_MANAGER) run build

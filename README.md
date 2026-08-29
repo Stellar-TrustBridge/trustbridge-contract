@@ -180,7 +180,9 @@ the toolchain with `stellar --version` and
 
 ## Deploy to Testnet
 
-Full walkthrough: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+Full walkthrough: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). After deployment,
+follow the [Stellar Expert WASM verification recipe](docs/DEPLOYMENT.md#explorer-verification)
+to compare the explorer's SHA-256 hash with `wasm-hash.pin`.
 
 ```bash
 # 1. Create and fund a testnet account

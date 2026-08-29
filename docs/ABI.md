@@ -2,6 +2,11 @@
 
 Complete interface reference for **trustbridge-contract**.
 
+Machine-readable ABI: [abi.json](abi.json). It contains the documented public
+function signatures, `ContractError` codes, and event topic/data declarations.
+The file is generated with `make abi`; do not hand-edit it. Regenerate it when
+updating this document, then include both files in the same change.
+
 Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPLOYMENT](DEPLOYMENT.md)
 
 ---
@@ -1566,6 +1571,25 @@ make bindings-build CONTRACT_ID=$CONTRACT_ID NETWORK=testnet   # also installs a
 
 The output directory is git-ignored. Generated bindings are a build artifact,
 not source: regenerate them after every deploy rather than committing them.
+CI generates bindings from the exact WASM artifact built in the quality job and
+publishes them as the `trustbridge-typescript-bindings` workflow artifact for
+14 days. On a pull request, download that artifact from the workflow run when
+you need to consume the proposed ABI; do not copy generated files into the
+repository.
+
+For local generation from a release artifact, use the Makefile target without
+requiring a deployed contract ID:
+
+```bash
+make bindings WASM=target/wasm32v1-none/release/trustbridge_contract.wasm
+```
+
+The existing `CONTRACT_ID` form remains available for generating from a
+deployed contract:
+
+```bash
+make bindings CONTRACT_ID=$CONTRACT_ID NETWORK=testnet
+```
 
 ### Version handshake
 
