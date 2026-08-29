@@ -120,6 +120,13 @@ pub fn classify_error(error: ContractError) -> ErrorCategory {
         ContractError::NoRotationPending => ErrorCategory::Validation,
         ContractError::RotationNotReady => ErrorCategory::Transient,
         ContractError::UsernameTaken => ErrorCategory::Validation,
+        ContractError::AdminTransferPending => ErrorCategory::Validation,
+        ContractError::AdminTransferDelayActive => ErrorCategory::Transient,
+        ContractError::NoPendingAdminTransfer => ErrorCategory::Validation,
+        ContractError::FallbackListFull => ErrorCategory::Validation,
+        // Transient: restarting pagination from `cursor = None` after a
+        // removal invalidates the old cursor is expected to succeed.
+        ContractError::InvalidCursor => ErrorCategory::Transient,
     }
 }
 

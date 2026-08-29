@@ -6,6 +6,17 @@ use soroban_sdk::{symbol_short, Address, BytesN, Env, String, Symbol, Vec};
 
 use crate::ContractError;
 
+/// Canonical storage key for a GitHub username (Issue #194).
+///
+/// Every persistent key namespaced by a username — `reg`, `chllng`,
+/// `pend_rev`, `lastact`, `pendrot` — is built from this canonical form, so
+/// `Alice`, `ALICE`, and `alice` all resolve to the same underlying entry. See
+/// `docs/SECURITY.md#username-case-folding` for the fold rule (ASCII lower)
+/// and the squatting scenario this closes.
+fn canon(env: &Env, username: &String) -> String {
+    crate::utils::canonicalize_username(env, username)
+}
+
 pub const VER_CFG_KEY: Symbol = symbol_short!("vrfy_cfg");
 
 // ── Storage keys ────────────────────────────────────────────────────────────
@@ -78,6 +89,12 @@ pub const MAX_ROLE_PAGE_LIMIT: u32 = 50;
 /// Key prefix for chunked username index entries.
 pub const CHUNK_KEY: Symbol = symbol_short!("chunk");
 pub const CHUNK_CNT_KEY: Symbol = symbol_short!("chkcnt");
+/// Monotonic counter bumped every time the flat index's existing positions
+/// shift — i.e. on every removal (Issue #215). An opaque pagination cursor
+/// embeds the generation at issue time; `decode_cursor` rejects a cursor
+/// whose generation no longer matches, rather than silently resuming at a
+/// drifted offset.
+pub const INDEX_GEN_KEY: Symbol = symbol_short!("idx_gen");
 pub const LAST_ACT_KEY: Symbol = symbol_short!("lastact");
 /// Key for the WASM provenance record (Wave #24).
 pub const PROV_KEY: Symbol = symbol_short!("prov");
@@ -375,15 +392,28 @@ pub struct Stats {
 /// `next_cursor` is `None` when this is the last page. Pass it as `cursor` to
 /// the next call to advance the page. `has_more` mirrors `next_cursor.is_some()`
 /// for clients that prefer a boolean sentinel.
+///
+/// `next_cursor` is an **opaque** token (Issue #215): callers must not
+/// construct one themselves or interpret its bytes — pass back exactly what
+/// the contract returned. It embeds the index generation at issue time, so a
+/// cursor becomes invalid (`ContractError::InvalidCursor`) rather than
+/// silently skipping or duplicating records if a username was removed from
+/// the registry after the cursor was issued. See `docs/DASHBOARD_SYNC.md`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[soroban_sdk::contracttype]
 pub struct ExportPage {
     /// Records in this page: `(github_username, ContributorRecord)` pairs.
     pub records: Vec<(String, ContributorRecord)>,
-    /// Cursor to pass to the next call, or `None` if this is the last page.
-    pub next_cursor: Option<u32>,
+    /// Opaque cursor to pass to the next call, or `None` if this is the last
+    /// page. See the struct docs — never construct or decode this yourself.
+    pub next_cursor: Option<BytesN<8>>,
     /// Total number of records in the registry at query time.
     pub total: u32,
+    /// Merkle root over `records`, in page order (Issue #216). All-zero for
+    /// an empty page. See `crate::merkle` for the leaf encoding and tree
+    /// construction, so off-chain tooling can build an inclusion proof
+    /// against this root without re-fetching the whole registry.
+    pub merkle_root: BytesN<32>,
     /// `true` if there are more records after this page.
     pub has_more: bool,
 }
@@ -436,11 +466,11 @@ pub struct ChallengeRecord {
 pub fn get_challenge(env: &Env, github_username: &String) -> Option<ChallengeRecord> {
     env.storage()
         .persistent()
-        .get(&(CHALLENGE_KEY, github_username.clone()))
+        .get(&(CHALLENGE_KEY, canon(env, github_username)))
 }
 
 pub fn set_challenge(env: &Env, github_username: &String, record: &ChallengeRecord) {
-    let key = (CHALLENGE_KEY, github_username.clone());
+    let key = (CHALLENGE_KEY, canon(env, github_username));
     env.storage().persistent().set(&key, record);
     env.storage()
         .persistent()
@@ -450,13 +480,40 @@ pub fn set_challenge(env: &Env, github_username: &String, record: &ChallengeReco
 pub fn remove_challenge(env: &Env, github_username: &String) {
     env.storage()
         .persistent()
-        .remove(&(CHALLENGE_KEY, github_username.clone()));
+        .remove(&(CHALLENGE_KEY, canon(env, github_username)));
 }
 
 pub fn has_challenge(env: &Env, github_username: &String) -> bool {
     env.storage()
         .persistent()
-        .has(&(CHALLENGE_KEY, github_username.clone()))
+        .has(&(CHALLENGE_KEY, canon(env, github_username)))
+}
+
+/// Network id recorded at `initialize` (Issue #231), or `None` for an
+/// instance initialized before network tagging existed.
+pub fn get_network_id(env: &Env) -> Option<BytesN<32>> {
+    env.storage().instance().get(&NETWORK_KEY)
+}
+
+/// Records `network_id` as the instance's tag. Overwrites any existing value —
+/// callers are responsible for only calling this when that is intended
+/// (`initialize`, and `adopt_network_tag` for a previously-untagged instance).
+pub fn set_network_id(env: &Env, network_id: &BytesN<32>) {
+    env.storage().instance().set(&NETWORK_KEY, network_id);
+}
+
+/// Fails with [`ContractError::NetworkMismatch`] if a network id was recorded
+/// at `initialize` and it differs from the network this call is executing on.
+///
+/// An instance with no recorded tag (deployed before Issue #231) is treated as
+/// untagged and allowed through — there is nothing to compare against.
+pub fn require_matching_network(env: &Env) -> Result<(), ContractError> {
+    match get_network_id(env) {
+        Some(recorded) if recorded != env.ledger().network_id() => {
+            Err(ContractError::NetworkMismatch)
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Fails unless the contract is initialized **and** running on the network it
@@ -488,7 +545,7 @@ pub fn get_admin(env: &Env) -> Result<Address, ContractError> {
 }
 
 pub fn get_record(env: &Env, github_username: &String) -> Option<ContributorRecord> {
-    let key = (REG_KEY, github_username.clone());
+    let key = (REG_KEY, canon(env, github_username));
     let record: Option<ContributorRecord> = env.storage().persistent().get(&key);
     if record.is_some() {
         env.storage()
@@ -499,7 +556,7 @@ pub fn get_record(env: &Env, github_username: &String) -> Option<ContributorReco
 }
 
 pub fn set_record(env: &Env, github_username: &String, record: &ContributorRecord) {
-    let key = (REG_KEY, github_username.clone());
+    let key = (REG_KEY, canon(env, github_username));
     env.storage().persistent().set(&key, record);
     env.storage()
         .persistent()
@@ -515,7 +572,7 @@ pub fn set_record(env: &Env, github_username: &String, record: &ContributorRecor
 /// Returns whether the entry existed. A missing entry is not an error: the
 /// keeper's list is built off-chain and can lag behind removals.
 pub fn extend_record_ttl(env: &Env, github_username: &String) -> bool {
-    let key = (REG_KEY, github_username.clone());
+    let key = (REG_KEY, canon(env, github_username));
     if !env.storage().persistent().has(&key) {
         return false;
     }
@@ -526,7 +583,7 @@ pub fn extend_record_ttl(env: &Env, github_username: &String) -> bool {
 }
 
 pub fn remove_record(env: &Env, github_username: &String) {
-    let key = (REG_KEY, github_username.clone());
+    let key = (REG_KEY, canon(env, github_username));
     env.storage().persistent().remove(&key);
 }
 
@@ -687,14 +744,14 @@ pub fn set_chunk(env: &Env, chunk_idx: u32, chunk: &Vec<String>) {
 pub fn add_to_index(env: &Env, github_username: &String) {
     // 1. Maintain legacy single-vec index
     let mut index = get_index(env);
-    index.push_back(github_username.clone());
+    index.push_back(canon(env, github_username));
     set_index(env, &index);
 
     // 2. Maintain chunked index
     let chunk_cnt = get_chunk_count(env);
     if chunk_cnt == 0 {
         let mut first_chunk = Vec::new(env);
-        first_chunk.push_back(github_username.clone());
+        first_chunk.push_back(canon(env, github_username));
         set_chunk(env, 0, &first_chunk);
         set_chunk_count(env, 1);
     } else {
@@ -702,11 +759,11 @@ pub fn add_to_index(env: &Env, github_username: &String) {
         let mut last_chunk = get_chunk(env, last_idx);
         if last_chunk.len() >= CHUNK_SIZE {
             let mut new_chunk = Vec::new(env);
-            new_chunk.push_back(github_username.clone());
+            new_chunk.push_back(canon(env, github_username));
             set_chunk(env, chunk_cnt, &new_chunk);
             set_chunk_count(env, chunk_cnt + 1);
         } else {
-            last_chunk.push_back(github_username.clone());
+            last_chunk.push_back(canon(env, github_username));
             set_chunk(env, last_idx, &last_chunk);
         }
     }
@@ -723,16 +780,27 @@ pub fn add_to_index(env: &Env, github_username: &String) {
 /// Covered by `test_remove_last_user_returns_registry_to_empty_state` in
 /// `src/lib.rs`.
 pub fn remove_from_index(env: &Env, github_username: &String) {
+    // The index stores the canonical form (see `add_to_index`), so the
+    // comparison below must fold the same way or a case-variant caller would
+    // silently fail to remove the entry it just looked up.
+    let target = canon(env, github_username);
+
     // 1. Legacy index update
     let index = get_index(env);
     let mut next = Vec::new(env);
     for i in 0..index.len() {
         let username = index.get(i).unwrap();
-        if username != *github_username {
+        if username != target {
             next.push_back(username);
         }
     }
     set_index(env, &next);
+
+    // Every position after the removed entry just shifted back by one, so
+    // any pagination cursor issued before this point is no longer safe to
+    // resume from (Issue #215) — bump the generation so `decode_cursor`
+    // rejects it instead of silently returning drifted results.
+    bump_index_generation(env);
 
     // 2. Chunked index update
     let chunk_cnt = get_chunk_count(env);
@@ -742,7 +810,7 @@ pub fn remove_from_index(env: &Env, github_username: &String) {
         let mut found = false;
         for i in 0..chunk.len() {
             let username = chunk.get(i).unwrap();
-            if username == *github_username {
+            if username == target {
                 found = true;
             } else {
                 new_chunk.push_back(username);
@@ -755,20 +823,87 @@ pub fn remove_from_index(env: &Env, github_username: &String) {
     }
 }
 
+// ── Opaque pagination cursors (Issue #215) ───────────────────────────────────
+
+/// Current index generation. Bumped by [`remove_from_index`] every time an
+/// existing entry's position could shift. Instance-scoped, defaulting to `0`
+/// for a fresh or pre-Issue-#215 instance.
+pub fn get_index_generation(env: &Env) -> u32 {
+    env.storage().instance().get(&INDEX_GEN_KEY).unwrap_or(0)
+}
+
+fn bump_index_generation(env: &Env) {
+    let next = get_index_generation(env).saturating_add(1);
+    env.storage().instance().set(&INDEX_GEN_KEY, &next);
+}
+
+/// Packs a flat-index offset together with the current index generation into
+/// an 8-byte opaque cursor: bytes `0..4` are the offset, bytes `4..8` are the
+/// generation, both big-endian. Callers must treat the result as opaque —
+/// this layout is an internal implementation detail, not a stabilized wire
+/// format.
+fn encode_cursor(env: &Env, offset: u32) -> BytesN<8> {
+    let generation = get_index_generation(env);
+    let mut bytes = [0u8; 8];
+    bytes[0..4].copy_from_slice(&offset.to_be_bytes());
+    bytes[4..8].copy_from_slice(&generation.to_be_bytes());
+    BytesN::from_array(env, &bytes)
+}
+
+/// Decodes and validates a cursor previously returned by this contract.
+///
+/// # Errors
+///
+/// - [`ContractError::InvalidCursor`] if the cursor's embedded generation no
+///   longer matches the current one — meaning a username was removed from
+///   the registry (shifting positions) since the cursor was issued — or if
+///   the embedded offset is past the current registry size. Either way, the
+///   safe recovery is to restart pagination from `cursor = None`; existing
+///   idempotent-upsert indexer logic (see `docs/DASHBOARD_SYNC.md`) makes a
+///   restart safe to replay.
+fn decode_cursor(env: &Env, cursor: &BytesN<8>) -> Result<u32, ContractError> {
+    let bytes = cursor.to_array();
+    let offset = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    let generation = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+
+    if generation != get_index_generation(env) {
+        return Err(ContractError::InvalidCursor);
+    }
+    if offset > get_count(env) {
+        return Err(ContractError::InvalidCursor);
+    }
+    Ok(offset)
+}
+
 // ── Paginated export (Issue #1 & #3) ─────────────────────────────────────────
 
 /// Returns a bounded page of `(username, record)` pairs starting at `cursor`.
+///
+/// `cursor` is `None` to start from the beginning, or a value previously
+/// returned as `ExportPage::next_cursor` to continue — see the opaque-cursor
+/// notes on [`ExportPage`] and [`decode_cursor`] (Issue #215).
 ///
 /// `limit == 0` falls back to `DEFAULT_PAGE_LIMIT`; anything above
 /// `MAX_PAGE_LIMIT` is clamped down to it rather than rejected — a caller
 /// asking for too much gets the largest page the contract allows instead of
 /// an error.
+///
+/// # Errors
+///
+/// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+/// - [`ContractError::InvalidCursor`] if `cursor` is `Some` and fails to
+///   decode against the current index generation or registry size.
 pub fn get_registered_paginated_internal(
     env: &Env,
-    cursor: u32,
+    cursor: Option<BytesN<8>>,
     limit: u32,
 ) -> Result<ExportPage, ContractError> {
     require_initialized(env)?;
+
+    let offset = match cursor {
+        Some(c) => decode_cursor(env, &c)?,
+        None => 0,
+    };
 
     let effective_limit = if limit == 0 {
         DEFAULT_PAGE_LIMIT
@@ -779,19 +914,20 @@ pub fn get_registered_paginated_internal(
     let total_count = get_count(env);
     let mut records = Vec::new(env);
 
-    if cursor >= total_count {
+    if offset >= total_count {
         return Ok(ExportPage {
             records,
             next_cursor: None,
             total: total_count,
             has_more: false,
+            merkle_root: crate::merkle::empty_root(env),
         });
     }
 
     let index = get_index(env);
-    let end = (cursor.saturating_add(effective_limit)).min(index.len());
+    let end = (offset.saturating_add(effective_limit)).min(index.len());
 
-    for i in cursor..end {
+    for i in offset..end {
         if let Some(username) = index.get(i) {
             if let Some(record) = get_record(env, &username) {
                 records.push_back((username, record));
@@ -799,14 +935,20 @@ pub fn get_registered_paginated_internal(
         }
     }
 
-    let next_cursor = if end < index.len() { Some(end) } else { None };
+    let next_cursor = if end < index.len() {
+        Some(encode_cursor(env, end))
+    } else {
+        None
+    };
     let has_more = next_cursor.is_some();
+    let merkle_root = crate::merkle::root_of_records(env, &records);
 
     Ok(ExportPage {
         records,
         next_cursor,
         total: total_count,
         has_more,
+        merkle_root,
     })
 }
 
@@ -909,12 +1051,6 @@ pub fn set_team_index(env: &Env, index: &Vec<String>) {
     env.storage().instance().set(&TEAM_INDEX_KEY, index);
 }
 
-pub fn team_key(env: &Env, org_name: &str, team_name: &str) -> String {
-    let prefix = String::from_str(env, org_name);
-    let suffix = String::from_str(env, team_name);
-    prefix.concat(&suffix.concat(&String::from_str(env, ":")))
-}
-
 pub fn add_to_team_index(env: &Env, key: &String) {
     let mut index = get_team_index(env);
     index.push_back(key.clone());
@@ -931,6 +1067,8 @@ pub fn remove_from_team_index(env: &Env, key: &String) {
         }
     }
     set_team_index(env, &next);
+}
+
 // ── Guardian (Issue #196) ─────────────────────────────────────────────────────
 
 /// Returns the designated guardian address, or `None` if none has been set.
@@ -984,17 +1122,17 @@ pub fn set_paused(env: &Env, paused: bool) {
 /// address, indicating a new off-chain GitHub identity check is needed.
 /// It is cleared when the record is successfully `verify`'d.
 pub fn get_pending_reverify(env: &Env, github_username: &String) -> bool {
-    let key = (PENDING_REVERIFY_KEY, github_username.clone());
+    let key = (PENDING_REVERIFY_KEY, canon(env, github_username));
     env.storage().persistent().get(&key).unwrap_or(false)
 }
 
 pub fn set_pending_reverify(env: &Env, github_username: &String, flag: bool) {
-    let key = (PENDING_REVERIFY_KEY, github_username.clone());
+    let key = (PENDING_REVERIFY_KEY, canon(env, github_username));
     env.storage().persistent().set(&key, &flag);
 }
 
 pub fn clear_pending_reverify(env: &Env, github_username: &String) {
-    let key = (PENDING_REVERIFY_KEY, github_username.clone());
+    let key = (PENDING_REVERIFY_KEY, canon(env, github_username));
     env.storage().persistent().remove(&key);
 }
 
@@ -1089,13 +1227,13 @@ pub fn set_attestation_required(env: &Env, required: bool) {
 pub fn get_last_action(env: &Env, github_username: &String) -> u64 {
     env.storage()
         .persistent()
-        .get(&(LAST_ACT_KEY, github_username.clone()))
+        .get(&(LAST_ACT_KEY, canon(env, github_username)))
         .unwrap_or(0)
 }
 
 /// Records the ledger timestamp of the last mutating action for `github_username`.
 pub fn set_last_action(env: &Env, github_username: &String, timestamp: u64) {
-    let key = (LAST_ACT_KEY, github_username.clone());
+    let key = (LAST_ACT_KEY, canon(env, github_username));
     env.storage().persistent().set(&key, &timestamp);
     env.storage()
         .persistent()
@@ -1529,7 +1667,7 @@ pub fn set_rotation_delay(env: &Env, seconds: u64) {
 }
 
 pub fn get_pending_rotation(env: &Env, github_username: &String) -> Option<PendingRotation> {
-    let key = (PENDING_ROT_KEY, github_username.clone());
+    let key = (PENDING_ROT_KEY, canon(env, github_username));
     let pending: Option<PendingRotation> = env.storage().persistent().get(&key);
     if pending.is_some() {
         env.storage()
@@ -1540,7 +1678,7 @@ pub fn get_pending_rotation(env: &Env, github_username: &String) -> Option<Pendi
 }
 
 pub fn set_pending_rotation(env: &Env, github_username: &String, rotation: &PendingRotation) {
-    let key = (PENDING_ROT_KEY, github_username.clone());
+    let key = (PENDING_ROT_KEY, canon(env, github_username));
     env.storage().persistent().set(&key, rotation);
     env.storage()
         .persistent()
@@ -1550,11 +1688,11 @@ pub fn set_pending_rotation(env: &Env, github_username: &String, rotation: &Pend
 pub fn remove_pending_rotation(env: &Env, github_username: &String) {
     env.storage()
         .persistent()
-        .remove(&(PENDING_ROT_KEY, github_username.clone()));
+        .remove(&(PENDING_ROT_KEY, canon(env, github_username)));
 }
 
 pub fn has_pending_rotation(env: &Env, github_username: &String) -> bool {
     env.storage()
         .persistent()
-        .has(&(PENDING_ROT_KEY, github_username.clone()))
+        .has(&(PENDING_ROT_KEY, canon(env, github_username)))
 }

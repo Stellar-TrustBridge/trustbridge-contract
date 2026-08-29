@@ -15,17 +15,36 @@ use soroban_sdk::contracterror;
 /// | 5 | `AlreadyVerified` | `verify` |
 /// | 6 | `NotVerified` | `revoke_verification` |
 /// | 7 | `Paused` | any state-mutating call while paused |
-/// | 8 | `CooldownActive` | `upgrade` |
+/// | 8 | `CooldownActive` | `upgrade`, `register` |
 /// | 9 | `InvalidVersion` | `migrate` |
 /// | 10 | `InvalidRole` | `set_role` |
 /// | 11 | `InvalidUsername` | `register` |
+/// | 12 | `AttestationExpired` | `attest_upgrade`, `upgrade` |
+/// | 13 | `UnattestedWasm` | `upgrade` |
+/// | 14 | `InvalidBatchSize` | `batch_verify`, `batch_remove` |
 /// | 15 | `InvalidReasonCode` | `revoke_verification` |
 /// | 16 | `ZeroAddress` | `register` |
-/// | 17 | `InvalidPauseReason` | `pause`, `unpause`, `set_paused` |
-/// | 18 | `AlreadyReserved` | `add_reserved` |
-/// | 19 | `NotReserved` | `remove_reserved` |
-/// | 20 | `UsernameReserved` | `register` |
-/// | 21 | `ReservedListFull` | `add_reserved` |
+/// | 17 | `ChallengeAlreadyActive` | `start_challenge` |
+/// | 18 | `NoChallengeActive` | `cancel_challenge`, `complete_challenge` |
+/// | 19 | `ChallengeNotResolvable` | `complete_challenge` |
+/// | 20 | `ChallengeActive` | `register`, `rename` |
+/// | 21 | `InvalidPauseReason` | `pause`, `unpause`, `set_paused` |
+/// | 22 | `AlreadyReserved` | `add_reserved` |
+/// | 23 | `NotReserved` | `remove_reserved` |
+/// | 24 | `UsernameReserved` | `register`, `rename` |
+/// | 25 | `ReservedListFull` | `add_reserved` |
+/// | 26 | `AdminTransferPending` | `propose_admin_transfer`, `execute_admin_transfer` |
+/// | 27 | `AdminTransferDelayActive` | `execute_admin_transfer` |
+/// | 28 | `NoPendingAdminTransfer` | `execute_admin_transfer` |
+/// | 29 | `AttestationRequired` | `upgrade` |
+/// | 30 | `NetworkMismatch` | any gated call on state restored to a different network |
+/// | 31 | `FallbackListFull` | `register`, `register_sponsored` |
+/// | 32 | `RotationRequired` | `register` |
+/// | 33 | `RotationPending` | `request_address_rotation`, `rename` |
+/// | 34 | `NoRotationPending` | `execute_address_rotation`, `cancel_address_rotation` |
+/// | 35 | `RotationNotReady` | `execute_address_rotation` |
+/// | 36 | `UsernameTaken` | `rename` |
+/// | 37 | `InvalidCursor` | `get_registered_paginated`, `get_public_paginated` |
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -40,8 +59,6 @@ pub enum ContractError {
     NotRegistered = 4,
     /// `verify` was called on a username that is already verified.
     AlreadyVerified = 5,
-    InvalidEntityType = 6,
-    OrgNameRequired = 7,
     /// `revoke_verification` was called on a username that is not verified.
     NotVerified = 6,
     /// A state-mutating function was called while the contract is paused.
@@ -96,6 +113,32 @@ pub enum ContractError {
     NoPendingAdminTransfer = 28,
     /// `upgrade` was called without a required attestation (attestation-required mode is on).
     AttestationRequired = 29,
+    /// Instance state was initialized on a different network than the one
+    /// currently executing (Issue #231).
+    NetworkMismatch = 30,
+    /// `register` or `register_sponsored` was called with more fallback
+    /// addresses than `storage::MAX_FALLBACK_ADDRESSES` allows.
+    FallbackListFull = 31,
+    /// `register` attempted a direct address change while an address
+    /// rotation delay is configured (Issue #234); use
+    /// `request_address_rotation` instead.
+    RotationRequired = 32,
+    /// `request_address_rotation` was called while a rotation is already
+    /// pending for this username (Issue #234).
+    RotationPending = 33,
+    /// `execute_address_rotation` or `cancel_address_rotation` was called
+    /// with no pending rotation for this username (Issue #234).
+    NoRotationPending = 34,
+    /// `execute_address_rotation` was called before the rotation's delay has
+    /// elapsed (Issue #234).
+    RotationNotReady = 35,
+    /// `rename` was called with a `new_username` that is already registered.
+    UsernameTaken = 36,
+    /// `get_registered_paginated` / `get_public_paginated` was called with a
+    /// cursor that fails to decode: its embedded index generation no longer
+    /// matches (a username was removed since the cursor was issued), or its
+    /// embedded offset is past the current registry size (Issue #215).
+    InvalidCursor = 37,
 }
 
 impl ContractError {
@@ -140,6 +183,14 @@ impl ContractError {
             27 => Some(ContractError::AdminTransferDelayActive),
             28 => Some(ContractError::NoPendingAdminTransfer),
             29 => Some(ContractError::AttestationRequired),
+            30 => Some(ContractError::NetworkMismatch),
+            31 => Some(ContractError::FallbackListFull),
+            32 => Some(ContractError::RotationRequired),
+            33 => Some(ContractError::RotationPending),
+            34 => Some(ContractError::NoRotationPending),
+            35 => Some(ContractError::RotationNotReady),
+            36 => Some(ContractError::UsernameTaken),
+            37 => Some(ContractError::InvalidCursor),
             _ => None,
         }
     }
