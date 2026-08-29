@@ -1652,6 +1652,185 @@ pub fn has_role_or_admin(env: &Env, address: &Address, expected_role: Role) -> b
     }
 }
 
+// ── Verifier allowlist with on-chain expiry (Issue #293) ─────────────────────
+//
+// `set_role(Verifier)` is unbounded in both time and count. A campaign wants a
+// small, hard-capped allowlist whose members auto-expire. No generic role-expiry
+// mechanism exists in this contract, so expiry is implemented here (composed
+// into the one place it is needed) rather than as a second parallel system.
+//
+// - Stored as a single `Vec<VerifierAllowEntry>` in instance storage. The cap
+//   keeps it tiny, so a full-vector rewrite per mutation is fine.
+// - `expires_at == 0` means "no expiry" (a standing campaign verifier).
+// - Expired entries are pruned lazily on every write, so storage does not
+//   accumulate dead members; `is_active_verifier` also treats a not-yet-pruned
+//   expired entry as inactive, so a read is correct even between writes.
+
+/// Instance key for the verifier allowlist vector (Issue #293).
+pub const VERIFIER_ALLOWLIST_KEY: Symbol = symbol_short!("vfyallow");
+
+/// Hard cap on the number of concurrently allowlisted verifiers (Issue #293).
+pub const MAX_VERIFIERS: u32 = 10;
+
+/// One entry in the verifier allowlist.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+pub struct VerifierAllowEntry {
+    /// The allowlisted verifier address.
+    pub address: Address,
+    /// Ledger timestamp after which this entry is inactive. `0` == no expiry.
+    pub expires_at: u64,
+    /// Ledger timestamp the entry was added or last refreshed.
+    pub added_at: u64,
+}
+
+/// The raw allowlist, including any entries that have expired but not yet been
+/// pruned. Empty when no verifier has ever been allowlisted.
+pub fn get_verifier_allowlist(env: &Env) -> Vec<VerifierAllowEntry> {
+    env.storage()
+        .instance()
+        .get(&VERIFIER_ALLOWLIST_KEY)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+fn set_verifier_allowlist(env: &Env, list: &Vec<VerifierAllowEntry>) {
+    env.storage()
+        .instance()
+        .set(&VERIFIER_ALLOWLIST_KEY, list);
+}
+
+/// `true` when the allowlist has ever been populated. Used to decide whether the
+/// allowlist gates `verify` or the contract is still in pure role-based mode.
+pub fn verifier_allowlist_active(env: &Env) -> bool {
+    env.storage().instance().has(&VERIFIER_ALLOWLIST_KEY)
+}
+
+/// Drop every entry whose expiry has passed. Returns how many were removed.
+pub fn prune_expired_verifiers(env: &Env, now: u64) -> u32 {
+    let list = get_verifier_allowlist(env);
+    let mut kept: Vec<VerifierAllowEntry> = Vec::new(env);
+    let mut removed = 0u32;
+    for e in list.iter() {
+        if e.expires_at != 0 && now >= e.expires_at {
+            removed += 1;
+        } else {
+            kept.push_back(e);
+        }
+    }
+    if removed > 0 {
+        set_verifier_allowlist(env, &kept);
+    }
+    removed
+}
+
+/// Number of entries that are currently active (present and not expired).
+pub fn active_verifier_count(env: &Env, now: u64) -> u32 {
+    let mut n = 0u32;
+    for e in get_verifier_allowlist(env).iter() {
+        if e.expires_at == 0 || now < e.expires_at {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// `true` when `address` is on the allowlist and not expired as of `now`.
+pub fn is_active_verifier(env: &Env, address: &Address, now: u64) -> bool {
+    for e in get_verifier_allowlist(env).iter() {
+        if e.address == *address {
+            return e.expires_at == 0 || now < e.expires_at;
+        }
+    }
+    false
+}
+
+/// Add `address` to the allowlist, or refresh its expiry if already present.
+///
+/// Expired entries are pruned first (so a lapsed member does not consume a
+/// slot). Refreshing an existing member never counts against the cap; adding a
+/// brand-new member does.
+///
+/// # Errors
+///
+/// - [`ContractError::VerifierExpiryInPast`] if `expires_at` is non-zero and not
+///   strictly in the future.
+/// - [`ContractError::VerifierAllowlistFull`] if adding a new member would
+///   exceed [`MAX_VERIFIERS`].
+pub fn add_verifier(
+    env: &Env,
+    address: &Address,
+    expires_at: u64,
+    now: u64,
+) -> Result<(), ContractError> {
+    if expires_at != 0 && expires_at <= now {
+        return Err(ContractError::VerifierExpiryInPast);
+    }
+
+    prune_expired_verifiers(env, now);
+    let list = get_verifier_allowlist(env);
+
+    // Refresh path: address already listed → update expiry in place.
+    let mut next: Vec<VerifierAllowEntry> = Vec::new(env);
+    let mut refreshed = false;
+    for e in list.iter() {
+        if e.address == *address {
+            next.push_back(VerifierAllowEntry {
+                address: address.clone(),
+                expires_at,
+                added_at: now,
+            });
+            refreshed = true;
+        } else {
+            next.push_back(e);
+        }
+    }
+
+    if !refreshed {
+        if next.len() >= MAX_VERIFIERS {
+            return Err(ContractError::VerifierAllowlistFull);
+        }
+        next.push_back(VerifierAllowEntry {
+            address: address.clone(),
+            expires_at,
+            added_at: now,
+        });
+    }
+
+    set_verifier_allowlist(env, &next);
+    Ok(())
+}
+
+/// Remove `address` from the allowlist.
+///
+/// # Errors
+///
+/// - [`ContractError::VerifierNotAllowlisted`] if `address` is not on the list.
+pub fn remove_verifier(env: &Env, address: &Address, now: u64) -> Result<(), ContractError> {
+    let list = get_verifier_allowlist(env);
+    let mut next: Vec<VerifierAllowEntry> = Vec::new(env);
+    let mut found = false;
+    for e in list.iter() {
+        if e.address == *address {
+            found = true;
+        } else if e.expires_at != 0 && now >= e.expires_at {
+            // opportunistically drop other expired entries too
+        } else {
+            next.push_back(e);
+        }
+    }
+    if !found {
+        return Err(ContractError::VerifierNotAllowlisted);
+    }
+    set_verifier_allowlist(env, &next);
+    Ok(())
+}
+
+/// Slots still available before the [`MAX_VERIFIERS`] cap, counting only active
+/// (non-expired) members.
+pub fn verifier_slots_remaining(env: &Env, now: u64) -> u32 {
+    MAX_VERIFIERS.saturating_sub(active_verifier_count(env, now))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[soroban_sdk::contracttype]
 pub struct VerificationConfig {

@@ -33,9 +33,9 @@ pub use events::{
     UpgradeAttestedEvent, UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
 };
 pub use storage::{
-    ChallengeRecord, ContributorRecord, ExportAttestation, ExportPage, HealthSnapshot,
-    PendingBatchRemove, Role, Stats, VerificationConfig, WasmAttestation, WasmProvenance,
-    PauseReason,
+    ChallengeRecord, ContributorRecord, ExportPage, HealthSnapshot, Role, Stats,
+    VerificationConfig, VerifierAllowEntry, WasmAttestation, WasmProvenance, PauseReason,
+    MAX_VERIFIERS,
 };
 pub use version::Version;
 
@@ -67,8 +67,9 @@ use crate::storage::{
     ADMIN_KEY,
     get_guardian as storage_get_guardian,
     remove_guardian as storage_remove_guardian,
-    charge_verify_rate, get_verify_limit as storage_get_verify_limit,
-    set_verify_limit as storage_set_verify_limit,
+    add_verifier as storage_add_verifier, remove_verifier as storage_remove_verifier,
+    get_verifier_allowlist, is_active_verifier as storage_is_active_verifier,
+    verifier_allowlist_active, verifier_slots_remaining, prune_expired_verifiers,
 };
 
 use crate::utils::{
@@ -714,6 +715,128 @@ impl TrustBridgeContract {
     #[must_use]
     pub fn get_role_holder_count(env: Env) -> u32 {
         storage_get_role_holder_count(&env)
+    }
+
+    /// Adds `verifier` to the campaign allowlist and grants it `Role::Verifier`
+    /// (Issue #293). Admin-only.
+    ///
+    /// The allowlist is a hard-capped (`MAX_VERIFIERS`), time-bounded companion
+    /// to `set_role(Verifier)`:
+    ///
+    /// - `expires_at` is a ledger timestamp after which the entry stops
+    ///   authorizing `verify` / `batch_verify`. `0` means no expiry. A non-zero
+    ///   value must be in the future.
+    /// - Re-calling for an address already on the list **refreshes its expiry**
+    ///   in place and does not consume another slot.
+    /// - Adding a brand-new address when the list already holds `MAX_VERIFIERS`
+    ///   active members fails with `VerifierAllowlistFull`. Expired entries are
+    ///   pruned first, so a lapsed member never blocks a new one.
+    ///
+    /// ### Interaction with `set_role`
+    ///
+    /// This does not replace `set_role`; it composes with it. `add_verifier`
+    /// also calls `set_role(verifier, Verifier)` so the two never disagree.
+    /// **Once the allowlist has been populated at least once**, `verify` and
+    /// `batch_verify` require the caller to be an *active* (non-expired)
+    /// allowlist member — a bare `set_role(Verifier)` grant is no longer
+    /// sufficient. Before the first `add_verifier` call the contract stays in
+    /// pure role-based mode, so existing deployments are unaffected until they
+    /// opt in. See `docs/ABI.md`.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] / [`ContractError::Paused`]
+    /// - [`ContractError::NotAuthorized`] if the caller is not the admin.
+    /// - [`ContractError::VerifierExpiryInPast`] if `expires_at` is non-zero and
+    ///   not in the future.
+    /// - [`ContractError::VerifierAllowlistFull`] if the cap would be exceeded.
+    pub fn add_verifier(
+        env: Env,
+        verifier: Address,
+        expires_at: u64,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        let now = env.ledger().timestamp();
+        storage_add_verifier(&env, &verifier, expires_at, now)?;
+        storage_set_role(&env, &verifier, &Role::Verifier);
+
+        RoleGrantedEvent {
+            address: verifier,
+            role: Role::Verifier as u32,
+            admin,
+            timestamp: now,
+            domain: event_domain(&env),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Removes `verifier` from the allowlist and revokes its `Role::Verifier`
+    /// (Issue #293). Admin-only.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] / [`ContractError::Paused`]
+    /// - [`ContractError::NotAuthorized`] if the caller is not the admin.
+    /// - [`ContractError::VerifierNotAllowlisted`] if `verifier` is not listed.
+    pub fn remove_verifier(env: Env, verifier: Address) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        let now = env.ledger().timestamp();
+        storage_remove_verifier(&env, &verifier, now)?;
+        storage_remove_role(&env, &verifier);
+
+        RoleRevokedEvent {
+            address: verifier,
+            admin,
+            timestamp: now,
+            domain: event_domain(&env),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// The verifier allowlist as `(address, expires_at, added_at)` entries
+    /// (Issue #293), including any that have expired but not yet been pruned.
+    /// Read-only; no auth.
+    #[must_use]
+    pub fn get_verifiers(env: Env) -> Vec<VerifierAllowEntry> {
+        get_verifier_allowlist(&env)
+    }
+
+    /// `true` if `verifier` is on the allowlist and not expired as of the
+    /// current ledger (Issue #293). Read-only; no auth.
+    #[must_use]
+    pub fn is_active_verifier(env: Env, verifier: Address) -> bool {
+        storage_is_active_verifier(&env, &verifier, env.ledger().timestamp())
+    }
+
+    /// Allowlist slots still free before the `MAX_VERIFIERS` cap, counting only
+    /// active (non-expired) members (Issue #293). Read-only; no auth.
+    #[must_use]
+    pub fn verifier_slots_remaining(env: Env) -> u32 {
+        verifier_slots_remaining(&env, env.ledger().timestamp())
+    }
+
+    /// Drops every expired allowlist entry and returns how many were removed
+    /// (Issue #293). Anyone may call it — it only removes entries that are
+    /// already inactive. No-op return of `0` when nothing is stale.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`]
+    pub fn prune_expired_verifiers(env: Env) -> Result<u32, ContractError> {
+        require_initialized(&env)?;
+        Ok(prune_expired_verifiers(&env, env.ledger().timestamp()))
     }
 
     /// Sets the minimum number of seconds that must elapse between WASM upgrades. Admin-only.
@@ -2451,7 +2574,18 @@ impl TrustBridgeContract {
         // separated so a compromised Revoker cannot mark new accounts as
         // verified (Issue #212).
         let is_admin = is_admin_caller(&env, &caller);
-        let is_verifier = storage_get_role(&env, &caller) == Some(Role::Verifier);
+        // Verifier authorization (Issue #293): once the campaign allowlist has
+        // been populated, a non-admin caller must be an *active* (non-expired)
+        // allowlist member — a bare `set_role(Verifier)` grant no longer
+        // suffices. Until the first `add_verifier` call the contract stays in
+        // pure role-based mode, so existing deployments are unaffected.
+        let is_verifier = if is_admin {
+            false
+        } else if verifier_allowlist_active(&env) {
+            storage_is_active_verifier(&env, &caller, env.ledger().timestamp())
+        } else {
+            storage_get_role(&env, &caller) == Some(Role::Verifier)
+        };
         if !is_admin && !is_verifier {
             return Err(ContractError::NotAuthorized);
         }
@@ -2545,7 +2679,18 @@ impl TrustBridgeContract {
         caller.require_auth();
 
         let is_admin = is_admin_caller(&env, &caller);
-        let is_verifier = storage_get_role(&env, &caller) == Some(Role::Verifier);
+        // Verifier authorization (Issue #293): once the campaign allowlist has
+        // been populated, a non-admin caller must be an *active* (non-expired)
+        // allowlist member — a bare `set_role(Verifier)` grant no longer
+        // suffices. Until the first `add_verifier` call the contract stays in
+        // pure role-based mode, so existing deployments are unaffected.
+        let is_verifier = if is_admin {
+            false
+        } else if verifier_allowlist_active(&env) {
+            storage_is_active_verifier(&env, &caller, env.ledger().timestamp())
+        } else {
+            storage_get_role(&env, &caller) == Some(Role::Verifier)
+        };
         if !is_admin && !is_verifier {
             return Err(ContractError::NotAuthorized);
         }
@@ -4549,153 +4694,149 @@ mod test {
         });
     }
 
-    // ── Issue #292: per-verifier, per-ledger verify/revoke rate limit ────────
+    // ── Issue #293: verifier allowlist (cap + on-chain expiry) ──────────────
 
     #[test]
-    fn test_verify_rate_limit_blocks_verifier_after_cap() {
+    fn test_verifier_allowlist_cap_enforced() {
         let env = Env::default();
-        let (admin, _user, _other, contract_id) = setup(&env);
-        let verifier = Address::generate(&env);
+        let (_admin, _user, _other, contract_id) = setup(&env);
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::set_verify_limit(env.clone(), 2).unwrap();
-            TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
-
-            for i in 0..3u32 {
-                let name = format!("u{i}");
-                TrustBridgeContract::register(
-                    env.clone(),
-                    username(&env, &name),
-                    Address::generate(&env),
-                    Vec::new(&env),
-                )
-                .unwrap();
+            for _ in 0..MAX_VERIFIERS {
+                TrustBridgeContract::add_verifier(env.clone(), Address::generate(&env), 0).unwrap();
             }
-
-            // First two verifies fit the cap.
-            TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "u0")).unwrap();
-            TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "u1")).unwrap();
-
-            // Third in the same ledger is rejected, and nothing is written.
+            assert_eq!(TrustBridgeContract::verifier_slots_remaining(env.clone()), 0);
             let res =
-                TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "u2"));
-            assert_eq!(res, Err(ContractError::VerifyRateLimited));
-            assert!(
-                !TrustBridgeContract::get_address(env.clone(), username(&env, "u2"))
-                    .unwrap()
-                    .verified
-            );
+                TrustBridgeContract::add_verifier(env.clone(), Address::generate(&env), 0);
+            assert_eq!(res, Err(ContractError::VerifierAllowlistFull));
         });
     }
 
     #[test]
-    fn test_verify_rate_limit_resets_on_next_ledger() {
+    fn test_verifier_allowlist_expiry_blocks_verify() {
         let env = Env::default();
-        let (_admin, _user, _other, contract_id) = setup(&env);
+        let (_admin, user, _other, contract_id) = setup(&env);
         let verifier = Address::generate(&env);
+        env.ledger().with_mut(|li| li.timestamp = 1_000);
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::set_verify_limit(env.clone(), 1).unwrap();
-            TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
-            for i in 0..2u32 {
-                TrustBridgeContract::register(
-                    env.clone(),
-                    username(&env, &format!("u{i}")),
-                    Address::generate(&env),
-                    Vec::new(&env),
-                )
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+            // Expires at t=2000.
+            TrustBridgeContract::add_verifier(env.clone(), verifier.clone(), 2_000).unwrap();
+            assert!(TrustBridgeContract::is_active_verifier(env.clone(), verifier.clone()));
+            TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "octocat"))
                 .unwrap();
-            }
+        });
 
-            TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "u0")).unwrap();
+        // Advance past expiry; the same verifier is now inactive.
+        env.ledger().with_mut(|li| li.timestamp = 3_000);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "hubber"),
+                Address::generate(&env),
+                Vec::new(&env),
+            )
+            .unwrap();
+            assert!(!TrustBridgeContract::is_active_verifier(env.clone(), verifier.clone()));
+            let res =
+                TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "hubber"));
+            assert_eq!(res, Err(ContractError::NotAuthorized));
+        });
+    }
+
+    #[test]
+    fn test_verifier_expiry_in_past_rejected() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.ledger().with_mut(|li| li.timestamp = 5_000);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let res =
+                TrustBridgeContract::add_verifier(env.clone(), Address::generate(&env), 4_000);
+            assert_eq!(res, Err(ContractError::VerifierExpiryInPast));
+        });
+    }
+
+    #[test]
+    fn test_expired_verifier_slot_is_reclaimed_and_pruned() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.ledger().with_mut(|li| li.timestamp = 1_000);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            for _ in 0..(MAX_VERIFIERS - 1) {
+                TrustBridgeContract::add_verifier(env.clone(), Address::generate(&env), 0).unwrap();
+            }
+            // One short-lived member takes the last slot.
+            TrustBridgeContract::add_verifier(env.clone(), Address::generate(&env), 2_000).unwrap();
+            assert_eq!(TrustBridgeContract::verifier_slots_remaining(env.clone()), 0);
+        });
+
+        env.ledger().with_mut(|li| li.timestamp = 3_000);
+        env.as_contract(&contract_id, || {
+            // Expired member no longer counts, so a new one fits — add_verifier
+            // prunes it on the way in.
+            TrustBridgeContract::add_verifier(env.clone(), Address::generate(&env), 0).unwrap();
+            let pruned = TrustBridgeContract::prune_expired_verifiers(env.clone()).unwrap();
+            assert_eq!(pruned, 0, "add_verifier already pruned the expired entry");
+            assert_eq!(TrustBridgeContract::get_verifiers(env.clone()).len(), MAX_VERIFIERS);
+        });
+    }
+
+    #[test]
+    fn test_add_verifier_refresh_does_not_consume_slot() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.ledger().with_mut(|li| li.timestamp = 1_000);
+        env.mock_all_auths();
+        let v = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::add_verifier(env.clone(), v.clone(), 2_000).unwrap();
+            TrustBridgeContract::add_verifier(env.clone(), v.clone(), 9_000).unwrap();
+            assert_eq!(TrustBridgeContract::get_verifiers(env.clone()).len(), 1);
             assert_eq!(
-                TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "u1")),
-                Err(ContractError::VerifyRateLimited)
+                TrustBridgeContract::verifier_slots_remaining(env.clone()),
+                MAX_VERIFIERS - 1
             );
         });
-
-        // New ledger — the per-ledger counter starts fresh.
-        env.ledger().with_mut(|li| li.sequence_number += 1);
-        env.as_contract(&contract_id, || {
-            TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "u1")).unwrap();
-        });
     }
 
     #[test]
-    fn test_admin_is_exempt_from_verify_rate_limit() {
-        let env = Env::default();
-        let (admin, _user, _other, contract_id) = setup(&env);
-        env.mock_all_auths();
-        env.as_contract(&contract_id, || {
-            TrustBridgeContract::set_verify_limit(env.clone(), 1).unwrap();
-            for i in 0..4u32 {
-                let name = format!("u{i}");
-                TrustBridgeContract::register(
-                    env.clone(),
-                    username(&env, &name),
-                    Address::generate(&env),
-                    Vec::new(&env),
-                )
-                .unwrap();
-                TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, &name))
-                    .unwrap();
-            }
-        });
-    }
-
-    #[test]
-    fn test_batch_verify_counts_each_username_against_rate_limit() {
+    fn test_remove_verifier_not_listed_errors() {
         let env = Env::default();
         let (_admin, _user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let res = TrustBridgeContract::remove_verifier(env.clone(), Address::generate(&env));
+            assert_eq!(res, Err(ContractError::VerifierNotAllowlisted));
+        });
+    }
+
+    #[test]
+    fn test_role_based_verify_still_works_before_allowlist_opt_in() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
         let verifier = Address::generate(&env);
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::set_verify_limit(env.clone(), 2).unwrap();
             TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
-
-            let mut names: Vec<String> = Vec::new(&env);
-            for i in 0..3u32 {
-                let name = format!("u{i}");
-                TrustBridgeContract::register(
-                    env.clone(),
-                    username(&env, &name),
-                    Address::generate(&env),
-                    Vec::new(&env),
-                )
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+            // No add_verifier call yet → pure role-based mode.
+            TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "octocat"))
                 .unwrap();
-                names.push_back(username(&env, &name));
-            }
-
-            // Batch of 3 against a cap of 2 is rejected whole.
-            assert_eq!(
-                TrustBridgeContract::batch_verify(env.clone(), verifier.clone(), names.clone()),
-                Err(ContractError::VerifyRateLimited)
-            );
-            assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0);
-        });
-    }
-
-    #[test]
-    fn test_verify_rate_limit_disabled_when_zero() {
-        let env = Env::default();
-        let (_admin, _user, _other, contract_id) = setup(&env);
-        let verifier = Address::generate(&env);
-        env.mock_all_auths();
-        env.as_contract(&contract_id, || {
-            TrustBridgeContract::set_verify_limit(env.clone(), 0).unwrap();
-            TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
-            for i in 0..25u32 {
-                let name = format!("u{i}");
-                TrustBridgeContract::register(
-                    env.clone(),
-                    username(&env, &name),
-                    Address::generate(&env),
-                    Vec::new(&env),
-                )
-                .unwrap();
-                TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, &name))
-                    .unwrap();
-            }
         });
     }
 

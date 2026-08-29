@@ -32,7 +32,9 @@ use soroban_sdk::contracterror;
 /// | 19 | `NotReserved` | `remove_reserved` |
 /// | 20 | `UsernameReserved` | `register` |
 /// | 21 | `ReservedListFull` | `add_reserved` |
-/// | 30 | `VerifyRateLimited` | `verify`, `batch_verify`, `revoke_verification` |
+/// | 31 | `VerifierAllowlistFull` | `add_verifier` |
+/// | 32 | `VerifierNotAllowlisted` | `remove_verifier` |
+/// | 33 | `VerifierExpiryInPast` | `add_verifier` |
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -101,10 +103,13 @@ pub enum ContractError {
     NoPendingAdminTransfer = 28,
     /// `upgrade` was called without a required attestation (attestation-required mode is on).
     AttestationRequired = 29,
-    /// A non-admin caller exceeded the per-verifier, per-ledger verify/revoke
-    /// rate limit (Issue #292). Raised by `verify`, `batch_verify`, and
-    /// `revoke_verification`. The admin is exempt.
-    VerifyRateLimited = 30,
+    /// `add_verifier` would exceed the `MAX_VERIFIERS` allowlist cap (Issue #293).
+    VerifierAllowlistFull = 31,
+    /// `remove_verifier` was called for an address not on the allowlist (Issue #293).
+    VerifierNotAllowlisted = 32,
+    /// `add_verifier` was given a non-zero `expires_at` that is not in the
+    /// future (Issue #293).
+    VerifierExpiryInPast = 33,
 }
 
 impl ContractError {
@@ -149,7 +154,9 @@ impl ContractError {
             27 => Some(ContractError::AdminTransferDelayActive),
             28 => Some(ContractError::NoPendingAdminTransfer),
             29 => Some(ContractError::AttestationRequired),
-            30 => Some(ContractError::VerifyRateLimited),
+            31 => Some(ContractError::VerifierAllowlistFull),
+            32 => Some(ContractError::VerifierNotAllowlisted),
+            33 => Some(ContractError::VerifierExpiryInPast),
             _ => None,
         }
     }
