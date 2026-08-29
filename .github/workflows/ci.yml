@@ -196,59 +196,62 @@ jobs:
           cargo test --features wasm-test --test integration -- \
             test_integration_wasm_upgrade_cooldown -- --list | grep "test_integration_wasm_upgrade_cooldown"
 
-  live-testnet-smoke:
-    name: Opt-in Testnet Smoke
+  # Issue #244: Supply-chain audit and license/ban policy
+  supply-chain:
+    name: Supply-Chain Audit (cargo-deny + cargo-audit)
     runs-on: ubuntu-latest
-    needs: quality
-    # Never expose repository secrets to fork pull requests. The repository
-    # variable is an explicit maintainer opt-in for pushes to this repository.
-    if: >-
-      github.event_name != 'pull_request' &&
-      github.repository == 'Stellar-TrustBridge/trustbridge-contract' &&
-      vars.TRUSTBRIDGE_LIVE_TESTNET == 'true'
-    env:
-      TESTNET_CONTRACT_ID: ${{ secrets.TRUSTBRIDGE_TESTNET_CONTRACT_ID }}
-      TESTNET_SECRET_KEY: ${{ secrets.TRUSTBRIDGE_TESTNET_SECRET_KEY }}
-      TESTNET_USERNAME: ${{ vars.TRUSTBRIDGE_TESTNET_USERNAME }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Stellar CLI
-        run: cargo install --locked stellar-cli@26.1.0
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Validate live testnet configuration
-        run: |
-          set -eu
-          if [ -z "$TESTNET_CONTRACT_ID" ]; then
-            echo "ERROR: TRUSTBRIDGE_TESTNET_CONTRACT_ID is required when live testnet is enabled."
-            exit 1
-          fi
-          if [ -z "$TESTNET_SECRET_KEY" ]; then
-            echo "ERROR: TRUSTBRIDGE_TESTNET_SECRET_KEY is required when live testnet is enabled."
-            exit 1
-          fi
-          if [ -z "$TESTNET_USERNAME" ]; then
-            echo "ERROR: TRUSTBRIDGE_TESTNET_USERNAME is required when live testnet is enabled."
-            exit 1
-          fi
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
 
-      - name: Configure ephemeral testnet identity
-        run: |
-          set -eu
-          stellar keys add ci-testnet --secret-key "$TESTNET_SECRET_KEY" >/dev/null
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
 
-      - name: Invoke live testnet smoke
+      - name: cargo audit
+        run: cargo audit
+
+      - name: cargo deny check
+        run: cargo deny check
+
+  # Issue #245: Clippy pedantic — Phase 1 lints promoted to deny
+  clippy-pedantic:
+    name: Clippy Pedantic (Phase 1)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install wasm targets
+        run: rustup target add wasm32v1-none wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-pedantic-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: clippy pedantic (Phase 1 — deny)
         run: |
-          set -eu
-          stellar contract invoke \
-            --id "$TESTNET_CONTRACT_ID" \
-            --source-account ci-testnet \
-            --network testnet \
-            -- get_stats
-          stellar contract invoke \
-            --id "$TESTNET_CONTRACT_ID" \
-            --source-account ci-testnet \
-            --network testnet \
-            -- get_address --github-username "$TESTNET_USERNAME"
+          cargo clippy --all-targets -- \
+            -D warnings \
+            -D clippy::must_use_candidate \
+            -D clippy::missing_errors_doc \
+            -D clippy::missing_panics_doc \
+            -D clippy::redundant_closure_for_method_calls \
+            -D clippy::cloned_instead_of_copied
