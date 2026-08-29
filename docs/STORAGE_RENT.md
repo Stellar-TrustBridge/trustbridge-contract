@@ -78,6 +78,35 @@ A record is only extended when its remaining TTL is below 30 days.  Active recor
 call.  **Cold** records — those that nobody reads or writes for more than 30 days — approach
 expiry and must be extended by an off-chain keeper.
 
+## Operational Revival Check
+
+Run the TTL-focused integration tests before changing storage or archival code:
+
+```bash
+cargo test ttl
+```
+
+The tests use the Soroban host ledger APIs to move a real persistent record close to its
+live-until ledger.  They then exercise both revival paths: reading the record through
+`get_address`, and calling `extend_registry_ttl`.  Each test advances beyond the old TTL and
+asserts that the record is still present.  This is intentionally different from a mocked success
+check: the persistent key's host TTL is observed with `get_ttl` before and after the operation.
+
+For an operational deployment, run the keeper before records reach the threshold and inspect its
+exit status and logs:
+
+```bash
+CONTRACT_ID=$CONTRACT_ID SOURCE=keeper NETWORK=testnet \
+  ./scripts/ttl_keeper.sh
+```
+
+The keeper is permissionless at the contract layer, but its signing identity still needs enough
+network funds for the submitted transaction.  Run it at least every 20 days, use a small batch
+while validating a new deployment, and confirm the transaction succeeded before moving on.  A
+keeper cannot revive a key after it has already been archived; use Soroban's explicit restore
+workflow for archived entries and then rerun validation.  Do not treat a successful simulation as
+proof that a live TTL was extended.
+
 ---
 
 ## Cost Intuition vs. N Users

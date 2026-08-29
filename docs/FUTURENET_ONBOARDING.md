@@ -31,6 +31,14 @@ export ADMIN=$SOURCE               # for single-identity testing; use a separate
 
 All commands below assume these variables are set.
 
+The repository pins the Futurenet RPC and Friendbot endpoints in the Makefile.
+Use the smoke target to print the complete workflow without requiring a funded
+account or contract credentials:
+
+```bash
+make futurenet-smoke FUTURENET_DRY_RUN=true
+```
+
 ---
 
 ## Step 1 — Faucet: fund your Futurenet account
@@ -43,6 +51,11 @@ stellar keys generate contributor --network futurenet --fund
 stellar keys address contributor
 # Expected: a G... address
 ```
+
+The equivalent pinned Friendbot endpoint is
+`https://friendbot-futurenet.stellar.org`. The smoke target does not fund an
+account automatically; run the command above first to respect Friendbot rate
+limits and avoid silently funding the wrong identity.
 
 **Expected outcome:** Account exists on Futurenet with enough XLM to cover deploy + invoke fees.
 
@@ -67,6 +80,17 @@ The WASM is built with LTO and optimised for size. The output file is ~85 KB.
 export ADMIN=$(stellar keys address contributor)
 NETWORK=futurenet ADMIN=$ADMIN SOURCE=contributor ./scripts/deploy.sh
 ```
+
+Or run the complete deploy and read-only smoke workflow through Make:
+
+```bash
+make futurenet-smoke \
+  ADMIN=$ADMIN SOURCE=contributor IDENTITY=contributor
+```
+
+Override `FUTURENET_RPC_URL` or `FUTURENET_FRIENDBOT_URL` only when using a
+known compatible Futurenet service. `make -n futurenet-smoke` prints the
+resolved command without requiring secrets or contacting the network.
 
 The deploy script:
 
@@ -215,6 +239,7 @@ for filter patterns and field layouts.
 | `make invoke-lookup` | Read-only address lookup |
 | `make invoke-verify` | Verify a contributor (admin or Verifier role) |
 | `make invoke-stats` | Read registry statistics |
+| `make futurenet-smoke` | Deploy and run read-only Futurenet smoke checks using pinned endpoints |
 
 ---
 

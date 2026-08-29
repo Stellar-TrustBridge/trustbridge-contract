@@ -629,3 +629,28 @@ Use this when freezing writes during an active Wave.
 	or `get_address`) to confirm normal behavior is restored.
 8. Post-incident note: include window duration, impacted functions, and
 	follow-up actions.
+
+## Disaster-Recovery Registry Round-Trip
+
+Run the export/validate rehearsal against a disposable local, testnet, or
+futurenet deployment. The command is read-only against the contract and does
+not import records or submit any write transaction:
+
+```bash
+CONTRACT_ID=C... SOURCE=admin-identity ADMIN_SOURCE=admin-identity \
+  NETWORK=testnet EXPECTED_COUNT=2 PAGE_LIMIT=1 make dr-test
+```
+
+`make dr-test` exports the complete registry, then validates every exported
+address and `verified` flag against the contract. It also performs the
+admin-gated on-chain listing comparison, so additions or omissions fail the
+command. `PAGE_LIMIT=1` deliberately exercises pagination; set
+`EXPECTED_COUNT=0` for an empty-registry rehearsal. `STELLAR` may be set to a
+different CLI executable when using a local instance.
+
+The export is a recovery input, not an import command. Before any restore,
+review the JSON, confirm the contract ID and network, and use a separately
+reviewed operator procedure appropriate to that deployment. Never replay an
+export blindly to mainnet, and do not use this rehearsal as a mainnet import
+test. The harness cannot detect records written after export, and it does not
+verify timestamps beyond preserving them in the export.

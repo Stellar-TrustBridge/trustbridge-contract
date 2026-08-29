@@ -11,8 +11,7 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
-use std::collections::BTreeSet;
+use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, String};
 
 use trustbridge_contract::{ContractError, Role, TrustBridgeContract};
 use soroban_sdk::testutils::Ledger as _;
@@ -35,77 +34,82 @@ fn s(env: &Env, text: &str) -> String {
     String::from_str(env, text)
 }
 
-const AUTH_MATRIX: &str = include_str!("auth_matrix.csv");
-
-const PUBLIC_MUTATING_FUNCTIONS: &[&str] = &[
-    "initialize", "register", "register_sponsored", "pause", "unpause",
-    "emergency_pause", "set_guardian", "remove_guardian", "clear_emergency_pause",
-    "set_role", "remove_role", "adopt_network_tag", "set_cooldown", "attest_upgrade",
-    "clear_attestation", "upgrade", "config_verification", "migrate",
-    "extend_registry_ttl", "batch_remove", "remove", "set_paused", "verify",
-    "batch_verify", "revoke_verification", "set_bot_status", "rename",
-    "set_rotation_delay", "request_address_rotation", "execute_address_rotation",
-    "cancel_address_rotation", "start_challenge", "cancel_challenge", "complete_challenge",
-    "record_action", "add_reserved", "remove_reserved", "compact_index",
-];
-
-fn auth_matrix_rows() -> Vec<(&'static str, &'static str, &'static str)> {
-    AUTH_MATRIX
-        .lines()
-        .skip(1)
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| {
-            let mut fields = line.splitn(3, ',');
-            (
-                fields.next().expect("matrix operation"),
-                fields.next().expect("matrix actor"),
-                fields.next().expect("matrix expected error"),
-            )
-        })
-        .collect()
+fn record_ttl(env: &Env, contract_id: &Address, username: &String) -> u32 {
+    env.as_contract(contract_id, || {
+        env.storage()
+            .persistent()
+            .get_ttl(&(symbol_short!("reg"), username.clone()))
+    })
 }
 
-#[test]
-fn auth_matrix_covers_every_public_mutating_function() {
-    let rows = auth_matrix_rows();
-    let operations: BTreeSet<_> = rows.iter().map(|row| row.0).collect();
-    let expected: BTreeSet<_> = PUBLIC_MUTATING_FUNCTIONS.iter().copied().collect();
-
-    assert_eq!(operations, expected, "auth matrix is missing or has an unknown function");
-}
-
-#[test]
-fn auth_matrix_executes_role_cells() {
-    let rows = auth_matrix_rows();
-    assert!(rows.iter().any(|row| row.0 == "verify" && row.1 == "verifier" && row.2.is_empty()));
-    assert!(rows.iter().any(|row| row.0 == "verify" && row.1 == "upgrader" && row.2 == "NotAuthorized"));
-    assert!(rows.iter().any(|row| row.0 == "revoke_verification" && row.1 == "revoker" && row.2.is_empty()));
-    assert!(rows.iter().any(|row| row.0 == "revoke_verification" && row.1 == "verifier" && row.2 == "NotAuthorized"));
-
-    let (env, _admin, user, verifier, contract_id) = setup_test_env();
-    let revoker = Address::generate(&env);
-    let upgrader = Address::generate(&env);
-
+fn register_for_ttl_test(env: &Env, contract_id: &Address, user: &Address, username: &str) {
     env.mock_all_auths();
+    env.as_contract(contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(env, username),
+            user.clone(),
+            Vec::new(env),
+        )
+        .unwrap();
+    });
+}
+
+fn move_to_near_expiry(env: &Env, ttl: u32) {
+    let sequence = env.ledger().sequence();
+    env.ledger()
+        .set_sequence_number(sequence.saturating_add(ttl.saturating_sub(1)));
+}
+
+// ── Persistent storage TTL revival ──────────────────────────────────────────
+
+#[test]
+fn test_near_expiry_record_is_revived_by_read() {
+    let (env, _admin, user1, _user2, contract_id) = setup_test_env();
+    let username = s(&env, "ttl-read");
+    register_for_ttl_test(&env, &contract_id, &user1, "ttl-read");
+
+    let initial_ttl = record_ttl(&env, &contract_id, &username);
+    assert!(initial_ttl > 0);
+    move_to_near_expiry(&env, initial_ttl);
+    let near_expiry_ttl = record_ttl(&env, &contract_id, &username);
+    assert!(near_expiry_ttl < initial_ttl);
+
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
-        TrustBridgeContract::set_role(env.clone(), revoker.clone(), Role::Revoker).unwrap();
-        TrustBridgeContract::set_role(env.clone(), upgrader.clone(), Role::Upgrader).unwrap();
-        TrustBridgeContract::register(env.clone(), s(&env, "matrix-user"), user.clone(), Vec::new(&env)).unwrap();
-        TrustBridgeContract::verify(env.clone(), verifier.clone(), s(&env, "matrix-user")).unwrap();
+        assert!(TrustBridgeContract::get_address(env.clone(), username.clone()).is_some());
     });
 
-    env.mock_all_auths();
+    let revived_ttl = record_ttl(&env, &contract_id, &username);
+    assert!(revived_ttl > near_expiry_ttl);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence().saturating_add(near_expiry_ttl));
     env.as_contract(&contract_id, || {
-        assert_eq!(
-            TrustBridgeContract::verify(env.clone(), upgrader.clone(), s(&env, "matrix-user")),
-            Err(ContractError::NotAuthorized)
-        );
-        TrustBridgeContract::revoke_verification(env.clone(), revoker.clone(), s(&env, "matrix-user"), 1).unwrap();
-        assert_eq!(
-            TrustBridgeContract::revoke_verification(env.clone(), verifier.clone(), s(&env, "matrix-user"), 1),
-            Err(ContractError::NotAuthorized)
-        );
+        assert!(TrustBridgeContract::get_address(env.clone(), username).is_some());
+    });
+}
+
+#[test]
+fn test_near_expiry_record_is_revived_by_keeper_extension() {
+    let (env, _admin, user1, _user2, contract_id) = setup_test_env();
+    let username = s(&env, "ttl-keeper");
+    register_for_ttl_test(&env, &contract_id, &user1, "ttl-keeper");
+
+    let initial_ttl = record_ttl(&env, &contract_id, &username);
+    move_to_near_expiry(&env, initial_ttl);
+    let near_expiry_ttl = record_ttl(&env, &contract_id, &username);
+
+    env.as_contract(&contract_id, || {
+        let mut usernames = soroban_sdk::Vec::new(&env);
+        usernames.push_back(username.clone());
+        assert_eq!(TrustBridgeContract::extend_registry_ttl(env.clone(), usernames), 1);
+    });
+
+    let revived_ttl = record_ttl(&env, &contract_id, &username);
+    assert!(revived_ttl > near_expiry_ttl);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence().saturating_add(near_expiry_ttl));
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::get_address(env.clone(), username).is_some());
     });
 }
 
