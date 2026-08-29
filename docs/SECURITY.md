@@ -806,6 +806,39 @@ not parsed or enforced by `verify_with_proof` itself.
 
 ---
 
+## Cross-Contract `register` Is Denied (No Nonce)
+
+`register()` carries no replay nonce. That is only a gap if a sibling
+contract can call `register` cross-contract (C2C) on a caller's behalf —
+without a nonce, a captured call could be replayed. Today that path does not
+exist, deliberately:
+
+- `register` requires `stellar_address.require_auth()`.
+- A cross-contract invocation runs in the **calling** contract's
+  authorization context (the same rule documented above for the admin export
+  functions in [Cross-Contract Callers and Admin Exports](#cross-contract-callers-and-admin-exports)).
+  A calling contract cannot produce a signature for an address it does not
+  control, so it cannot satisfy `stellar_address.require_auth()` for anyone
+  but itself.
+- A relayed C2C `register` therefore fails closed at the host authorization
+  layer — the invocation aborts before any state read or write.
+
+This is enforced by test, not left as a comment:
+`tests/cross_contract_register_deny.rs::cross_contract_register_on_behalf_of_another_address_is_denied`
+(expects a panic — missing auth), with
+`direct_register_by_the_address_owner_still_works` as the positive control
+proving the same call path succeeds for a real, self-signing registrant.
+
+**ABI statement:** `register` is not part of the cross-contract read surface
+documented in [ABI.md § Cross-Contract Read Interface](ABI.md#cross-contract-read-interface)
+and must not be added to it without also adding a replay nonce. Per this
+project's "don't half-open C2C" policy, no C2C registration surface is
+introduced here — this section documents and tests the current, intentional
+denial only. If C2C `register` is ever built, it must ship a nonce (or
+equivalent replay protection) in the same change, not after.
+
+---
+
 ## Responsible Disclosure
 
 If you discover a security vulnerability:
