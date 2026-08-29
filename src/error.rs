@@ -27,27 +27,12 @@ use soroban_sdk::contracterror;
 /// | 14 | `InvalidBatchSize` | `batch_verify`, `batch_remove` |
 /// | 15 | `InvalidReasonCode` | `revoke_verification` |
 /// | 16 | `ZeroAddress` | `register` |
-/// | 17 | `ChallengeAlreadyActive` | `start_challenge` |
-/// | 18 | `NoChallengeActive` | `cancel_challenge`, `complete_challenge` |
-/// | 19 | `ChallengeNotResolvable` | `complete_challenge` |
-/// | 20 | `ChallengeActive` | `register`, `rename` |
-/// | 21 | `InvalidPauseReason` | `pause`, `unpause`, `set_paused` |
-/// | 22 | `AlreadyReserved` | `add_reserved` |
-/// | 23 | `NotReserved` | `remove_reserved` |
-/// | 24 | `UsernameReserved` | `register`, `rename` |
-/// | 25 | `ReservedListFull` | `add_reserved` |
-/// | 26 | `AdminTransferPending` | `propose_admin_transfer`, `execute_admin_transfer` |
-/// | 27 | `AdminTransferDelayActive` | `execute_admin_transfer` |
-/// | 28 | `NoPendingAdminTransfer` | `execute_admin_transfer` |
-/// | 29 | `AttestationRequired` | `upgrade` |
-/// | 30 | `NetworkMismatch` | any gated call on state restored to a different network |
-/// | 31 | `FallbackListFull` | `register`, `register_sponsored` |
-/// | 32 | `RotationRequired` | `register` |
-/// | 33 | `RotationPending` | `request_address_rotation`, `rename` |
-/// | 34 | `NoRotationPending` | `execute_address_rotation`, `cancel_address_rotation` |
-/// | 35 | `RotationNotReady` | `execute_address_rotation` |
-/// | 36 | `UsernameTaken` | `rename` |
-/// | 37 | `InvalidCursor` | `get_registered_paginated`, `get_public_paginated` |
+/// | 17 | `InvalidPauseReason` | `pause`, `unpause`, `set_paused` |
+/// | 18 | `AlreadyReserved` | `add_reserved` |
+/// | 19 | `NotReserved` | `remove_reserved` |
+/// | 20 | `UsernameReserved` | `register` |
+/// | 21 | `ReservedListFull` | `add_reserved` |
+/// | 30 | `VerifyRateLimited` | `verify`, `batch_verify`, `revoke_verification` |
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -116,16 +101,10 @@ pub enum ContractError {
     NoPendingAdminTransfer = 28,
     /// `upgrade` was called without a required attestation (attestation-required mode is on).
     AttestationRequired = 29,
-    /// `batch_remove` was called with a batch larger than the configured
-    /// dual-control threshold; use `propose_batch_remove` /
-    /// `execute_batch_remove` instead (Issue #219).
-    DualControlRequired = 30,
-    /// `propose_batch_remove` was called while a proposal is already pending.
-    /// Cancel it with `cancel_batch_remove` first (Issue #219).
-    BatchRemoveProposalPending = 31,
-    /// `execute_batch_remove` or `cancel_batch_remove` was called with no
-    /// pending proposal (or a proposal that has expired) (Issue #219).
-    NoPendingBatchRemove = 32,
+    /// A non-admin caller exceeded the per-verifier, per-ledger verify/revoke
+    /// rate limit (Issue #292). Raised by `verify`, `batch_verify`, and
+    /// `revoke_verification`. The admin is exempt.
+    VerifyRateLimited = 30,
 }
 
 impl ContractError {
@@ -170,9 +149,7 @@ impl ContractError {
             27 => Some(ContractError::AdminTransferDelayActive),
             28 => Some(ContractError::NoPendingAdminTransfer),
             29 => Some(ContractError::AttestationRequired),
-            30 => Some(ContractError::DualControlRequired),
-            31 => Some(ContractError::BatchRemoveProposalPending),
-            32 => Some(ContractError::NoPendingBatchRemove),
+            30 => Some(ContractError::VerifyRateLimited),
             _ => None,
         }
     }

@@ -1333,6 +1333,94 @@ pub fn is_in_cooldown(env: &Env, github_username: &String) -> bool {
     env.ledger().timestamp() < last.saturating_add(cooldown)
 }
 
+// ── Per-verifier verify/revoke rate limit (Issue #292) ───────────────────────
+//
+// A Verifier or Revoker key can otherwise call `verify` / `revoke_verification`
+// / `batch_verify` as fast as it can submit transactions, bloating the event
+// stream and burning instruction budget during a Wave. This is an on-chain cap
+// on the number of verify/revoke *units* one actor may spend per ledger.
+//
+// - The counter is keyed per actor address and per ledger sequence. When the
+//   ledger rolls over, the first call in the new ledger sees a stale sequence
+//   and resets the count to 0 — there is no cross-ledger carry.
+// - `batch_verify` spends `usernames.len()` units, so a batch cannot be used to
+//   sidestep the per-ledger cap.
+// - The admin is exempt: callers check `is_admin_caller` first and never reach
+//   the rate check. This is deliberate — incident response must not be throttled.
+// - Reads are never rate-limited; only the mutating verify/revoke paths are.
+
+/// Instance key holding the configured per-ledger verify/revoke cap.
+/// Absent → [`DEFAULT_VERIFIES_PER_LEDGER`]. Explicitly set to 0 → disabled.
+pub const VERIFY_LIMIT_KEY: Symbol = symbol_short!("vfylimit");
+
+/// Persistent key prefix for the per-`(verifier, ledger)` spend counter.
+/// Value is `(u32 ledger_seq, u32 units_spent)`.
+pub const VERIFY_RATE_KEY: Symbol = symbol_short!("vfyrate");
+
+/// Default cap when the admin has not configured one: 20 verify/revoke units
+/// per verifier per ledger (~4 per second at 5s ledgers).
+pub const DEFAULT_VERIFIES_PER_LEDGER: u32 = 20;
+
+/// The active per-ledger verify/revoke cap. Returns the stored value when the
+/// admin has set one (including 0, which disables the limit), otherwise
+/// [`DEFAULT_VERIFIES_PER_LEDGER`].
+pub fn get_verify_limit(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&VERIFY_LIMIT_KEY)
+        .unwrap_or(DEFAULT_VERIFIES_PER_LEDGER)
+}
+
+/// Sets the per-ledger verify/revoke cap. `0` disables rate limiting entirely.
+pub fn set_verify_limit(env: &Env, limit: u32) {
+    env.storage().instance().set(&VERIFY_LIMIT_KEY, &limit);
+}
+
+/// Charges `units` against `verifier`'s allowance for the current ledger.
+///
+/// Resets the counter transparently on ledger rollover. Returns
+/// [`ContractError::VerifyRateLimited`] — without writing — if the charge would
+/// push this ledger's spend past the cap. A cap of 0 short-circuits to `Ok`.
+///
+/// The admin is expected to have been filtered out by the caller before this
+/// runs; nothing here special-cases it.
+pub fn charge_verify_rate(
+    env: &Env,
+    verifier: &Address,
+    units: u32,
+) -> Result<(), ContractError> {
+    let limit = get_verify_limit(env);
+    if limit == 0 {
+        return Ok(());
+    }
+
+    let current_seq = env.ledger().sequence();
+    let key = (VERIFY_RATE_KEY, verifier.clone());
+    let (seq, spent): (u32, u32) = env.storage().persistent().get(&key).unwrap_or((0, 0));
+
+    let spent_this_ledger = if seq == current_seq { spent } else { 0 };
+    let next = spent_this_ledger.saturating_add(units);
+    if next > limit {
+        return Err(ContractError::VerifyRateLimited);
+    }
+
+    env.storage().persistent().set(&key, &(current_seq, next));
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+    Ok(())
+}
+
+/// Units `verifier` has already spent in the current ledger (0 after rollover).
+/// Read-only helper for tests and diagnostics.
+pub fn verify_units_spent(env: &Env, verifier: &Address) -> u32 {
+    let key = (VERIFY_RATE_KEY, verifier.clone());
+    match env.storage().persistent().get::<_, (u32, u32)>(&key) {
+        Some((seq, spent)) if seq == env.ledger().sequence() => spent,
+        _ => 0,
+    }
+}
+
 // ── Role-based access control ─────────────────────────────────────────────────
 
 /// Raw existence check against `ROLE_KEY`, ignoring expiry (Issue #221).

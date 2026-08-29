@@ -165,9 +165,7 @@ struct ChallengeRecord {
 | 19 | `ChallengeNotResolvable` | `complete_challenge` called before the delay has elapsed |
 | 20 | `ChallengeActive` | `register` attempted while a challenge is active on the username |
 | 21 | `NetworkMismatch` | Instance state was initialized on a different network than the one executing (Issue #231) |
-| 30 | `DualControlRequired` | `batch_remove` batch size exceeds the dual-control threshold; use `propose_batch_remove` / `execute_batch_remove` (Issue #219) |
-| 31 | `BatchRemoveProposalPending` | `propose_batch_remove` called while a proposal is already pending (Issue #219) |
-| 32 | `NoPendingBatchRemove` | `execute_batch_remove` / `cancel_batch_remove` called with no pending (or an expired) proposal (Issue #219) |
+| 30 | `VerifyRateLimited` | Non-admin caller exceeded the per-verifier, per-ledger verify/revoke cap (Issue #292) |
 
 `ContractError::from_code(u32)` maps every code in this table back to the typed
 variant and returns `None` for any unrecognized code. Every code round-trips
@@ -1202,6 +1200,31 @@ Configures the WASM upgrade timelock cooldown period in seconds. Admin-only.
 ### `get_cooldown() -> u64`
 
 Returns the current WASM upgrade timelock cooldown period in seconds.
+
+---
+
+### `set_verify_limit(limit: u32) -> Result<(), ContractError>`
+
+Sets the per-verifier, per-ledger cap on verify/revoke units (Issue #292).
+Admin-only.
+
+- `verify` and `revoke_verification` each spend 1 unit; `batch_verify` spends
+  one unit per requested username.
+- A non-admin caller exceeding `limit` units in one ledger gets
+  `VerifyRateLimited` (code 30); the call writes nothing.
+- `limit == 0` disables rate limiting. With no configured value the contract
+  uses a built-in default of 20.
+- The **admin is never rate-limited.**
+
+| **Errors** | `NotInitialized`, `NotAuthorized` |
+
+---
+
+### `get_verify_limit() -> u32`
+
+Returns the active per-verifier, per-ledger verify/revoke cap: the configured
+value when set (including `0` = disabled), otherwise the built-in default.
+Read-only; no auth.
 
 ---
 
