@@ -1557,6 +1557,31 @@ unable to detect the drift, so the bump is a review blocker.
 
 ---
 
+## Registration cooldown (Issue #4 / #296)
+
+The per-username registration cooldown is **enforced by the contract itself** —
+there is no helper an integrator has to remember to call.
+
+- `set_cooldown(seconds)` (admin-only) configures the window; `0` disables it.
+- On a **successful** mutation, `register`, `verify`, and the
+  username/address-change paths stamp the username's last-action timestamp.
+- While the window is open, a follow-up mutation on that username fails with
+  `CooldownActive` (code 8). A username with no prior recorded action is never
+  in cooldown, so first-time registration always succeeds immediately.
+- `is_registration_in_cooldown(github_username) -> bool` is the **read-only**
+  view of that state, for dashboards, the action runner, and cross-contract
+  callers.
+
+There is **no `record_action` entry point.** An earlier build exported a
+public, unauthenticated `record_action(github_username)` that simply wrote the
+current timestamp. Because it took no auth, any caller could push an arbitrary
+username into cooldown and block its registration — a griefing vector — and it
+was redundant once enforcement moved inline. It was removed in Issue #296. If
+you called it, delete the call: the cooldown is applied automatically by the
+mutating functions above.
+
+---
+
 ## Cross-Contract Read Interface
 
 Sibling TrustBridge contracts (payout, attestation, and future Waves) can
