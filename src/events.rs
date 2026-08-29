@@ -329,3 +329,79 @@ pub struct RenamedEvent {
     pub verification_cleared: bool,
     pub timestamp: u64,
 }
+
+// ── Staged WASM events (Issue #300) ──────────────────────────────────────────
+
+/// Emitted when an admin or Upgrader stages a WASM hash for the next upgrade
+/// (Issue #300).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WasmStagedEvent {
+    #[topic]
+    pub wasm_hash: BytesN<32>,
+    pub staged_by: Address,
+    pub timestamp: u64,
+}
+
+/// Emitted when a staged WASM slot is cleared before the upgrade executes
+/// (Issue #300).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagedWasmClearedEvent {
+    #[topic]
+    pub wasm_hash: BytesN<32>,
+    pub cleared_by: Address,
+    pub timestamp: u64,
+}
+
+// ── Multisig upgrade events (Issue #301) ─────────────────────────────────────
+
+/// Emitted when a multisig upgrade proposal is created (Issue #301).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeProposedEvent {
+    #[topic]
+    pub proposal_id: u32,
+    pub wasm_hash: BytesN<32>,
+    pub proposed_by: Address,
+    pub executable_at: u64,
+    pub timestamp: u64,
+}
+
+/// Emitted when an address approves an outstanding upgrade proposal
+/// (Issue #301).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeApprovedEvent {
+    #[topic]
+    pub proposal_id: u32,
+    pub approved_by: Address,
+    /// Number of distinct approvals collected so far (including this one).
+    pub approval_count: u32,
+    pub timestamp: u64,
+}
+
+/// Emitted when a multisig upgrade proposal is executed and the WASM is
+/// swapped (Issue #301).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeProposalExecutedEvent {
+    #[topic]
+    pub proposal_id: u32,
+    pub wasm_hash: BytesN<32>,
+    pub executed_by: Address,
+    pub approval_count: u32,
+    pub timestamp: u64,
+}
+
+/// Emitted when a multisig upgrade proposal is cancelled without executing
+/// (Issue #301).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeProposalCancelledEvent {
+    #[topic]
+    pub proposal_id: u32,
+    pub wasm_hash: BytesN<32>,
+    pub cancelled_by: Address,
+    pub timestamp: u64,
+}

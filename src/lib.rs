@@ -14,6 +14,8 @@ mod batch;
 mod domain;
 mod error;
 mod events;
+mod multisig_upgrade;
+mod staged_wasm;
 mod storage;
 mod utils;
 mod version;
@@ -31,12 +33,19 @@ pub use events::{
     ChallengeStartedEvent, EmergencyClearedEvent, EmergencyPausedEvent, PausedEvent,
     RegisteredEvent, RemovedEvent, RoleGrantedEvent, RoleRevokedEvent, UnpausedEvent,
     UpgradeAttestedEvent, UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
+    // Staged WASM (Issue #300)
+    WasmStagedEvent, StagedWasmClearedEvent,
+    // Multisig upgrade (Issue #301)
+    UpgradeProposedEvent, UpgradeApprovedEvent, UpgradeProposalExecutedEvent,
+    UpgradeProposalCancelledEvent,
 };
 pub use storage::{
     ChallengeRecord, ContributorRecord, ExportPage, HealthSnapshot, Role, Stats,
     VerificationConfig, VerifierAllowEntry, WasmAttestation, WasmProvenance, PauseReason,
     MAX_VERIFIERS,
 };
+pub use staged_wasm::StagedWasm;
+pub use multisig_upgrade::{UpgradeProposal, MAX_UPGRADE_SIGNERS};
 pub use version::Version;
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, Vec};
@@ -1210,6 +1219,379 @@ impl TrustBridgeContract {
         // permission for that hash.
         remove_wasm_attestation(env);
         Ok(true)
+    }
+
+    // ── Staged WASM slot (Issue #300) ────────────────────────────────────────
+
+    /// Stages a WASM hash for the next upgrade. Admin or Upgrader role required.
+    ///
+    /// The staged hash is publicly visible via `get_staged` so any observer
+    /// knows what binary the operator intends to deploy before the upgrade
+    /// transaction is submitted. When a staged hash is present, `upgrade` will
+    /// only accept that exact hash; staging a different hash first replaces
+    /// the slot.
+    ///
+    /// Staging does **not** make attestation mandatory — use
+    /// `set_attestation_required(true)` for that. The two mechanisms are
+    /// complementary.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin or any `Role::Upgrader` holder.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotAuthorized`] if `caller` is not admin or Upgrader.
+    pub fn stage_wasm(
+        env: Env,
+        caller: Address,
+        wasm_hash: BytesN<32>,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+        caller.require_auth();
+
+        let admin = get_admin(&env)?;
+        let role = storage_get_role(&env, &caller);
+        let is_upgrader = matches!(role, Some(crate::storage::Role::Upgrader));
+        if caller != admin && !is_upgrader {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        let now = env.ledger().timestamp();
+        let entry = crate::staged_wasm::StagedWasm {
+            wasm_hash: wasm_hash.clone(),
+            staged_by: caller.clone(),
+            staged_at: now,
+        };
+        crate::staged_wasm::set_staged_wasm(&env, &entry);
+
+        crate::events::WasmStagedEvent {
+            wasm_hash,
+            staged_by: caller,
+            timestamp: now,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Returns the currently staged WASM entry, or `None` if nothing is staged.
+    ///
+    /// Publicly readable — no auth required.
+    #[must_use]
+    pub fn get_staged(env: Env) -> Option<crate::staged_wasm::StagedWasm> {
+        crate::staged_wasm::get_staged_wasm(&env)
+    }
+
+    /// Clears the staged WASM slot. Admin-only.
+    ///
+    /// Use this to retract a staging before a new binary is decided on. A
+    /// no-op (not an error) if nothing is staged.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if `caller` is not the admin.
+    pub fn clear_staged(env: Env, caller: Address) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        caller.require_auth();
+
+        let admin = get_admin(&env)?;
+        if caller != admin {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        let now = env.ledger().timestamp();
+        if let Some(entry) = crate::staged_wasm::get_staged_wasm(&env) {
+            crate::staged_wasm::clear_staged_wasm(&env);
+            crate::events::StagedWasmClearedEvent {
+                wasm_hash: entry.wasm_hash,
+                cleared_by: caller,
+                timestamp: now,
+            }
+            .publish(&env);
+        }
+
+        Ok(())
+    }
+
+    // ── Multisig upgrade flow (Issue #301) ───────────────────────────────────
+
+    /// Sets the number of distinct approvals required before an upgrade
+    /// proposal can be executed. Default `1` (single-admin, backward
+    /// compatible). Set to `2` or higher for M-of-N governance.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if caller is not the admin.
+    pub fn set_upgrade_threshold(env: Env, caller: Address, threshold: u32) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        caller.require_auth();
+
+        let admin = get_admin(&env)?;
+        if caller != admin {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        crate::multisig_upgrade::set_upgrade_threshold(&env, threshold);
+        Ok(())
+    }
+
+    /// Returns the current upgrade approval threshold.
+    #[must_use]
+    pub fn get_upgrade_threshold(env: Env) -> u32 {
+        crate::multisig_upgrade::get_upgrade_threshold(&env)
+    }
+
+    /// Proposes a multisig WASM upgrade.
+    ///
+    /// The proposer is recorded as the first approver. Once `N` distinct
+    /// addresses have approved (where `N = get_upgrade_threshold()`) and
+    /// `delay_secs` have elapsed, any admin or Upgrader can call
+    /// `execute_upgrade` to perform the swap.
+    ///
+    /// Only one proposal may be live at a time — call `cancel_upgrade_proposal`
+    /// to discard an existing one before proposing a new one.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin or any `Role::Upgrader` holder.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if `caller` is not admin or Upgrader.
+    /// - [`ContractError::UpgradeProposalAlreadyPending`] if a proposal exists.
+    pub fn propose_multisig_upgrade(
+        env: Env,
+        caller: Address,
+        wasm_hash: BytesN<32>,
+        delay_secs: u64,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        caller.require_auth();
+
+        let admin = get_admin(&env)?;
+        let role = storage_get_role(&env, &caller);
+        let is_upgrader = matches!(role, Some(crate::storage::Role::Upgrader));
+        if caller != admin && !is_upgrader {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        let proposal = crate::multisig_upgrade::create_upgrade_proposal(
+            &env,
+            caller.clone(),
+            wasm_hash.clone(),
+            delay_secs,
+        )?;
+
+        crate::events::UpgradeProposedEvent {
+            proposal_id: proposal.id,
+            wasm_hash,
+            proposed_by: caller,
+            executable_at: proposal.executable_at,
+            timestamp: proposal.proposed_at,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Adds `caller`'s approval to the live upgrade proposal.
+    ///
+    /// The caller must be the admin or hold `Role::Upgrader`, and must not
+    /// have already approved this proposal.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin or any `Role::Upgrader` holder.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if `caller` is not admin or Upgrader.
+    /// - [`ContractError::NoUpgradeProposalPending`] if no proposal is live.
+    /// - [`ContractError::UpgradeProposalAlreadyApproved`] if already approved.
+    pub fn approve_upgrade(
+        env: Env,
+        caller: Address,
+        proposal_id: u32,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        caller.require_auth();
+
+        let admin = get_admin(&env)?;
+        let role = storage_get_role(&env, &caller);
+        let is_upgrader = matches!(role, Some(crate::storage::Role::Upgrader));
+        if caller != admin && !is_upgrader {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        let proposal = crate::multisig_upgrade::record_approval(&env, proposal_id, caller.clone())?;
+
+        crate::events::UpgradeApprovedEvent {
+            proposal_id,
+            approved_by: caller,
+            approval_count: proposal.approvers.len(),
+            timestamp: env.ledger().timestamp(),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Executes the live upgrade proposal if the delay has elapsed and the
+    /// approval threshold has been met.
+    ///
+    /// On success the staged WASM slot is also consumed (cleared) if it matches,
+    /// and provenance is recorded exactly as the regular `upgrade` path does.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin or any `Role::Upgrader` holder.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotAuthorized`] if `caller` is not admin or Upgrader.
+    /// - [`ContractError::NoUpgradeProposalPending`] if no proposal exists.
+    /// - [`ContractError::UpgradeProposalDelayActive`] if delay has not elapsed.
+    /// - [`ContractError::UpgradeProposalInsufficientApprovals`] if threshold not met.
+    /// - [`ContractError::StagedWasmMismatch`] if a staged hash conflicts.
+    pub fn execute_upgrade(
+        env: Env,
+        caller: Address,
+        proposal_id: u32,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+        caller.require_auth();
+
+        let admin = get_admin(&env)?;
+        let role = storage_get_role(&env, &caller);
+        let is_upgrader = matches!(role, Some(crate::storage::Role::Upgrader));
+        if caller != admin && !is_upgrader {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        let proposal = crate::multisig_upgrade::require_proposal_executable(&env, proposal_id)?;
+
+        // If a staged WASM slot is set, it must match the proposal.
+        crate::staged_wasm::require_staged_wasm_consistent(&env, &proposal.wasm_hash)?;
+
+        let now = env.ledger().timestamp();
+
+        // Capture provenance before the swap (same policy as `upgrade`).
+        let previous_wasm_hash = get_wasm_provenance(&env).map(|p| p.wasm_hash);
+        let version = storage_get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple());
+
+        set_wasm_provenance(
+            &env,
+            &WasmProvenance {
+                wasm_hash: proposal.wasm_hash.clone(),
+                previous_wasm_hash,
+                upgraded_by: caller.clone(),
+                upgraded_at: now,
+                version: soroban_sdk::vec![&env, version.0, version.1, version.2],
+                attested: false, // multisig path; attestation is orthogonal
+            },
+        );
+
+        // Consume the proposal.
+        let approval_count = proposal.approvers.len();
+        crate::multisig_upgrade::clear_upgrade_proposal(&env);
+
+        // Clear the staged slot if present (no error if absent).
+        crate::staged_wasm::clear_staged_wasm(&env);
+
+        env.deployer()
+            .update_current_contract_wasm(proposal.wasm_hash.clone());
+        set_last_upgrade(&env, now);
+
+        let version = storage_get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple());
+        crate::events::UpgradeProposalExecutedEvent {
+            proposal_id,
+            wasm_hash: proposal.wasm_hash.clone(),
+            executed_by: caller,
+            approval_count,
+            timestamp: now,
+        }
+        .publish(&env);
+
+        UpgradedEvent {
+            new_wasm_hash: proposal.wasm_hash,
+            version,
+            timestamp: now,
+            domain: event_domain(&env),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Cancels the live upgrade proposal. Admin-only.
+    ///
+    /// Available at any time before execution, including while the contract is
+    /// paused.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if `caller` is not the admin.
+    /// - [`ContractError::NoUpgradeProposalPending`] if no proposal is live.
+    pub fn cancel_upgrade_proposal(
+        env: Env,
+        caller: Address,
+        proposal_id: u32,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        caller.require_auth();
+
+        let admin = get_admin(&env)?;
+        if caller != admin {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        let proposal = crate::multisig_upgrade::get_upgrade_proposal(&env)
+            .ok_or(ContractError::NoUpgradeProposalPending)?;
+        if proposal.id != proposal_id {
+            return Err(ContractError::NoUpgradeProposalPending);
+        }
+
+        crate::multisig_upgrade::clear_upgrade_proposal(&env);
+
+        crate::events::UpgradeProposalCancelledEvent {
+            proposal_id,
+            wasm_hash: proposal.wasm_hash,
+            cancelled_by: caller,
+            timestamp: env.ledger().timestamp(),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Returns the live upgrade proposal, if any.
+    #[must_use]
+    pub fn get_upgrade_proposal(env: Env) -> Option<crate::multisig_upgrade::UpgradeProposal> {
+        crate::multisig_upgrade::get_upgrade_proposal(&env)
     }
 
     /// Authorization check for `remove`: only the registrant or the contract
