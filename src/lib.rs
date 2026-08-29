@@ -1504,19 +1504,27 @@ impl TrustBridgeContract {
     ///
     /// Read-only; no auth required. Use this for payout address resolution in GitHub Actions
     /// and dashboard lookups.
+    ///
+    /// **Complexity: O(1).** Resolved by a single direct persistent-key read of
+    /// `(REG_KEY, github_username)`; it never scans the flat or chunked username
+    /// index, so its cost is independent of registry size or chunk count
+    /// (Issue #291).
     #[must_use]
     pub fn get_address(env: Env, github_username: String) -> Option<ContributorRecord> {
-        if has_record(&env, &github_username) {
-            get_record(&env, &github_username)
-        } else {
-            None
-        }
+        // One direct-key read. `get_record` already returns `None` for a missing
+        // entry, so the previous `has_record` pre-check only doubled the storage
+        // work (Issue #291).
+        get_record(&env, &github_username)
     }
 
     /// Returns `true` if `github_username` is registered, without deserializing the full record.
     ///
     /// Read-only; no auth required. Use this when callers only need existence confirmation
     /// and do not need the [`ContributorRecord`] fields.
+    ///
+    /// **Complexity: O(1).** A direct persistent-key `has` on
+    /// `(REG_KEY, github_username)` — no index scan, no deserialization, no TTL
+    /// bump (Issue #291).
     #[must_use]
     pub fn has_record(env: Env, github_username: String) -> bool {
         has_record(&env, &github_username)
@@ -8228,6 +8236,64 @@ mod test {
             TrustBridgeContract::register(env.clone(), username(&env, "user050"), addr51, Vec::new(&env)).unwrap();
             let chunk_count_at_51 = crate::storage::get_chunk_count(&env);
             assert_eq!(chunk_count_at_51, 2, "51st entry must create a second chunk");
+        });
+    }
+
+    /// Issue #291: `has_record` / `get_address` must resolve by direct persistent
+    /// key and never scan the chunked index, so they stay correct — and O(1) —
+    /// with the registry spread across many chunks.
+    #[test]
+    fn test_has_record_is_direct_key_across_many_chunks() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+
+        // Enough users to fill several chunks (CHUNK_SIZE == 50).
+        const N: u32 = 260;
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            for i in 0..N {
+                let name = format!("user{i:04}");
+                let addr = Address::generate(&env);
+                TrustBridgeContract::register(
+                    env.clone(),
+                    username(&env, &name),
+                    addr,
+                    Vec::new(&env),
+                )
+                .unwrap();
+            }
+
+            // The index really is chunked now.
+            assert!(
+                crate::storage::get_chunk_count(&env) >= 5,
+                "expected the registry to span multiple chunks"
+            );
+
+            // A user in the very first chunk, one in the last, and one in the
+            // middle all resolve — a chunk scan that stopped early would miss
+            // some of these.
+            for name in ["user0000", "user0130", &format!("user{:04}", N - 1)] {
+                assert!(
+                    TrustBridgeContract::has_record(env.clone(), username(&env, name)),
+                    "has_record must find '{name}' regardless of which chunk holds it"
+                );
+                assert!(
+                    TrustBridgeContract::get_address(env.clone(), username(&env, name)).is_some(),
+                    "get_address must find '{name}' regardless of which chunk holds it"
+                );
+            }
+
+            // A never-registered username must report absent without scanning
+            // every chunk looking for it.
+            assert!(
+                !TrustBridgeContract::has_record(env.clone(), username(&env, "ghost")),
+                "has_record must not report a phantom record"
+            );
+            assert!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "ghost")).is_none(),
+                "get_address must return None for an unregistered username"
+            );
         });
     }
 

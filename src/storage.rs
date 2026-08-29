@@ -587,8 +587,18 @@ pub fn remove_record(env: &Env, github_username: &String) {
     env.storage().persistent().remove(&key);
 }
 
+/// Existence check for a single registration.
+///
+/// **Complexity: O(1).** This is a direct persistent-key `has` on
+/// `(REG_KEY, github_username)` — it never touches the flat or chunked
+/// username index, so its cost does not grow with the number of registrations
+/// or chunks (Issue #291). It also does not deserialize the
+/// [`ContributorRecord`] or extend its TTL; callers that need the record or a
+/// TTL bump must go through [`get_record`].
 pub fn has_record(env: &Env, github_username: &String) -> bool {
-    get_record(env, github_username).is_some()
+    env.storage()
+        .persistent()
+        .has(&(REG_KEY, github_username.clone()))
 }
 
 /// Build the light-client existence proof for `github_username` (Issue #230).

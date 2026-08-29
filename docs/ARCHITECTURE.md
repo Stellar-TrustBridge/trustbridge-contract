@@ -84,6 +84,16 @@ pub enum EntityType {
 
 - **`idx` index:** Soroban does not support iterating arbitrary storage keys. The username index enables `get_all_registered()` without scanning the entire ledger.
 - **`vcount` counter:** Maintained incrementally so `get_stats()` is O(1) rather than scanning all records.
+- **Single-record reads are O(1) (Issue #291):** `has_record`, `get_address`,
+  and `get_record_proof` resolve through a direct persistent-key lookup on
+  `(REG_KEY, github_username)`. They never walk the flat `idx` index or the
+  chunked index, so their cost is independent of the number of registrations
+  and the number of chunks — a registry with 10k users across 200 chunks reads
+  a single username in exactly the same number of storage operations as an
+  empty one. The chunked index is only consulted by the explicitly paginated
+  export paths (`get_public_paginated`, `get_registered_page`), never by point
+  lookups. `has_record` additionally skips deserialization and the TTL bump
+  that `get_record` performs.
 - **Re-registration:** Updating an existing username overwrites the record. If the Stellar address changes, `verified` resets to `false` unless the address is unchanged.
 - **Rent / Wave budgeting:** Dashboard UIs that estimate storage rent from N
   users should consume the versioned estimator inputs in
