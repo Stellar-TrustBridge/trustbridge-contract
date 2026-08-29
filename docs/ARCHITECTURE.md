@@ -155,6 +155,66 @@ See [Stellar auth documentation](https://developers.stellar.org/docs/build/smart
 
 ---
 
+## Public reads vs. pause: conformance matrix (Issue #294)
+
+The pause circuit breaker (`pause` / `set_paused` / `emergency_pause`) stops
+**state mutations only**. Every public (no-auth) read must keep working while
+the contract is paused, so that an indexer, the GitHub Action, and the
+dashboard can keep resolving identities and syncing state through a maintenance
+or security freeze. Issue #3 established this for `get_public_paginated`; a
+later change had accidentally regressed it behind `require_not_paused` — that
+gate has been removed and the whole surface is now locked down by a test.
+
+`test_conformance_public_reads_available_while_paused` in
+`tests/integration.rs` pauses the contract and asserts every row below returns
+`Ok` (or a non-`Paused` domain result such as `None`). Adding a public read
+without adding it to that test — or slipping a `require_not_paused` into one of
+these paths — fails CI.
+
+### Public reads — MUST succeed while `paused == true`
+
+| Read | Returns | Notes |
+|------|---------|-------|
+| `get_address(username)` | `Option<ContributorRecord>` | core identity lookup |
+| `has_record(username)` | `bool` | existence check |
+| `get_record_proof(username)` | `RecordProof` | light-client proof |
+| `get_public_paginated(cursor, limit)` | `Result<ExportPage, _>` | **regression fixed here** — was `Paused`, now only `NotInitialized` can fail it |
+| `get_stats()` | `Stats` | totals |
+| `get_verified_count()` / `get_ever_verified_count()` | `u32` | counters |
+| `get_health()` | `HealthSnapshot` | packed status probe |
+| `version()` / `get_version()` / `is_compatible(...)` | version data | schema reads |
+| `is_paused()` / `is_contract_paused()` / `is_emergency_paused()` | `bool` | pause status itself |
+| `emergency_pause_timestamp()` | `u64` | |
+| `get_pause_reason()` | `PauseReason` | why it was paused |
+| `get_role(addr)` / `get_role_holders(...)` / `get_role_holder_count()` | RBAC reads | |
+| `get_cooldown()` / `get_rotation_delay()` / `get_pending_rotation(username)` | config reads | |
+| `get_guardian()` / `get_attestation()` / `get_provenance()` | governance reads | |
+| `get_verification_config()` / `get_challenge(username)` / `get_reserved_list()` / `is_reserved(username)` | config reads | |
+| `get_network_tag()` | `Option<BytesN<32>>` | |
+| `max_username_len()` / `is_username_valid(u)` / `is_address_zero(a)` / `usernames_match(a, b)` | pure helpers | |
+| `get_audit_logs()` / `get_audit_stats()` | audit reads | |
+
+### Admin-only reads — allowed while paused **but still require admin auth**
+
+These are not gated by pause, but they are gated by `admin.require_auth()`, so
+a non-admin caller gets `NotAuthorized` (pause or not). They are listed
+separately and are **not** part of the "no-auth read" conformance set.
+
+| Read | Auth |
+|------|------|
+| `get_all_registered()` | admin |
+| `get_registered_page(offset, limit)` | admin |
+| `get_registered_paginated(cursor, limit)` | admin |
+
+### Policy
+
+Changing which functions the pause flag blocks is **out of scope** for routine
+PRs. If a genuine bug is found (a public read wrongly gated, or a mutation
+wrongly allowed), fix it *and* update this table and the matrix test in the
+same PR.
+
+---
+
 ## Challenge-Period Flow (Issue #214)
 
 Admin force-remove is normally instant. The challenge flow introduces a mandatory

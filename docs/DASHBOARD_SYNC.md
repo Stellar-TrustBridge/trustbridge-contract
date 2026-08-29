@@ -30,7 +30,7 @@ Key events to watch:
 
 1. **Chunked Username Index (Issue #2)**: Contributor usernames are stored in chunked persistent vectors (50 items per chunk) to avoid storage entry size limits at scale.
 2. **Paginated Cursor Export (Issue #1)**: Export endpoints (`get_registered_paginated` and `get_public_paginated`) accept a zero-based offset `cursor` and item count `limit` to retrieve records deterministically without exceeding gas or frame limits.
-3. **Hardened Public Reads & Emergency Pause (Issue #3)**: `get_public_paginated` allows unauthenticated dashboard reads with capped limits (`MAX_PAGE_LIMIT = 100`) and enforces emergency contract pause states.
+3. **Hardened Public Reads (Issue #3, clarified by Issue #294)**: `get_public_paginated` allows unauthenticated dashboard reads with capped limits (`MAX_PAGE_LIMIT = 100`). It **remains available while the contract is paused** — the pause circuit breaker stops state mutations only, so a dashboard/indexer can keep syncing through a maintenance or security freeze. See the pause-conformance matrix in [ARCHITECTURE.md](ARCHITECTURE.md#public-reads-vs-pause-conformance-matrix-issue-294).
 4. **Makefile Admin Invoke Targets (Issue #30)**: Convenient CLI commands for operators to query and manage registry state.
 
 Contract verification proves the registry entry was approved; Horizon readiness proves the address can receive the selected asset.
