@@ -174,13 +174,51 @@ variant and returns `None` for any unrecognized code. Every code round-trips
 through `from_code(variant.code()) == Some(variant)` — verified by the unit
 tests in `src/lib.rs` (`test_error_from_code_is_inverse_of_code`).
 
-Codes 1 through 16 are append-only and are frozen in
-[`abi/contract_error_codes.golden`](../abi/contract_error_codes.golden). The
-`contract_error_codes_match_golden` test checks both the enum discriminant and
-the `from_code()` mapping. New errors must use the next available code after
-the existing variants; renumbering requires a major ABI version. An intentional
-breaking change must update the golden file, this table, and the major ABI
-version in the same pull request with an explanation of the old and new map.
+#### Off-chain retry classification
+
+`ContractError::category()` (`src/error.rs`) maps every variant to one of three
+buckets so the dashboard, the action runner, and the indexer can pick a retry
+policy without parsing strings or maintaining their own code list. The match is
+exhaustive at compile time — a new variant cannot be added without classifying
+it. `ContractError::is_retryable()` is the shorthand for `category() == Retry`.
+
+| Category | Meaning | Off-chain action |
+|----------|---------|------------------|
+| `Retry` | Transient — the blocking condition clears with time or an unrelated state change | Re-submit the same transaction later with backoff |
+| `Auth` | The caller did not satisfy an authorization check | Do not retry with the same signer; a key holder must act |
+| `Fatal` | The request is malformed or violates an invariant, or a one-shot call was already made | Do not retry verbatim; change the request or abort |
+
+| Variant | Category | Rationale |
+|---------|----------|-----------|
+| `NotAuthorized` | `Auth` | Wrong signer / missing role |
+| `AttestationRequired` | `Auth` | Admin must publish an attestation first |
+| `Paused` | `Retry` | Succeeds once the admin unpauses |
+| `CooldownActive` | `Retry` | Succeeds once the cooldown window elapses |
+| `ChallengeNotResolvable` | `Retry` | Succeeds once the challenge delay elapses |
+| `ChallengeActive` | `Retry` | Succeeds once the active challenge is resolved |
+| `AdminTransferDelayActive` | `Retry` | Succeeds once the transfer delay elapses |
+| `AlreadyInitialized` | `Fatal` | One-shot call already made |
+| `NotInitialized` | `Fatal` | Needs an operator to run `initialize` |
+| `NotRegistered` | `Fatal` | Referenced username does not exist |
+| `AlreadyVerified` / `NotVerified` | `Fatal` | Record already in the requested state |
+| `InvalidEntityType` / `OrgNameRequired` | `Fatal` | Malformed `register` arguments |
+| `InvalidVersion` | `Fatal` | Target version not strictly greater |
+| `InvalidRole` | `Fatal` | Unknown role discriminant |
+| `InvalidUsername` | `Fatal` | Username fails validation |
+| `AttestationExpired` | `Fatal` | Needs a fresh `attest_upgrade` |
+| `UnattestedWasm` | `Fatal` | Hash does not match the live attestation |
+| `InvalidBatchSize` | `Fatal` | Batch too large or empty |
+| `InvalidReasonCode` / `InvalidPauseReason` | `Fatal` | Unknown reason discriminant |
+| `ZeroAddress` | `Fatal` | Burn address rejected |
+| `ChallengeAlreadyActive` / `NoChallengeActive` | `Fatal` | Challenge state precondition not met |
+| `AlreadyReserved` / `NotReserved` | `Fatal` | Reserved-list precondition not met |
+| `UsernameReserved` | `Fatal` | Username is on the reserved list |
+| `ReservedListFull` | `Fatal` | Reserved list at capacity |
+| `AdminTransferPending` / `NoPendingAdminTransfer` | `Fatal` | Admin-transfer state precondition not met |
+
+Completeness is enforced by `src/error.rs` unit tests
+(`every_error_code_has_a_category`, `retryable_errors_are_the_transient_set`,
+`auth_failures_are_classified_as_auth`, `bad_request_errors_are_fatal`).
 
 ---
 

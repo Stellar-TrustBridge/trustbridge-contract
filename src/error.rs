@@ -178,6 +178,89 @@ impl ContractError {
     }
 }
 
+/// Off-chain retry classification for a [`ContractError`].
+///
+/// The dashboard, the action runner, and the indexer all need to decide what to
+/// do with a failed invocation *without* parsing error strings or hard-coding a
+/// list of numeric codes. `category()` gives them that decision directly:
+///
+/// - [`ErrorCategory::Retry`] — the call failed on a condition that clears with
+///   time or an unrelated state change (a cooldown, a pause, a challenge delay).
+///   Re-submitting the *same* transaction later is expected to succeed.
+/// - [`ErrorCategory::Auth`] — the caller did not satisfy an authorization
+///   check. Retrying with the same signer is pointless; a human with the right
+///   key has to act.
+/// - [`ErrorCategory::Fatal`] — the request itself is wrong (bad input, a
+///   violated invariant, a one-shot call already made). Retrying verbatim will
+///   always fail; the caller must change the request or give up.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ErrorCategory {
+    /// Transient: retry the same call after the blocking condition clears.
+    Retry,
+    /// Authorization failure: a different signer / key is required.
+    Auth,
+    /// Permanent: the request must change or be abandoned.
+    Fatal,
+}
+
+impl ContractError {
+    /// Classify this error for an off-chain retry policy. See [`ErrorCategory`].
+    ///
+    /// The match is exhaustive by construction — adding a `ContractError`
+    /// variant without classifying it here is a compile error, which is the
+    /// mechanism that keeps this mapping complete.
+    #[must_use]
+    pub fn category(self) -> ErrorCategory {
+        match self {
+            // ── Auth ──────────────────────────────────────────────────────
+            ContractError::NotAuthorized => ErrorCategory::Auth,
+            ContractError::AttestationRequired => ErrorCategory::Auth,
+
+            // ── Retry (transient) ─────────────────────────────────────────
+            ContractError::Paused => ErrorCategory::Retry,
+            ContractError::CooldownActive => ErrorCategory::Retry,
+            ContractError::ChallengeNotResolvable => ErrorCategory::Retry,
+            ContractError::ChallengeActive => ErrorCategory::Retry,
+            ContractError::AdminTransferDelayActive => ErrorCategory::Retry,
+
+            // ── Fatal (permanent / bad request) ──────────────────────────
+            ContractError::AlreadyInitialized => ErrorCategory::Fatal,
+            ContractError::NotInitialized => ErrorCategory::Fatal,
+            ContractError::NotRegistered => ErrorCategory::Fatal,
+            ContractError::AlreadyVerified => ErrorCategory::Fatal,
+            ContractError::InvalidEntityType => ErrorCategory::Fatal,
+            ContractError::OrgNameRequired => ErrorCategory::Fatal,
+            ContractError::NotVerified => ErrorCategory::Fatal,
+            ContractError::InvalidVersion => ErrorCategory::Fatal,
+            ContractError::InvalidRole => ErrorCategory::Fatal,
+            ContractError::InvalidUsername => ErrorCategory::Fatal,
+            ContractError::AttestationExpired => ErrorCategory::Fatal,
+            ContractError::UnattestedWasm => ErrorCategory::Fatal,
+            ContractError::InvalidBatchSize => ErrorCategory::Fatal,
+            ContractError::InvalidReasonCode => ErrorCategory::Fatal,
+            ContractError::ZeroAddress => ErrorCategory::Fatal,
+            ContractError::ChallengeAlreadyActive => ErrorCategory::Fatal,
+            ContractError::NoChallengeActive => ErrorCategory::Fatal,
+            ContractError::InvalidPauseReason => ErrorCategory::Fatal,
+            ContractError::AlreadyReserved => ErrorCategory::Fatal,
+            ContractError::NotReserved => ErrorCategory::Fatal,
+            ContractError::UsernameReserved => ErrorCategory::Fatal,
+            ContractError::ReservedListFull => ErrorCategory::Fatal,
+            ContractError::AdminTransferPending => ErrorCategory::Fatal,
+            ContractError::NoPendingAdminTransfer => ErrorCategory::Fatal,
+        }
+    }
+
+    /// Whether an off-chain caller should retry the same invocation later.
+    ///
+    /// Convenience wrapper over [`ContractError::category`] for the common
+    /// yes/no branch; equivalent to `self.category() == ErrorCategory::Retry`.
+    #[must_use]
+    pub fn is_retryable(self) -> bool {
+        matches!(self.category(), ErrorCategory::Retry)
+    }
+}
+
 // Wave #42: ContractError code mapping for register / verify / remove / export
 // consumers (dashboard, indexer, off-chain tooling) that need stable u32 codes
 // without depending on the Rust enum layout.
@@ -208,3 +291,75 @@ impl ContractError {
 // Tests covering this mapping live in `src/lib.rs`
 // (`test_error_codes_match_repr`, `test_from_code_round_trips_all_variants`,
 // `test_from_code_unknown_returns_none`).
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every variant that `from_code` can produce must have a category, and the
+    /// category must be one of the three documented buckets. This walks the
+    /// numeric code space so a newly added code that `from_code` learns about
+    /// is automatically exercised here too.
+    #[test]
+    fn every_error_code_has_a_category() {
+        for code in 0..64u32 {
+            if let Some(err) = ContractError::from_code(code) {
+                let category = err.category();
+                assert!(
+                    matches!(
+                        category,
+                        ErrorCategory::Retry | ErrorCategory::Auth | ErrorCategory::Fatal
+                    ),
+                    "code {code} ({err:?}) has no valid category"
+                );
+                // `is_retryable` must agree with `category`.
+                assert_eq!(err.is_retryable(), category == ErrorCategory::Retry);
+            }
+        }
+    }
+
+    #[test]
+    fn retryable_errors_are_the_transient_set() {
+        let retry = [
+            ContractError::Paused,
+            ContractError::CooldownActive,
+            ContractError::ChallengeNotResolvable,
+            ContractError::ChallengeActive,
+            ContractError::AdminTransferDelayActive,
+        ];
+        for err in retry {
+            assert_eq!(err.category(), ErrorCategory::Retry, "{err:?}");
+            assert!(err.is_retryable(), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn auth_failures_are_classified_as_auth() {
+        assert_eq!(ContractError::NotAuthorized.category(), ErrorCategory::Auth);
+        assert_eq!(
+            ContractError::AttestationRequired.category(),
+            ErrorCategory::Auth
+        );
+        assert!(!ContractError::NotAuthorized.is_retryable());
+    }
+
+    #[test]
+    fn bad_request_errors_are_fatal() {
+        for err in [
+            ContractError::AlreadyInitialized,
+            ContractError::NotRegistered,
+            ContractError::AlreadyVerified,
+            ContractError::InvalidVersion,
+            ContractError::InvalidRole,
+            ContractError::InvalidUsername,
+            ContractError::InvalidBatchSize,
+            ContractError::InvalidReasonCode,
+            ContractError::ZeroAddress,
+            ContractError::UnattestedWasm,
+            ContractError::ReservedListFull,
+        ] {
+            assert_eq!(err.category(), ErrorCategory::Fatal, "{err:?}");
+            assert!(!err.is_retryable(), "{err:?}");
+        }
+    }
+}
