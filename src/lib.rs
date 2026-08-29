@@ -1517,6 +1517,51 @@ impl TrustBridgeContract {
         get_record(&env, &github_username)
     }
 
+    /// Verified-only address lookup for CI payouts (Issue #287).
+    ///
+    /// [`Self::get_address`] returns the record whenever the username is present,
+    /// regardless of the `verified` flag. A GitHub Action that only checks
+    /// presence would therefore pay an **unverified** registration — a squatter
+    /// who registered a G-address against someone else's username but was never
+    /// confirmed off-chain. This entry point refuses that case at the contract
+    /// boundary so the action does not have to.
+    ///
+    /// Outcomes are distinct and exhaustive:
+    ///
+    /// | State | Result |
+    /// |-------|--------|
+    /// | Username registered **and** `verified == true` | `Ok(ContributorRecord)` |
+    /// | Username registered but `verified == false` | `Err(ContractError::NotVerified)` (code 6) |
+    /// | Username never registered / removed | `Err(ContractError::NotRegistered)` (code 4) |
+    ///
+    /// Read-only; no auth required; works while the contract is paused — the same
+    /// contract-call semantics as [`Self::get_address`], which is left unchanged
+    /// (Issue #287 constraint: no versioned sibling may change `get_address`).
+    /// Callers that want payout eligibility to also depend on pause state should
+    /// additionally check [`Self::is_paused`].
+    ///
+    /// # ABI note for the GitHub Action
+    ///
+    /// Resolve payout addresses with `get_address_if_verified`, not `get_address`.
+    /// Treat error code `6` (`NotVerified`) and code `4` (`NotRegistered`)
+    /// identically: **do not pay**. Only an `Ok` result carries a payable
+    /// `stellar_address` / `payout_address`.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotRegistered`] if `github_username` has no record.
+    /// - [`ContractError::NotVerified`] if the record exists but is not verified.
+    pub fn get_address_if_verified(
+        env: Env,
+        github_username: String,
+    ) -> Result<ContributorRecord, ContractError> {
+        match get_record(&env, &github_username) {
+            Some(record) if record.verified => Ok(record),
+            Some(_) => Err(ContractError::NotVerified),
+            None => Err(ContractError::NotRegistered),
+        }
+    }
+
     /// Returns `true` if `github_username` is registered, without deserializing the full record.
     ///
     /// Read-only; no auth required. Use this when callers only need existence confirmation
@@ -3110,6 +3155,109 @@ mod test {
                     .stellar_address,
                 user2
             );
+        });
+    }
+
+    // ── Verified-only lookup (Issue #287) ────────────────────────────────────
+
+    /// A verified registration resolves through `get_address_if_verified` and
+    /// carries the same address `get_address` would return.
+    #[test]
+    fn test_verified_only_lookup_returns_record_when_verified() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone(), Vec::new(&env))
+                .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+            let record =
+                TrustBridgeContract::get_address_if_verified(env.clone(), username(&env, "octocat"))
+                    .unwrap();
+            assert_eq!(record.stellar_address, user);
+            assert!(record.verified);
+        });
+    }
+
+    /// A registered-but-unverified username is rejected with `NotVerified` (code 6),
+    /// even though `get_address` would still return it.
+    #[test]
+    fn test_verified_only_lookup_rejects_unverified() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone(), Vec::new(&env))
+                .unwrap();
+            assert!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).is_some(),
+                "get_address still returns the unverified record"
+            );
+            assert_eq!(
+                TrustBridgeContract::get_address_if_verified(env.clone(), username(&env, "octocat")),
+                Err(ContractError::NotVerified),
+            );
+        });
+    }
+
+    /// An unregistered username is rejected with `NotRegistered` (code 4),
+    /// distinct from the unverified case.
+    #[test]
+    fn test_verified_only_lookup_rejects_unregistered() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_address_if_verified(env.clone(), username(&env, "ghost")),
+                Err(ContractError::NotRegistered),
+            );
+        });
+    }
+
+    /// A revoked registration falls back to `NotVerified` — verification can be
+    /// withdrawn and the verified-only lookup tracks that immediately.
+    #[test]
+    fn test_verified_only_lookup_follows_revocation() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone(), Vec::new(&env))
+                .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+            TrustBridgeContract::revoke_verification(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+                1,
+            )
+            .unwrap();
+            assert_eq!(
+                TrustBridgeContract::get_address_if_verified(env.clone(), username(&env, "octocat")),
+                Err(ContractError::NotVerified),
+            );
+        });
+    }
+
+    /// The verified-only lookup keeps working while the contract is paused,
+    /// matching `get_address` read semantics.
+    #[test]
+    fn test_verified_only_lookup_works_while_paused() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone(), Vec::new(&env))
+                .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+            TrustBridgeContract::pause(env.clone(), 1).unwrap();
+            let record =
+                TrustBridgeContract::get_address_if_verified(env.clone(), username(&env, "octocat"))
+                    .unwrap();
+            assert_eq!(record.stellar_address, user);
         });
     }
 

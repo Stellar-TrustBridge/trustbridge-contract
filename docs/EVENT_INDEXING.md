@@ -2,6 +2,37 @@
 
 TrustBridge emits events so dashboards and indexers can build a readable contributor timeline.
 
+## Reference indexer (`scripts/event_indexer.sh`, Issue #288)
+
+A runnable reference indexer now lives in the repo. It polls the Stellar RPC
+`getEvents` method, appends events to a local JSONL file, and persists the RPC
+pagination cursor to disk so restarts resume exactly where they stopped
+(idempotent restart). It de-duplicates on the RPC event `id`, so reorgs and
+overlapping re-reads never double-write.
+
+```bash
+# follow testnet forever
+CONTRACT_ID=C... ./scripts/event_indexer.sh
+
+# drain once and exit (cron / CI)
+CONTRACT_ID=C... ONESHOT=1 ./scripts/event_indexer.sh
+
+# offline replay of a canned RPC response — no network
+MOCK_RESPONSE=./scripts/testdata/getEvents.sample.json \
+  CONTRACT_ID=C_MOCK ONESHOT=1 ./scripts/event_indexer.sh
+```
+
+State is three files under `DATA_DIR` (default `./.indexer/`):
+`events-<network>.jsonl`, `cursor-<network>.json`, `seen-<network>.txt`. No
+cloud account or database is required. See
+[`scripts/README.md`](../scripts/README.md#event_indexersh--reference-event-indexing-service)
+for the full guide, including how to validate resume behavior locally and a
+run against futurenet.
+
+This is a **reference** implementation for local sync — the filter/field
+patterns below are the spec it follows; a production hosted indexer is out of
+scope for this repo.
+
 ## Suggested consumer behavior
 
 - Treat contract storage as the source of truth.
