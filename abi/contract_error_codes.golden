@@ -1,0 +1,16 @@
+1 AlreadyInitialized
+2 NotInitialized
+3 NotAuthorized
+4 NotRegistered
+5 AlreadyVerified
+6 NotVerified
+7 Paused
+8 CooldownActive
+9 InvalidVersion
+10 InvalidRole
+11 InvalidUsername
+12 AttestationExpired
+13 UnattestedWasm
+14 InvalidBatchSize
+15 InvalidReasonCode
+16 ZeroAddress

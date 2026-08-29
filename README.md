@@ -164,6 +164,13 @@ The fuzzing suite drives randomized `register` / `verify` / `revoke_verification
 invariants in [docs/REGISTRY_INVARIANTS.md](docs/REGISTRY_INVARIANTS.md) after every
 step. Seeds are fixed constants, so failures replay deterministically.
 
+### Devcontainer / Codespaces
+
+The repository devcontainer installs Stellar CLI `26.1.0` and the required
+`wasm32v1-none` target. After reopening the repository in the container, verify
+the toolchain with `stellar --version` and
+`rustup target list --installed | grep wasm32v1-none`.
+
 > **Note on WASM targets:** `soroban-sdk` 26.x requires the `wasm32v1-none` target. Building with `wasm32-unknown-unknown` on Rust 1.82+ is unsupported by the Soroban environment. The release profile uses `opt-level = "z"` and `lto = true` as specified in `Cargo.toml`.
 
 ---

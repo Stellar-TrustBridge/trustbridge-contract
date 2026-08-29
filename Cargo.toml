@@ -20,6 +20,8 @@ soroban-sdk = { version = "26.0.1", features = ["alloc"] }
 [features]
 # Optional gate for WASM-backed integration tests (see tests/integration.rs).
 wasm-test = []
+# Opt-in 10k-user pagination load test (see tests/integration.rs).
+scale-test = []
 
 [dev-dependencies]
 soroban-sdk = { version = "26.0.1", features = ["testutils"] }

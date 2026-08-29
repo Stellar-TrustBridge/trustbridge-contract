@@ -5,6 +5,9 @@ use soroban_sdk::contracterror;
 /// Each variant maps to a stable `u32` code (see `code()` / `from_code()`).
 /// Off-chain consumers such as the dashboard and indexer use these codes to
 /// classify failed invocations without depending on the Rust enum layout.
+/// Codes 1 through 16 are frozen in `abi/contract_error_codes.golden`; new
+/// errors must append after the existing codes and must not reuse or reorder
+/// them. Renumbering requires a major ABI version.
 ///
 /// | Code | Variant | Raised by |
 /// |------|---------|-----------|

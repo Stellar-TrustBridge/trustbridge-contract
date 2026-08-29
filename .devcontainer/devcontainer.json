@@ -1,10 +1,10 @@
 {
-  "name": "TrustBridge Soroban Contract",
+  "name": "TrustBridge Stellar Contract",
   "image": "mcr.microsoft.com/devcontainers/rust:1-bullseye",
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2": {}
   },
-  "onCreateCommand": "rustup target add wasm32-unknown-unknown && cargo install --locked soroban-cli || true",
+  "onCreateCommand": "sudo apt-get update && sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config && rustup target add wasm32v1-none && cargo install --locked stellar-cli@26.1.0",
   "customizations": {
     "vscode": {
       "extensions": [
@@ -14,5 +14,5 @@
       ]
     }
   },
-  "postAttachCommand": "soroban --version || true"
+  "postAttachCommand": "stellar --version"
 }

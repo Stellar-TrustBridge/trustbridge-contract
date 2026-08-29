@@ -37,6 +37,21 @@ make check
 
 This runs formatting, clippy, tests, and contract build — the same checks as CI.
 
+### Codespaces / devcontainer setup
+
+The repository devcontainer installs the same pinned CLI and WASM target used
+by the documented build flow: Stellar CLI `26.1.0` and `wasm32v1-none`.
+After the container is created, verify the setup with:
+
+```bash
+stellar --version
+rustup target list --installed | grep wasm32v1-none
+make build
+```
+
+The Rust channel remains controlled by `rust-toolchain.toml`; the container
+uses the stable Rust image to match CI.
+
 ---
 
 ## Development Workflow
