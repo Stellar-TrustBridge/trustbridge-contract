@@ -123,6 +123,54 @@ pub struct RoleRevokedEvent {
     pub domain: EventDomain,
 }
 
+/// Emitted when a large `batch_remove` is proposed for dual-control execution
+/// (Issue #219).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchRemoveProposedEvent {
+    #[topic]
+    pub proposed_by: Address,
+    /// Number of usernames in the proposed batch.
+    pub count: u32,
+    pub timestamp: u64,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
+}
+
+/// Emitted when a pending large `batch_remove` proposal is executed by a
+/// second, distinct address (Issue #219).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchRemoveExecutedEvent {
+    #[topic]
+    pub executed_by: Address,
+    pub proposed_by: Address,
+    /// Number of usernames in the executed batch.
+    pub count: u32,
+    /// Number of usernames actually removed (partial-success semantics
+    /// match `batch_remove`'s own `BatchSummary`).
+    pub successful: u32,
+    pub timestamp: u64,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
+}
+
+/// Emitted when a pending large `batch_remove` proposal is cancelled without
+/// executing (Issue #219).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BatchRemoveCancelledEvent {
+    #[topic]
+    pub cancelled_by: Address,
+    pub proposed_by: Address,
+    pub timestamp: u64,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
+}
+
 /// Emitted when an admin starts a challenge on a squatted username (Issue #214).
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

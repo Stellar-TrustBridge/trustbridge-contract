@@ -630,27 +630,197 @@ Use this when freezing writes during an active Wave.
 8. Post-incident note: include window duration, impacted functions, and
 	follow-up actions.
 
-## Disaster-Recovery Registry Round-Trip
+---
 
-Run the export/validate rehearsal against a disposable local, testnet, or
-futurenet deployment. The command is read-only against the contract and does
-not import records or submit any write transaction:
+## Role Expiry (Issue #221)
+
+Off-boarded contractor and bot keys should not linger as live `Verifier` /
+`Revoker` holders forever. `set_role` still grants a role with no expiry
+(unchanged); `set_role_with_expiry` grants a time-bounded one.
 
 ```bash
-CONTRACT_ID=C... SOURCE=admin-identity ADMIN_SOURCE=admin-identity \
-  NETWORK=testnet EXPECTED_COUNT=2 PAGE_LIMIT=1 make dr-test
+# Grant a contractor Verifier access that lapses in 30 days
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source-account admin-identity \
+  --network testnet \
+  --send=yes \
+  -- set_role_with_expiry --target $CONTRACTOR --role 3 --expires_at $(($(date +%s) + 2592000))
 ```
 
-`make dr-test` exports the complete registry, then validates every exported
-address and `verified` flag against the contract. It also performs the
-admin-gated on-chain listing comparison, so additions or omissions fail the
-command. `PAGE_LIMIT=1` deliberately exercises pagination; set
-`EXPECTED_COUNT=0` for an empty-registry rehearsal. `STELLAR` may be set to a
-different CLI executable when using a local instance.
+- Check what is set: `get_role_expiry --address $CONTRACTOR` — `None` means
+  no expiry (or no role at all); `Some(T)` may already be in the past.
+- Expiry is **lazy**. The role entry is not deleted when the clock passes
+  `expires_at` — `get_role` (and every check built on it) just stops
+  reporting it. Run `remove_role` afterward if you want the storage entry
+  itself gone and the address dropped from `get_role_holders`.
+- The contract admin's own identity is never affected by this. Only the
+  RBAC-style `Role::Admin` grant (the one `initialize` sets alongside
+  `ADMIN_KEY`) can expire, and only if you explicitly grant it with
+  `set_role_with_expiry` — routine admin auth (`has_admin_role`,
+  `get_admin`) reads a separate, immutable storage slot.
+- Operational habit: when off-boarding a contractor or rotating a bot key,
+  prefer `set_role_with_expiry` with a known end date over remembering to
+  call `remove_role` manually later.
 
-The export is a recovery input, not an import command. Before any restore,
-review the JSON, confirm the contract ID and network, and use a separately
-reviewed operator procedure appropriate to that deployment. Never replay an
-export blindly to mainnet, and do not use this rehearsal as a mainnet import
-test. The harness cannot detect records written after export, and it does not
-verify timestamps beyond preserving them in the export.
+---
+
+## Time-Bounded Verification (Issue #218)
+
+A stolen or transferred GitHub account should not stay `verified` forever.
+`config_verification`'s `expires_in` (seconds, one-time set) now drives an
+actual expiry, checked against each username's last `verify()` timestamp.
+
+- **Check effective status**: `is_verification_active --github-username
+  octocat` — this is expiry-aware. `get_address --github-username octocat`
+  returns the raw `ContributorRecord.verified` flag, which stays `true`
+  after expiry until someone calls `revoke_verification` (lazy expiry — see
+  [ABI.md](./ABI.md#time-bounded-verification-issue-218)). Payout and
+  dashboard integrations should call `is_verification_active`, not read the
+  raw flag, if `config_verification` has been used.
+- **Renewal is automatic on re-verify**: calling `verify` again on a
+  username whose prior verification has expired succeeds and refreshes the
+  timestamp — it does not require an explicit `revoke_verification` first.
+  A still-active verification is unaffected and still rejects a duplicate
+  `verify` call with `AlreadyVerified`.
+- **`get_stats` / `get_verified_count` are not expiry-aware** by design —
+  they count the raw `verified` flag, not `is_verification_active`, so they
+  stay an O(1) read. An operator watching for stale-but-unrevoked
+  verifications should page through the registry and call
+  `is_verification_active` per record, or track `get_verification_expiry`
+  off-chain.
+- If `config_verification` was never called, or was called with
+  `expires_in = 0`, nothing in this section applies — verification behaves
+  exactly as before this issue.
+
+---
+
+## Signed Export Attestation (Issue #223)
+
+`export_registry.sh` produces a JSON page with no on-chain binding — a
+compromised or careless export step could hand an auditor stale or edited
+data with no way to detect it. `export_attestation(cursor, limit)` is the
+admin-only companion read that binds the same page to a digest.
+
+### Workflow for an air-gapped audit
+
+1. **Online, admin-authenticated machine:** call `export_attestation` for
+   each page (same `cursor`/`limit` loop as `export_registry.sh` already
+   does against `get_registered_paginated`) and save both the page JSON and
+   the returned `digest` / `version` / `ledger`.
+
+   ```bash
+   stellar contract invoke \
+     --id $CONTRACT_ID \
+     --source-account admin-identity \
+     --network testnet \
+     -- export_attestation --cursor 0 --limit 100
+   ```
+
+2. **Transfer** the saved output to the air-gapped machine by any channel —
+   USB, printed QR, whatever the audit's threat model requires. There is
+   nothing further to fetch from the network.
+
+3. **Offline, on the air-gapped machine:** recompute the SHA-256 digest over
+   the page's XDR encoding exactly as `export_attestation` does (see
+   `storage::build_export_digest` in `src/storage.rs` for the reference
+   implementation) and compare byte for byte against the saved `digest`. A
+   mismatch means the JSON the auditor is holding does not match what the
+   contract actually returned for that `cursor`/`limit` at `ledger`.
+
+### What this is not
+
+- **Not a threshold signature.** The digest is bound to the admin's
+  authenticated read, not counter-signed by a quorum. Out of scope for
+  Issue #223 by design.
+- **Not a Merkle proof over the whole registry.** Each attestation covers
+  one page; there is no root committing to every page at once. A
+  registry-wide Merkle root can complement this later (Issue #27) without
+  changing this function's shape.
+- **Does not weaken the existing admin gate.** `export_attestation`,
+  `get_registered_paginated`, and `get_all_registered` all still require
+  admin auth — this issue only adds a binding on top of that export, it
+  does not add a new unauthenticated way to read the registry.
+- **An empty registry is not an error.** `page.records` is empty and
+  `digest` is still a real, deterministic hash over that empty page —
+  useful as a baseline attestation for a freshly deployed instance.
+
+---
+
+## Dual-Control `batch_remove` (Issue #219)
+
+A single admin signature could previously delete up to `MAX_WRITE_BATCH`
+(25) registrations in one call. Above a configurable size threshold, that is
+no longer enough — the batch must be proposed by one admin-equivalent
+address and executed by a **different** one.
+
+### 1. Configure the threshold
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source-account admin-identity \
+  --network testnet \
+  --send=yes \
+  -- set_batch_remove_threshold --threshold 10
+```
+
+`0` (the default) disables dual control entirely — every `batch_remove` call
+executes directly regardless of size, identical to pre-#219 behavior. With a
+threshold set, any batch **larger** than it (strictly greater; a batch
+exactly at the threshold is unaffected) is rejected by `batch_remove` itself
+with `DualControlRequired` and must go through the propose/execute flow
+below.
+
+### 2. Provision a second key *before* you need it
+
+`execute_batch_remove` requires a caller that is the contract admin or holds
+`Role::Admin`, and is a **different** address than whoever proposed the
+batch. If the only admin-equivalent address is the contract admin itself,
+a large batch can be proposed but never executed — grant `Role::Admin` to a
+second, independently held key ahead of time:
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source-account admin-identity \
+  --network testnet \
+  --send=yes \
+  -- set_role --target $SECOND_KEY --role 1
+```
+
+This is a deliberate design choice, not a bug: dual control that degraded
+back to single-key execution whenever the second key was missing would not
+be dual control. `cancel_batch_remove` remains available to abort a stuck
+proposal — see [SECURITY.md](./SECURITY.md#dual-control-batch_remove-issue-219)
+for the full threat-model note.
+
+### 3. Propose, then execute from a different key
+
+```bash
+# Admin proposes
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- propose_batch_remove --caller $ADMIN --usernames '["squatter1","squatter2", ...]'
+
+# A DIFFERENT Role::Admin holder executes
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account second-key-identity --network testnet --send=yes \
+  -- execute_batch_remove --caller $SECOND_KEY
+```
+
+`get_pending_batch_remove` shows what is queued (works while paused). A
+proposal not executed within 24 hours (`BATCH_REMOVE_PROPOSAL_TTL_SECS`) is
+treated as gone the next time anyone calls `execute_batch_remove` — propose
+again if you still need it removed.
+
+### 4. Abort instead
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- cancel_batch_remove --caller $ADMIN
+```
+
+Available even while paused, so a stuck or mistaken proposal is never
+trapped behind the same freeze that might be the reason to cancel it.

@@ -116,32 +116,16 @@ pub enum ContractError {
     NoPendingAdminTransfer = 28,
     /// `upgrade` was called without a required attestation (attestation-required mode is on).
     AttestationRequired = 29,
-    /// Instance state was initialized on a different network than the one
-    /// currently executing (Issue #231).
-    NetworkMismatch = 30,
-    /// `register` or `register_sponsored` was called with more fallback
-    /// addresses than `storage::MAX_FALLBACK_ADDRESSES` allows.
-    FallbackListFull = 31,
-    /// `register` attempted a direct address change while an address
-    /// rotation delay is configured (Issue #234); use
-    /// `request_address_rotation` instead.
-    RotationRequired = 32,
-    /// `request_address_rotation` was called while a rotation is already
-    /// pending for this username (Issue #234).
-    RotationPending = 33,
-    /// `execute_address_rotation` or `cancel_address_rotation` was called
-    /// with no pending rotation for this username (Issue #234).
-    NoRotationPending = 34,
-    /// `execute_address_rotation` was called before the rotation's delay has
-    /// elapsed (Issue #234).
-    RotationNotReady = 35,
-    /// `rename` was called with a `new_username` that is already registered.
-    UsernameTaken = 36,
-    /// `get_registered_paginated` / `get_public_paginated` was called with a
-    /// cursor that fails to decode: its embedded index generation no longer
-    /// matches (a username was removed since the cursor was issued), or its
-    /// embedded offset is past the current registry size (Issue #215).
-    InvalidCursor = 37,
+    /// `batch_remove` was called with a batch larger than the configured
+    /// dual-control threshold; use `propose_batch_remove` /
+    /// `execute_batch_remove` instead (Issue #219).
+    DualControlRequired = 30,
+    /// `propose_batch_remove` was called while a proposal is already pending.
+    /// Cancel it with `cancel_batch_remove` first (Issue #219).
+    BatchRemoveProposalPending = 31,
+    /// `execute_batch_remove` or `cancel_batch_remove` was called with no
+    /// pending proposal (or a proposal that has expired) (Issue #219).
+    NoPendingBatchRemove = 32,
 }
 
 impl ContractError {
@@ -186,14 +170,9 @@ impl ContractError {
             27 => Some(ContractError::AdminTransferDelayActive),
             28 => Some(ContractError::NoPendingAdminTransfer),
             29 => Some(ContractError::AttestationRequired),
-            30 => Some(ContractError::NetworkMismatch),
-            31 => Some(ContractError::FallbackListFull),
-            32 => Some(ContractError::RotationRequired),
-            33 => Some(ContractError::RotationPending),
-            34 => Some(ContractError::NoRotationPending),
-            35 => Some(ContractError::RotationNotReady),
-            36 => Some(ContractError::UsernameTaken),
-            37 => Some(ContractError::InvalidCursor),
+            30 => Some(ContractError::DualControlRequired),
+            31 => Some(ContractError::BatchRemoveProposalPending),
+            32 => Some(ContractError::NoPendingBatchRemove),
             _ => None,
         }
     }

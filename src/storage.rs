@@ -2,7 +2,7 @@
 //! behavior are documented in `docs/STORAGE_RENT.md` — read that before
 //! changing `TTL_THRESHOLD` / `TTL_BUMP` or adding a new persistent key.
 
-use soroban_sdk::{symbol_short, Address, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::{symbol_short, xdr::ToXdr, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
 use crate::ContractError;
 
@@ -132,6 +132,32 @@ pub const ADMIN_TRANSFER_KEY: Symbol = symbol_short!("adm_xfr");
 
 /// Key for whether WASM attestation is required before upgrade (Issue #198).
 pub const ATTEST_REQUIRED_KEY: Symbol = symbol_short!("att_req");
+
+/// Key prefix for a role assignment's expiry timestamp (Issue #221).
+///
+/// Absent (no entry) means the role granted at `ROLE_KEY` for that address
+/// never expires — the pre-existing behavior. Present means the grant is only
+/// valid while `env.ledger().timestamp() < expires_at`.
+pub const ROLE_EXPIRY_KEY: Symbol = symbol_short!("role_exp");
+
+/// Key prefix for the ledger timestamp a username was last `verify()`'d
+/// (Issue #218).
+pub const VERIFIED_AT_KEY: Symbol = symbol_short!("vfy_at");
+
+/// Key for the `batch_remove` dual-control size threshold (Issue #219).
+/// `0` (the default) disables dual control — every batch is executed
+/// directly by a single admin call, matching pre-#219 behavior.
+pub const BATCH_REMOVE_THRESHOLD_KEY: Symbol = symbol_short!("brm_thr");
+
+/// Key for the single pending large-`batch_remove` proposal (Issue #219).
+/// Only one proposal may be live at a time.
+pub const PENDING_BATCH_REMOVE_KEY: Symbol = symbol_short!("brm_pend");
+
+/// Seconds a `batch_remove` dual-control proposal stays valid before
+/// `execute_batch_remove` treats it as gone (Issue #219). Prevents a stale
+/// proposal from being executed long after the operator context that
+/// justified it has passed.
+pub const BATCH_REMOVE_PROPOSAL_TTL_SECS: u64 = 86_400; // 24 hours
 
 // ── Pagination constants ─────────────────────────────────────────────────────
 
@@ -416,6 +442,32 @@ pub struct ExportPage {
     pub merkle_root: BytesN<32>,
     /// `true` if there are more records after this page.
     pub has_more: bool,
+}
+
+/// A signed export attestation binding one [`ExportPage`] to a deterministic
+/// digest, the contract's schema version, and the ledger it was read at
+/// (Issue #223).
+///
+/// Intended for air-gapped audits: an auditor who receives the JSON produced
+/// by `scripts/export_registry.sh` alongside this struct can recompute the
+/// same digest offline from the raw page contents and compare it byte for
+/// byte, without ever reconnecting to the network — the digest is the only
+/// thing they need to trust the export matches what the contract actually
+/// held at `ledger`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+pub struct ExportAttestation {
+    /// The page this attestation covers — identical to what
+    /// `get_registered_paginated` would return for the same `cursor`/`limit`.
+    pub page: ExportPage,
+    /// SHA-256 digest over `page`'s XDR encoding. See
+    /// [`build_export_digest`] for exactly what is hashed.
+    pub digest: BytesN<32>,
+    /// Contract schema version `(major, minor, patch)` as a flat `Vec<u32>`,
+    /// read the same way `get_version` resolves it.
+    pub version: Vec<u32>,
+    /// Ledger sequence the page and digest were computed at.
+    pub ledger: u32,
 }
 
 /// On-chain health snapshot returned by `get_health` (Issue #210).
@@ -962,6 +1014,22 @@ pub fn get_registered_paginated_internal(
     })
 }
 
+/// Builds the deterministic digest used by [`ExportAttestation`] (Issue #223).
+///
+/// Hashes `page`'s full XDR encoding with SHA-256. XDR encoding of a
+/// `#[contracttype]` struct is deterministic for a given value — same
+/// records, same cursor state, same total, same bytes in, same bytes out —
+/// so two calls against unchanged state always produce the same digest, and
+/// any change to a single record, the total, or the pagination cursor
+/// changes it. The exact byte layout is XDR, not part of this contract's
+/// public surface; callers should treat the digest as opaque and compare it
+/// byte for byte rather than parse it.
+#[must_use]
+pub fn build_export_digest(env: &Env, page: &ExportPage) -> BytesN<32> {
+    let encoded: Bytes = page.clone().to_xdr(env);
+    env.crypto().sha256(&encoded).into()
+}
+
 // ── Stats ────────────────────────────────────────────────────────────────────
 
 // Wave #41: build_stats is the single centralized constructor for `Stats`.
@@ -1267,20 +1335,104 @@ pub fn is_in_cooldown(env: &Env, github_username: &String) -> bool {
 
 // ── Role-based access control ─────────────────────────────────────────────────
 
-pub fn get_role(env: &Env, address: &Address) -> Option<Role> {
-    env.storage().persistent().get(&(ROLE_KEY, address.clone()))
+/// Raw existence check against `ROLE_KEY`, ignoring expiry (Issue #221).
+///
+/// Used only to decide whether `set_role_with_expiry` is granting a brand new
+/// role (and therefore needs an index entry) versus refreshing one that
+/// already has an index entry, possibly expired. An expired-but-not-yet-
+/// `remove_role`'d entry must **not** be treated as new, or re-granting it
+/// would append a duplicate to the enumeration index.
+fn role_key_exists(env: &Env, address: &Address) -> bool {
+    env.storage().persistent().has(&(ROLE_KEY, address.clone()))
 }
 
-/// Grants `role` to `address` and keeps the enumeration index in step.
+/// The expiry timestamp for `address`'s current role grant, or `None` if it
+/// was granted with no expiry (the default via `set_role`), or if `address`
+/// holds no role at all (Issue #221).
+#[must_use]
+pub fn get_role_expiry(env: &Env, address: &Address) -> Option<u64> {
+    env.storage()
+        .persistent()
+        .get(&(ROLE_EXPIRY_KEY, address.clone()))
+}
+
+/// `true` once `address`'s role grant has an expiry and the ledger clock has
+/// reached or passed it (Issue #221). A grant with no expiry never expires.
+#[must_use]
+pub fn is_role_expired(env: &Env, address: &Address) -> bool {
+    match get_role_expiry(env, address) {
+        Some(expires_at) => env.ledger().timestamp() >= expires_at,
+        None => false,
+    }
+}
+
+/// Returns `address`'s currently active role, or `None` if it holds no role
+/// **or** its grant has expired (Issue #221).
+///
+/// Expiry is lazy: an expired grant's `ROLE_KEY` / `ROLE_EXPIRY_KEY` entries
+/// are left in storage untouched — only `remove_role` deletes them and drops
+/// the address from `get_role_holders`. Every role check in this contract
+/// (`verify`, `revoke_verification`, `batch_verify`, `get_role_holders`,
+/// `has_role_or_admin`) is built on this function, so a lapsed grant reads as
+/// "no role" everywhere without each call site re-checking expiry itself.
+pub fn get_role(env: &Env, address: &Address) -> Option<Role> {
+    let role: Option<Role> = env.storage().persistent().get(&(ROLE_KEY, address.clone()));
+    let role = role?;
+    if is_role_expired(env, address) {
+        return None;
+    }
+    Some(role)
+}
+
+/// Grants `role` to `address` with no expiry and keeps the enumeration index
+/// in step. Equivalent to `set_role_with_expiry(env, address, role, None)`.
 ///
 /// Re-granting to an address that already holds a role overwrites the role but
 /// must **not** append a second index entry, or the address would be reported
 /// twice by `get_role_holders`.
 pub fn set_role(env: &Env, address: &Address, role: &Role) {
-    let is_new = get_role(env, address).is_none();
+    set_role_with_expiry(env, address, role, None);
+}
+
+/// Grants `role` to `address`, optionally expiring at `expires_at` (a ledger
+/// timestamp) so a contractor or bot key cannot linger as a live `Verifier`
+/// or `Revoker` after off-boarding (Issue #221).
+///
+/// `expires_at: None` grants a role that never expires — identical to
+/// `set_role`. `Some(ts)` in the past or exactly `env.ledger().timestamp()`
+/// grants a role that reads as already expired the moment this call
+/// returns; the grant is still recorded (and still shows up, unexpired-index-
+/// wise, in `get_role_holders`) — it just never resolves as held by
+/// `get_role`. This is deliberate: it is simpler for callers to reason about
+/// than a validation error, and mirrors how the rest of this contract treats
+/// boundary timestamps (`is_role_expired` uses `>=`).
+///
+/// Re-granting to an address that already has a `ROLE_KEY` entry (expired or
+/// not) overwrites the role and expiry but does not touch the enumeration
+/// index a second time.
+///
+/// The contract admin's authority is never affected by this: `is_admin_caller`
+/// and `get_admin` read `ADMIN_KEY`, a separate, immutable storage slot that
+/// this function never touches — only the `Role::Admin` RBAC entry granted
+/// alongside it in `initialize` can expire, and only if a caller explicitly
+/// grants `Role::Admin` with an expiry through this function.
+pub fn set_role_with_expiry(env: &Env, address: &Address, role: &Role, expires_at: Option<u64>) {
+    let is_new = !role_key_exists(env, address);
     env.storage()
         .persistent()
         .set(&(ROLE_KEY, address.clone()), role);
+
+    let expiry_key = (ROLE_EXPIRY_KEY, address.clone());
+    match expires_at {
+        Some(ts) => {
+            env.storage().persistent().set(&expiry_key, &ts);
+            env.storage()
+                .persistent()
+                .extend_ttl(&expiry_key, TTL_THRESHOLD, TTL_BUMP);
+        }
+        None => env.storage().persistent().remove(&expiry_key),
+    }
+
     if is_new {
         add_to_role_index(env, address);
     }
@@ -1291,6 +1443,9 @@ pub fn remove_role(env: &Env, address: &Address) {
     env.storage()
         .persistent()
         .remove(&(ROLE_KEY, address.clone()));
+    env.storage()
+        .persistent()
+        .remove(&(ROLE_EXPIRY_KEY, address.clone()));
     remove_from_role_index(env, address);
 }
 
@@ -1355,7 +1510,11 @@ fn remove_from_role_index(env: &Env, address: &Address) {
 /// reported with a placeholder role: the index is maintained in lockstep with
 /// the role entries, so a miss means the two have drifted, and inventing a
 /// role for a stale index entry would hand the dashboard a privileged address
-/// that does not exist on chain.
+/// that does not exist on chain. Because the lookup goes through
+/// [`get_role`], an address whose grant has **expired** (Issue #221) is
+/// skipped the same way — expired role holders silently drop out of this
+/// listing until `remove_role` compacts the index, matching `get_role`'s
+/// "expired reads as absent" semantics.
 #[must_use]
 pub fn get_role_holders_internal(env: &Env, offset: u32, limit: u32) -> Vec<RoleHolder> {
     let capped = if limit == 0 || limit > MAX_ROLE_PAGE_LIMIT {
@@ -1430,6 +1589,75 @@ pub fn set_verification_config(env: &Env, attestation: Symbol, expires_in: u64, 
         threshold,
     };
     env.storage().instance().set(&VER_CFG_KEY, &config);
+}
+
+// ── Time-bounded verification (Issue #218) ───────────────────────────────────
+//
+// `config_verification`'s `expires_in` used to be stored and never read. A
+// stolen or transferred GitHub account stayed `verified` forever unless an
+// admin noticed and called `revoke_verification` — a verify-once-forever
+// flag keeps paying out an attacker indefinitely. This wires `expires_in`
+// into an actual expiry check, keyed off the ledger timestamp `verify()`
+// last ran at.
+//
+// Expiry here is **lazy**, the same policy `Role` expiry (Issue #221) uses:
+// `ContributorRecord.verified` is not flipped back to `false` in storage when
+// the window lapses. Instead, `is_verification_expired` is the source of
+// truth callers check alongside the raw flag; `is_verification_active` (in
+// `lib.rs`) combines the two into the single effective read. This keeps
+// `verified_count` / `get_stats` a cheap O(1) counter rather than a full
+// registry scan on every read — see the doc comment on `get_stats` for what
+// that counter does and does not include.
+
+/// Ledger timestamp `github_username` was last `verify()`'d, or `None` if it
+/// has never been verified (or `revoke_verification` cleared it) (Issue #218).
+#[must_use]
+pub fn get_verified_at(env: &Env, github_username: &String) -> Option<u64> {
+    env.storage()
+        .persistent()
+        .get(&(VERIFIED_AT_KEY, github_username.clone()))
+}
+
+/// Records the ledger timestamp of a successful `verify()` call.
+pub fn set_verified_at(env: &Env, github_username: &String, timestamp: u64) {
+    let key = (VERIFIED_AT_KEY, github_username.clone());
+    env.storage().persistent().set(&key, &timestamp);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+}
+
+/// Clears the recorded verification timestamp. Called by
+/// `revoke_verification` so a later fresh `verify()` is not compared against
+/// a stale timestamp from a previous, since-revoked grant.
+pub fn clear_verified_at(env: &Env, github_username: &String) {
+    env.storage()
+        .persistent()
+        .remove(&(VERIFIED_AT_KEY, github_username.clone()));
+}
+
+/// `true` once `github_username`'s verification has passed the configured
+/// `expires_in` window (Issue #218).
+///
+/// `false` whenever expiry cannot apply: verification was never configured
+/// (`config_verification` was never called), `expires_in == 0` (configured
+/// with no expiry), or the username has no recorded verification timestamp.
+/// Callers combine this with the raw `ContributorRecord.verified` flag —
+/// this function does not check `verified` itself, so it says nothing about
+/// whether the username is verified at all, only whether a **prior**
+/// verification's clock has run out.
+#[must_use]
+pub fn is_verification_expired(env: &Env, github_username: &String) -> bool {
+    let Some(config) = get_verification_config(env) else {
+        return false;
+    };
+    if config.expires_in == 0 {
+        return false;
+    }
+    let Some(verified_at) = get_verified_at(env, github_username) else {
+        return false;
+    };
+    env.ledger().timestamp() >= verified_at.saturating_add(config.expires_in)
 }
 
 // ── Audit log persistence ──────────────────────────────────────────────────
@@ -1705,4 +1933,94 @@ pub fn has_pending_rotation(env: &Env, github_username: &String) -> bool {
     env.storage()
         .persistent()
         .has(&(PENDING_ROT_KEY, canon(env, github_username)))
+}
+
+// ── Dual-control batch_remove (Issue #219) ───────────────────────────────────
+//
+// `batch_remove` used to be single-auth: one admin signature could delete up
+// to `MAX_WRITE_BATCH` registrations in one invocation. Above a configurable
+// size threshold, that single signature is no longer enough — the batch must
+// be proposed by one admin-equivalent address and executed by a *different*
+// one. Below the threshold, `batch_remove` is untouched.
+
+/// A large `batch_remove` proposed for dual-control execution.
+///
+/// Created by `propose_batch_remove`, consumed by `execute_batch_remove`
+/// (which performs the actual removals), and discardable at any time via
+/// `cancel_batch_remove`. Only one proposal may be pending at a time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+pub struct PendingBatchRemove {
+    /// The exact usernames to remove once executed.
+    pub usernames: Vec<String>,
+    /// The admin-equivalent address that proposed the batch. `execute_batch_remove`
+    /// rejects a caller equal to this address — dual control requires a
+    /// *second* key.
+    pub proposed_by: Address,
+    /// Ledger timestamp `propose_batch_remove` was called.
+    pub proposed_at: u64,
+}
+
+/// The configured `batch_remove` dual-control size threshold (Issue #219).
+///
+/// `0` (the default) disables dual control entirely: every batch, regardless
+/// of size, is executed directly by `batch_remove`'s single-admin path —
+/// identical to pre-#219 behavior. A non-zero threshold means any
+/// `batch_remove` call whose `usernames.len()` exceeds it must instead go
+/// through `propose_batch_remove` → `execute_batch_remove`.
+#[must_use]
+pub fn get_batch_remove_threshold(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&BATCH_REMOVE_THRESHOLD_KEY)
+        .unwrap_or(0)
+}
+
+pub fn set_batch_remove_threshold(env: &Env, threshold: u32) {
+    env.storage()
+        .instance()
+        .set(&BATCH_REMOVE_THRESHOLD_KEY, &threshold);
+}
+
+/// `true` when a batch of `batch_size` usernames must go through the
+/// propose/execute dual-control flow instead of `batch_remove` directly.
+///
+/// Strictly greater-than: a batch exactly *at* the threshold is still
+/// "below or at" and unaffected, matching `batch_remove`'s pre-#219 shape
+/// check (`size > 0 && size <= max_batch_size`) — only batches *above* the
+/// threshold require the second signature.
+#[must_use]
+pub fn requires_batch_remove_dual_control(env: &Env, batch_size: u32) -> bool {
+    let threshold = get_batch_remove_threshold(env);
+    threshold > 0 && batch_size > threshold
+}
+
+/// The pending large-batch proposal, if one exists — regardless of whether it
+/// has expired. `execute_batch_remove` is responsible for treating an expired
+/// proposal as gone; this raw getter just reports what is in storage.
+#[must_use]
+pub fn get_pending_batch_remove(env: &Env) -> Option<PendingBatchRemove> {
+    env.storage().instance().get(&PENDING_BATCH_REMOVE_KEY)
+}
+
+pub fn set_pending_batch_remove(env: &Env, proposal: &PendingBatchRemove) {
+    env.storage()
+        .instance()
+        .set(&PENDING_BATCH_REMOVE_KEY, proposal);
+}
+
+pub fn clear_pending_batch_remove(env: &Env) {
+    env.storage().instance().remove(&PENDING_BATCH_REMOVE_KEY);
+}
+
+/// `true` once a pending proposal's `BATCH_REMOVE_PROPOSAL_TTL_SECS` window
+/// has elapsed. A stale proposal that nobody executed or cancelled should not
+/// remain executable indefinitely — the operational context that justified
+/// the specific username list may no longer hold.
+#[must_use]
+pub fn is_batch_remove_proposal_expired(env: &Env, proposal: &PendingBatchRemove) -> bool {
+    env.ledger().timestamp()
+        >= proposal
+            .proposed_at
+            .saturating_add(BATCH_REMOVE_PROPOSAL_TTL_SECS)
 }

@@ -84,6 +84,22 @@ enum Role {
 | Revoker | ❌ | ✅ | ❌ | ❌ |
 | Upgrader | ❌ | ❌ | ✅ | ❌ |
 
+**Optional expiry (Issue #221):** `set_role` grants a role with no expiry.
+`set_role_with_expiry(target, role, expires_at: Option<u64>)` grants the same
+role but, once `env.ledger().timestamp() >= expires_at`, `get_role` and every
+check built on it (`verify`, `revoke_verification`, `batch_verify`,
+`get_role_holders`, `execute_batch_remove`'s second-signer check) treat
+`target` as holding no role at all — no expiry never happens unless a caller
+opts in via `set_role_with_expiry`. Expiry is **lazy**: the underlying
+storage entry is left in place until `remove_role` deletes it; `get_role`
+just stops reporting it. `get_role_expiry(address)` returns the raw
+(possibly-already-past) timestamp, or `None` for a no-expiry grant or no
+grant at all. `has_role(address, role)` is a convenience boolean for
+`get_role(address) == Some(role)`. The contract admin's own identity
+(`ADMIN_KEY`, checked by `has_admin_role`) is a separate storage slot never
+touched by this — only the RBAC-style `Role::Admin` grant can expire, and
+only if explicitly granted with an expiry.
+
 ### HealthSnapshot
 
 Returned by `get_health` (Issue #210).
@@ -149,6 +165,9 @@ struct ChallengeRecord {
 | 19 | `ChallengeNotResolvable` | `complete_challenge` called before the delay has elapsed |
 | 20 | `ChallengeActive` | `register` attempted while a challenge is active on the username |
 | 21 | `NetworkMismatch` | Instance state was initialized on a different network than the one executing (Issue #231) |
+| 30 | `DualControlRequired` | `batch_remove` batch size exceeds the dual-control threshold; use `propose_batch_remove` / `execute_batch_remove` (Issue #219) |
+| 31 | `BatchRemoveProposalPending` | `propose_batch_remove` called while a proposal is already pending (Issue #219) |
+| 32 | `NoPendingBatchRemove` | `execute_batch_remove` / `cancel_batch_remove` called with no pending (or an expired) proposal (Issue #219) |
 
 `ContractError::from_code(u32)` maps every code in this table back to the typed
 variant and returns `None` for any unrecognized code. Every code round-trips
@@ -171,6 +190,45 @@ version in the same pull request with an explanation of the old and new map.
 |-------|------|-------|
 | `address` | `Address` | Address holding the role |
 | `role` | `Role` | Role held, as the `Role` discriminant |
+
+### ExportAttestation (Issue #223)
+
+Returned by `export_attestation`. Binds one `ExportPage` to a digest, the
+contract's schema version, and the ledger it was read at, so an auditor
+holding only this struct and the exported JSON page can confirm the export
+matches what the contract held — without reconnecting to the network. See
+[ADMIN_RUNBOOK.md](./ADMIN_RUNBOOK.md#signed-export-attestation-issue-223).
+
+```rust
+struct ExportAttestation {
+    page: ExportPage,      // identical to get_registered_paginated's return for the same cursor/limit
+    digest: BytesN<32>,    // SHA-256 over page's XDR encoding — treat as opaque, compare byte for byte
+    version: Vec<u32>,     // [major, minor, patch] at export time
+    ledger: u32,           // ledger sequence the page and digest were computed at
+}
+```
+
+The digest is deterministic: unchanged state and the same `cursor`/`limit`
+always produce the same bytes; any change to a record, the total, or the
+pagination cursor changes it. It is **not** a threshold signature and **not**
+a Merkle proof over the whole registry — those are explicitly out of scope
+for this issue (a Merkle root over the full registry can complement this per
+Issue #27).
+
+### PendingBatchRemove (Issue #219)
+
+Returned by `get_pending_batch_remove`. Represents a large `batch_remove`
+awaiting a second, distinct admin-equivalent signature. See
+[ADMIN_RUNBOOK.md](./ADMIN_RUNBOOK.md#dual-control-batch_remove-issue-219).
+
+```rust
+struct PendingBatchRemove {
+    usernames: Vec<String>,  // the exact batch that will be removed on execute
+    proposed_by: Address,    // execute_batch_remove rejects this exact caller
+    proposed_at: u64,        // ledger timestamp of propose_batch_remove; proposal
+                              // expires BATCH_REMOVE_PROPOSAL_TTL_SECS (24h) after this
+}
+```
 
 ### EventDomain (Issue #226)
 
@@ -2039,3 +2097,129 @@ read or write.
 An instance with no recorded tag is allowed through, so contracts deployed
 before this change keep working. Once a tag is present it is compared on every
 call and never rewritten.
+
+## New Functions (Issues #218, #219, #221, #223)
+
+### Role expiry (Issue #221)
+
+#### `set_role_with_expiry(target: Address, role: Role, expires_at: Option<u64>) -> Result<(), ContractError>`
+
+Admin-only. Identical to `set_role`, except the grant lapses once
+`env.ledger().timestamp() >= expires_at`. `None` behaves exactly like
+`set_role` (no expiry). See the **Optional expiry** note under the `Role`
+type above for the full semantics, including that expiry is lazy and never
+affects the contract admin's own identity.
+
+Emits `RoleGrantedEvent` (unchanged shape — expiry is not carried on the
+event; read it back with `get_role_expiry`).
+
+#### `get_role_expiry(address: Address) -> Option<u64>`
+
+Read-only; no auth. The raw expiry timestamp for `address`'s current role
+grant — `None` for a no-expiry grant or no role at all. Unlike `get_role`,
+this does not hide an already-past timestamp, so an operator can distinguish
+"never expires" from "expired at T" without waiting for `remove_role`.
+
+#### `has_role(address: Address, role: Role) -> bool`
+
+Read-only; no auth. `true` iff `get_role(address) == Some(role)`.
+
+### Time-bounded verification (Issue #218)
+
+`config_verification`'s `expires_in` (seconds) is now enforced. `verify` and
+`batch_verify` record a verification timestamp; expiry is checked against it.
+
+#### `is_verification_active(github_username: String) -> bool`
+
+Read-only; no auth; works while paused. The effective, expiry-aware status:
+`true` only if the username is registered, `verified`, and — when
+verification was configured with a non-zero `expires_in` — that window has
+not lapsed. This differs from `get_address(..).verified` exactly when a
+verification is raw-`true` but expired: the raw flag stays `true` (expiry is
+lazy — see below), this reads `false`.
+
+#### `get_verification_expiry(github_username: String) -> Option<u64>`
+
+Read-only; no auth. The ledger timestamp the username's current verification
+will expire at, or `None` if it cannot expire (never verified, verification
+not configured, `expires_in == 0`, or revoked).
+
+**Lazy expiry, and what it means for `verify` / `revoke_verification` /
+`get_stats`:**
+
+- `ContributorRecord.verified` is **not** flipped back to `false` in storage
+  when the window lapses — only `revoke_verification` does that. Reads that
+  need the effective status call `is_verification_active`, not the raw flag.
+- `verify` on an expired-but-not-revoked username **renews** it (fresh
+  timestamp) instead of returning `AlreadyVerified` — a verification that is
+  still active is unaffected and still rejects a duplicate call.
+- `revoke_verification` is unaffected by expiry: it acts on the raw
+  `verified` flag regardless of whether it has also expired, and clears the
+  verification timestamp either way.
+- **Stats definition:** `get_stats().verified` / `get_verified_count()` count
+  the raw `verified` flag, the same as before this issue — they do **not**
+  subtract expired-but-unrevoked verifications. This keeps the counter an
+  O(1) read instead of a full-registry scan on every call. Use
+  `is_verification_active` for the per-record effective answer; there is no
+  aggregate "currently active" counter.
+
+### Signed export attestation (Issue #223)
+
+#### `export_attestation(cursor: u32, limit: u32) -> Result<ExportAttestation, ContractError>`
+
+Admin-only; unaffected by the normal pause flag (same as
+`get_registered_paginated` / `get_all_registered` — admin export tooling
+stays available during maintenance). Wraps the same page
+`get_registered_paginated(cursor, limit)` would return with a SHA-256 digest,
+the contract's schema version, and the ledger sequence — see the
+`ExportAttestation` type above and
+[ADMIN_RUNBOOK.md](./ADMIN_RUNBOOK.md#signed-export-attestation-issue-223)
+for the offline verification workflow. An empty registry produces an empty
+page and a real (deterministic) digest over it, not an error.
+
+### Dual-control `batch_remove` (Issue #219)
+
+#### `set_batch_remove_threshold(threshold: u32) -> Result<(), ContractError>`
+
+Admin-only. `0` (default) disables dual control — `batch_remove` always
+executes directly, exactly as before this issue. A non-zero value requires
+any batch **larger** than it (strictly greater — a batch exactly at the
+threshold is unaffected) to go through `propose_batch_remove` /
+`execute_batch_remove` instead.
+
+#### `get_batch_remove_threshold() -> u32`
+
+Read-only; no auth.
+
+#### `propose_batch_remove(caller: Address, usernames: Vec<String>) -> Result<(), ContractError>`
+
+Admin-only. Records the batch and proposer for later execution by a
+*different* admin-equivalent address. Only one proposal may be pending;
+returns `BatchRemoveProposalPending` if one already is (unless it has
+expired — see below). Emits `BatchRemoveProposedEvent`.
+
+#### `execute_batch_remove(caller: Address) -> Result<BatchSummary, ContractError>`
+
+`caller` must be the contract admin or hold `Role::Admin`, **and** must not
+be the address that proposed the batch — this is what makes it dual
+control. Performs the removals with the same partial-success semantics as
+`batch_remove`. A proposal older than `BATCH_REMOVE_PROPOSAL_TTL_SECS`
+(24h) is treated as gone (`NoPendingBatchRemove`) rather than executed.
+Emits `BatchRemoveExecutedEvent` plus one `RemovedEvent` per removed
+username.
+
+#### `cancel_batch_remove(caller: Address) -> Result<(), ContractError>`
+
+Admin-only. Discards the pending proposal without executing it. Available
+even while paused — see
+[SECURITY.md](./SECURITY.md#dual-control-batch_remove-issue-219). Emits
+`BatchRemoveCancelledEvent`.
+
+#### `get_pending_batch_remove() -> Option<PendingBatchRemove>`
+
+Read-only; no auth; works while paused.
+
+**batch_remove itself:** now returns `DualControlRequired` (code 30) if
+`usernames.len()` exceeds the configured threshold, instead of executing —
+below the threshold, or with the default threshold of `0`, `batch_remove`'s
+behavior is completely unchanged.
