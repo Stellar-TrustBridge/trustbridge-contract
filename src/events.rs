@@ -329,3 +329,38 @@ pub struct RenamedEvent {
     pub verification_cleared: bool,
     pub timestamp: u64,
 }
+
+/// Emitted when a contributor delegates payout to a different address via
+/// `delegate_payout`, distinct from `RegisteredEvent` / `RotationExecutedEvent`
+/// so indexers can tell a payout delegation apart from an identity address
+/// change. The identity `stellar_address` on the record is unchanged; only
+/// `payout_address` moves to `delegate_address`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PayoutDelegatedEvent {
+    #[topic]
+    pub github_username: String,
+    pub stellar_address: Address,
+    pub delegate_address: Address,
+    pub timestamp: u64,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
+}
+
+/// Emitted when a live payout delegation is revoked via `undelegate_payout`,
+/// restoring `payout_address` to the record's `stellar_address`. Distinct
+/// from `RegisteredEvent` / `RotationExecutedEvent` for the same reason as
+/// [`PayoutDelegatedEvent`].
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PayoutDelegationRevokedEvent {
+    #[topic]
+    pub github_username: String,
+    pub stellar_address: Address,
+    pub previous_delegate: Address,
+    pub timestamp: u64,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
+}
