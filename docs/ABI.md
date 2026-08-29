@@ -442,6 +442,49 @@ stellar contract invoke --id $ID --source deployer --network testnet \
   -- get_address --github-username octocat
 ```
 
+> **Payout-address resolution (GitHub Action):** do **not** use `get_address`
+> for CI payouts — it returns the record whether or not `verified` is set, so an
+> unverified squatter registration would be paid. Use
+> `get_address_if_verified` instead.
+
+---
+
+### `get_address_if_verified(github_username: String) -> Result<ContributorRecord, ContractError>`
+
+Verified-only address lookup for CI payouts (Issue #287). `get_address` is left
+unchanged; this is a versioned sibling read with stricter semantics.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+| **Works while paused** | Yes (same as `get_address`) |
+| **Errors** | `NotRegistered` (code 4), `NotVerified` (code 6) |
+
+| Registry state | Result |
+|---|---|
+| Registered **and** `verified == true` | `Ok(ContributorRecord)` |
+| Registered but `verified == false` | `Err(NotVerified)` — code `6` |
+| Never registered / removed | `Err(NotRegistered)` — code `4` |
+
+```bash
+stellar contract invoke --id $ID --source deployer --network testnet \
+  -- get_address_if_verified --github-username octocat
+```
+
+**Action-oriented ABI note.** The payout resolver in the GitHub Action must:
+
+1. Call `get_address_if_verified(github_username)`.
+2. On `Ok`, read `payout_address` (falls back to `stellar_address`) and pay.
+3. On **any** `Err` — both code `4` (`NotRegistered`) and code `6`
+   (`NotVerified`) — **do not pay**. Surface the distinction in logs only; the
+   pay/skip decision is the same for both.
+4. Pause is *not* checked by this read. If payouts should also halt while the
+   registry is frozen, gate the job on `is_paused()` separately.
+
+Contract-side behaviour is pinned by `test_verified_only_lookup_*` in
+`src/lib.rs`.
+
 ---
 
 ### `remove(caller: Address, github_username: String) -> Result<(), ContractError>`
@@ -938,6 +981,9 @@ stellar contract invoke --id $ID --source deployer --network testnet \
 ### `pause() -> Result<(), ContractError>`
 
 Pauses all state-mutating contract operations. Admin-only.
+
+Paste-ready CLI + Stellar Lab recipes for this and every other admin op:
+[ADMIN_RUNBOOK.md § Stellar Lab & CLI invoke recipes](ADMIN_RUNBOOK.md#stellar-lab--cli-invoke-recipes).
 
 ---
 
