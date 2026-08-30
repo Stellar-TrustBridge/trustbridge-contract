@@ -29,7 +29,7 @@ FUTURENET_FRIENDBOT_URL ?= https://friendbot-futurenet.stellar.org
 FUTURENET_IDENTITY ?= $(SOURCE)
 FUTURENET_DRY_RUN ?= false
 
-.PHONY: help build build-legacy test test-rehearsal fuzz bench bench-export bench-username bench-double-verify bench-register-budget fmt lint docs docs-check abi check ci clean \
+.PHONY: help build build-legacy test test-rehearsal fuzz bench bench-export bench-username bench-double-verify bench-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
 	export-registry validate-registry dr-test futurenet-smoke
@@ -72,6 +72,51 @@ bench-username: ## Write username case-normalization benchmark results to $(NORM
 
 bench-double-verify: ## Report CPU/memory cost of double-verify rejection vs successful verify
 	cargo test test_bench_double_verify_rejection -- --nocapture --test-threads=1
+
+bench-budget-ci: ## Run all bench tests + regression check against ci/bench-samples.csv (mirrors CI bench-budget job)
+	@echo "Running benchmark tests (--test-threads=1 for stable metering)..."
+	@cargo test \
+		test_bench_username_case_normalization \
+		test_bench_export_cpu_cost \
+		test_bench_double_verify_rejection \
+		test_report_register_budget_samples \
+		-- --nocapture --test-threads=1 2>/dev/null \
+	| tee bench-output.txt
+	@echo ""
+	@echo "Checking regression against ci/bench-samples.csv..."
+	@bash scripts/check_bench_regression.sh \
+		--samples ci/bench-samples.csv \
+		--threshold 15 \
+		--hard-cpu-cap 25000000 \
+		--hard-mem-cap 3000000 \
+		< bench-output.txt
+
+bench-update-samples: ## Regenerate ci/bench-samples.csv from current test measurements (run after intentional cost changes)
+	@echo "Regenerating bench baselines — this will overwrite ci/bench-samples.csv."
+	@echo "Review the diff before committing."
+	@cargo test \
+		test_bench_username_case_normalization \
+		test_bench_export_cpu_cost \
+		test_bench_double_verify_rejection \
+		test_report_register_budget_samples \
+		-- --nocapture --test-threads=1 2>/dev/null \
+	| awk -F',' ' \
+		/^operation,/ { if (!header_done) { print; header_done=1 } next } \
+		/^[a-z_]+,[^,]+,[0-9]+,[0-9]+$$/ { print } \
+	' > bench-update-tmp.csv
+	@if [ ! -s bench-update-tmp.csv ]; then \
+		echo "ERROR: no CSV lines captured — check that bench tests emit output."; \
+		rm -f bench-update-tmp.csv; exit 1; \
+	fi
+	@echo "# TrustBridge contract — checked-in benchmark budget baselines." > ci/bench-samples.csv
+	@echo "#" >> ci/bench-samples.csv
+	@echo "# Format: operation,input_label,cpu_instructions,memory_bytes" >> ci/bench-samples.csv
+	@echo "#" >> ci/bench-samples.csv
+	@printf "# LAST UPDATED: %s  (soroban-sdk $$(grep 'soroban-sdk' Cargo.toml | head -1 | grep -oP '[0-9]+\.[0-9]+\.[0-9]+' | head -1), stable toolchain)\n" "$$(date +%Y-%m-%d)" >> ci/bench-samples.csv
+	@cat bench-update-tmp.csv >> ci/bench-samples.csv
+	@rm -f bench-update-tmp.csv
+	@echo "Done. Updated ci/bench-samples.csv:"
+	@cat ci/bench-samples.csv
 
 bench-register-budget: ## Validate register cost stays under CPU/memory thresholds (baseline + max-length username)
 	@echo "Running register budget sampling (CPU<=$(REGISTER_BUDGET_CPU_MAX), MEM<=$(REGISTER_BUDGET_MEM_MAX))"

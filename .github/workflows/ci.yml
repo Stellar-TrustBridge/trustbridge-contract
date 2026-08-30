@@ -155,6 +155,85 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  # Issue #247: Benchmark regression CI using existing test_bench_* samples.
+  #
+  # Runs every test_bench_* and test_report_register_budget_samples test with
+  # --nocapture --test-threads=1, then pipes the CSV output through
+  # scripts/check_bench_regression.sh, which compares each line against the
+  # checked-in baselines in ci/bench-samples.csv.
+  #
+  # The job fails when:
+  #   - Any operation's CPU or memory cost exceeds its baseline by > 15 %.
+  #   - Any register/verify operation breaches the hard absolute caps
+  #     (CPU > 25 000 000 or mem > 3 000 000).
+  #
+  # The raw bench output is uploaded as an artifact for post-mortem inspection.
+  # Retention is 30 days so it is available for any PR review window.
+  #
+  # To update baselines after an intentional cost change:
+  #   make bench-update-samples   # regenerates ci/bench-samples.csv
+  # Then commit ci/bench-samples.csv with a before/after cost table in the PR.
+  # See docs/BENCHMARK_BUDGETS.md for full guidance.
+  bench-budget:
+    name: Benchmark Budget Regression
+    runs-on: ubuntu-latest
+    needs: quality
+    if: always() && !cancelled()
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # Run all bench/budget tests sequentially (--test-threads=1 is required
+      # for stable metering — parallel tests contaminate the host budget state).
+      # Capture stdout to bench-output.txt; stderr (cargo noise) goes to the
+      # log but is not passed to the regression checker.
+      - name: Run benchmark tests
+        run: |
+          cargo test \
+            test_bench_username_case_normalization \
+            test_bench_export_cpu_cost \
+            test_bench_double_verify_rejection \
+            test_report_register_budget_samples \
+            -- --nocapture --test-threads=1 2>/dev/null \
+          | tee bench-output.txt
+
+      # Fail the job when any regression or cap breach is detected.
+      - name: Check regression against baselines
+        run: |
+          chmod +x scripts/check_bench_regression.sh
+          scripts/check_bench_regression.sh \
+            --samples ci/bench-samples.csv \
+            --threshold 15 \
+            --hard-cpu-cap 25000000 \
+            --hard-mem-cap 3000000 \
+            < bench-output.txt
+
+      # Always upload the raw output so reviewers can inspect exact values even
+      # when the job passes.  Retained for 30 days (PR review window).
+      - name: Upload bench output artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-budget-report
+          path: bench-output.txt
+          if-no-files-found: warn
+          retention-days: 30
+
   wasm-integration-test:
     name: WASM Upgrade Integration Tests
     runs-on: ubuntu-latest

@@ -384,9 +384,69 @@ Soroban may emit snapshot files under `test_snapshots/` when an event or type la
 
 ---
 
+## Benchmark Budget CI (Issue #247)
+
+Every PR is gated by a **benchmark regression job** (`bench-budget` in CI).
+It runs the Soroban metered-cost tests, compares the results against the
+checked-in baselines in `ci/bench-samples.csv`, and fails if any operation
+regresses by more than **15 %** or breaches a hard absolute cap.
+
+### Why this matters
+
+Soroban applies a per-transaction instruction budget. A cost regression that
+slips past unit tests will surface as failed user transactions during a Wave —
+not as a CI failure. The bench job catches regressions before they reach the
+network.
+
+### Running locally
+
+```bash
+# Full regression check — identical to the CI bench-budget job:
+make bench-budget-ci
+
+# Individual bench targets (output only, no regression gate):
+make bench-register-budget   # register CPU/mem with hard-cap check
+make bench-export            # get_all_registered sweep
+make bench-username          # usernames_match sweep
+make bench-double-verify     # verify success vs rejection
+```
+
+Always run with `--test-threads=1` (the Makefile targets do this automatically).
+Parallel execution contaminates the Soroban host's global budget state and
+produces unstable measurements.
+
+### Updating baselines after an intentional cost change
+
+1. Make your code or dependency change.
+2. Run `make bench-update-samples` to regenerate `ci/bench-samples.csv`.
+3. Review the diff — confirm only the expected operations changed, by a
+   plausible amount.
+4. Commit `ci/bench-samples.csv` alongside your code change.
+5. Include a before/after cost table in the PR description and a brief
+   explanation of why the cost changed.
+
+Do **not** bump baselines to silence an unexplained regression. A cost
+increase that cannot be explained is a bug.
+
+### Thresholds at a glance
+
+| Limit type | Value |
+|---|---|
+| Regression gate | +15 % vs checked-in baseline |
+| `register` CPU hard cap | 25 000 000 instructions |
+| `register` memory hard cap | 3 000 000 bytes |
+| `verify` CPU hard cap | 25 000 000 instructions |
+| `verify` memory hard cap | 3 000 000 bytes |
+
+Full details, including host-vs-release notes and SDK upgrade guidance, are in
+`docs/BENCHMARK_BUDGETS.md`.
+
+---
+
 ## Pull Request Checklist
 
 - [ ] `make check` passes locally
+- [ ] `make bench-budget-ci` passes (or baselines updated with `make bench-update-samples` and diff reviewed)
 - [ ] New behavior has unit tests
 - [ ] Documentation updated (ABI, Architecture, README as applicable)
 - [ ] No secrets or `.env` files committed
