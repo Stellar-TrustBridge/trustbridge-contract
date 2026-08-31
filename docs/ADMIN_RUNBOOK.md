@@ -824,3 +824,129 @@ stellar contract invoke \
 
 Available even while paused, so a stuck or mistaken proposal is never
 trapped behind the same freeze that might be the reason to cancel it.
+
+---
+
+## Staged WASM Slot (Issue #300)
+
+The staged WASM slot lets observers see what binary is coming **before** the
+upgrade transaction lands.  It is independent of the existing attestation
+(`attest_upgrade`) — you may use both together or either alone.
+
+### How it works
+
+| Step | Who | Call |
+|------|-----|------|
+| Stage the binary | admin or `Role::Upgrader` | `stage_wasm(caller, wasm_hash)` |
+| Anyone reads the intent | public (no auth) | `get_staged()` |
+| Upgrade (must match if staged) | admin | `upgrade(wasm_hash)` |
+| Retract the slot | admin | `clear_staged(caller)` |
+
+When a hash is staged, `upgrade` **rejects** any hash that differs from it
+with `StagedWasmMismatch` (code 34).  If nothing is staged, `upgrade` is
+unaffected.
+
+### CLI recipes
+
+```bash
+# Stage a WASM hash (admin or Upgrader)
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- stage_wasm --caller $ADMIN --wasm-hash <HEX_HASH>
+
+# Public read — no auth needed
+stellar contract invoke \
+  --id $CONTRACT_ID --network testnet \
+  -- get_staged
+
+# Clear the slot
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- clear_staged --caller $ADMIN
+```
+
+### Events
+
+| Event | Published by |
+|-------|-------------|
+| `WasmStagedEvent { wasm_hash, staged_by, timestamp }` | `stage_wasm` |
+| `StagedWasmClearedEvent { wasm_hash, cleared_by, timestamp }` | `clear_staged` |
+
+---
+
+## Multisig Upgrade Flow (Issue #301)
+
+Replaces the single-key `upgrade` with an on-chain **propose → approve (×N)
+→ execute after delay** governance flow.  The regular `upgrade` path is
+unchanged for deployments where `get_upgrade_threshold()` returns `1` (the
+default).
+
+### Threshold configuration
+
+```bash
+# Require 2-of-N approvals before any upgrade executes
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- set_upgrade_threshold --caller $ADMIN --threshold 2
+
+# Read current threshold (default 1)
+stellar contract invoke --id $CONTRACT_ID --network testnet -- get_upgrade_threshold
+```
+
+### Full multisig upgrade flow
+
+```bash
+# 1. Propose (admin or Upgrader; counts as first approval)
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account proposer-identity --network testnet --send=yes \
+  -- propose_multisig_upgrade \
+     --caller $PROPOSER \
+     --wasm-hash <HEX_HASH> \
+     --delay-secs 86400
+
+# 2. Additional approvers sign (each must be admin or Upgrader, each distinct)
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account signer2-identity --network testnet --send=yes \
+  -- approve_upgrade --caller $SIGNER2 --proposal-id 0
+
+# 3. Read current state
+stellar contract invoke --id $CONTRACT_ID --network testnet -- get_upgrade_proposal
+
+# 4. Execute once delay elapsed and approvals >= threshold
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- execute_upgrade --caller $ADMIN --proposal-id 0
+
+# Cancel at any time (admin-only)
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- cancel_upgrade_proposal --caller $ADMIN --proposal-id 0
+```
+
+### Error reference
+
+| Error | Code | Meaning |
+|-------|------|---------|
+| `UpgradeProposalAlreadyPending` | 35 | Cancel or execute the existing proposal first |
+| `NoUpgradeProposalPending` | 36 | No proposal to approve/execute/cancel |
+| `UpgradeProposalAlreadyApproved` | 37 | This address already approved — use a different key |
+| `UpgradeProposalDelayActive` | 38 | Delay has not elapsed; retry later |
+| `UpgradeProposalInsufficientApprovals` | 39 | Gather more approvals before executing |
+| `StagedWasmMismatch` | 34 | Proposal hash conflicts with staged slot |
+
+### Events
+
+| Event | Published by |
+|-------|-------------|
+| `UpgradeProposedEvent { proposal_id, wasm_hash, proposed_by, executable_at, timestamp }` | `propose_multisig_upgrade` |
+| `UpgradeApprovedEvent { proposal_id, approved_by, approval_count, timestamp }` | `approve_upgrade` |
+| `UpgradeProposalExecutedEvent { proposal_id, wasm_hash, executed_by, approval_count, timestamp }` | `execute_upgrade` |
+| `UpgradeProposalCancelledEvent { proposal_id, wasm_hash, cancelled_by, timestamp }` | `cancel_upgrade_proposal` |
+| `UpgradedEvent { … }` | `execute_upgrade` (same as regular `upgrade`) |
+
+### Scope note
+
+The multisig flow covers **upgrade proposals only**.  Other admin functions
+(`set_role`, `pause`, `verify`, etc.) remain single-admin.  Use a Stellar
+multisig account as the admin address to add multi-party control over all
+admin actions at the account layer rather than the contract layer.

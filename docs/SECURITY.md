@@ -166,6 +166,54 @@ The `is_attestation_required()` read exposes the current config for monitoring a
 - *Attacker publishes a forged attestation*: They still need admin auth on `attest_upgrade`, so a compromise of the admin key is the prerequisite — the same threat as before, but now visible before the swap.
 - *Attestation expired before upgrade*: `AttestationExpired` is returned; the stale record is cleared. The admin must re-attest with a new `expires_at`.
 
+### Staged WASM slot (Issue #300)
+
+`stage_wasm(caller, hash)` writes the intended next binary to the on-chain
+staged slot before the upgrade transaction is submitted.  Any observer can
+call `get_staged()` (no auth) to confirm what is coming.
+
+When a hash is staged, `upgrade` and `execute_upgrade` both reject a
+mismatching hash with `StagedWasmMismatch` (code 34).  With nothing staged,
+both paths are unaffected.
+
+**How this differs from attestation:**
+
+| | Attestation (`attest_upgrade`) | Staged slot (`stage_wasm`) |
+|---|---|---|
+| Expiry | Yes (`expires_at`) | No (permanent until cleared or consumed) |
+| Required flag | Optional (`set_attestation_required`) | Advisory — never blocks if absent |
+| Error on mismatch | `UnattestedWasm` (code 13) | `StagedWasmMismatch` (code 34) |
+| Who reads it | Anyone | Anyone |
+
+Use both together for maximum transparency: stage the hash first (public
+notice, no expiry), then attest it (time-bounded, optionally required).
+
+### On-chain M-of-N multisig upgrade (Issue #301)
+
+The `propose_multisig_upgrade` → `approve_upgrade` (×N) → `execute_upgrade`
+flow adds on-chain multi-party authorisation for WASM upgrades.
+
+**Properties:**
+
+- `get_upgrade_threshold()` is the required number of distinct approvals
+  (default `1` — existing single-admin behavior, no breaking change).
+- The proposer counts as one approval; additional `approve_upgrade` calls add
+  to the total.
+- `execute_upgrade` is blocked until the delay elapses **and** approvals ≥
+  threshold.
+- An attacker who steals one key cannot execute an upgrade if `threshold ≥ 2`
+  — they would need to compromise M distinct key-holders simultaneously.
+- Any admin may `cancel_upgrade_proposal` at any time, including while paused.
+- At most one proposal is live at a time.
+
+**Scope:** This flow covers upgrade proposals only.  Other admin functions
+remain single-admin at the contract level.  For full multi-party admin
+governance, use a Stellar multisig account as the admin address (recommended
+in any case — see [Admin Key Management](#admin-key-management)).
+
+See [ADMIN_RUNBOOK.md — Multisig Upgrade Flow](ADMIN_RUNBOOK.md#multisig-upgrade-flow-issue-301)
+for paste-ready CLI recipes and the complete error reference.
+
 
 
 When pause mode is active, guarded entry points fail with
