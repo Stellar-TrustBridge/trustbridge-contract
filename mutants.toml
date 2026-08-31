@@ -1,0 +1,35 @@
+# cargo-mutants configuration — Issue #243
+#
+# Scope: src/utils.rs only. Username validation is a security boundary
+# (homoglyph rejection, hyphen rules, consecutive-hyphen guard) that a
+# weakened check — e.g. a commented-out branch — could silently pass
+# normal unit tests. Mutation testing makes surviving mutants a CI failure.
+#
+# Out of scope: src/lib.rs and the rest of the crate are intentionally
+# excluded — they are too large to mutate in bounded CI time and are covered
+# by the property-fuzzing suite instead (see REGISTRY_INVARIANTS.md).
+#
+# Run locally:
+#   cargo install cargo-mutants
+#   cargo mutants --file src/utils.rs
+#
+# The command above mutates only src/utils.rs and runs the test suite against
+# each mutant. Survived mutants are printed at the end; each represents a gap
+# in the test suite's ability to catch a weakened check.
+#
+# Skipped mutants (timeout/unviable) are not failures — they happen when a
+# mutant causes a compile error or an infinite loop in a no_std context.
+
+# Restrict mutations to the validation module.
+file_filter = ["src/utils.rs"]
+
+# Exclude the test-only helpers — mutating test code creates false signals.
+exclude_re = [r"#\[cfg\(test\)\]", r"mod tests"]
+
+# Per-mutant timeout in seconds. The full test suite takes <30 s on GitHub
+# Actions; 120 s gives generous headroom for slow runners.
+timeout = 120
+
+# Baseline timeout: how long `cargo test` is allowed to run without any
+# mutations applied. Fail fast if the baseline itself is broken.
+baseline = "run"

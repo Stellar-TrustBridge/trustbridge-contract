@@ -334,3 +334,80 @@ jobs:
             -D clippy::missing_panics_doc \
             -D clippy::redundant_closure_for_method_calls \
             -D clippy::cloned_instead_of_copied
+
+
+  # Issue #243: Mutation-testing gate for utils.rs username validation
+  #
+  # Username rules are a security boundary: homoglyph rejection, hyphen rules,
+  # consecutive-hyphen guard. A weakened check can pass normal unit tests but
+  # is caught by mutation testing. This job:
+  #   - runs cargo-mutants scoped to src/utils.rs only (bounded CI time)
+  #   - fails if any mutant survives (i.e. the test suite did not detect it)
+  #   - skips unviable/timeout mutants (not failures — compile errors in no_std)
+  #
+  # Run locally:
+  #   cargo install cargo-mutants
+  #   cargo mutants --file src/utils.rs
+  #
+  # Configuration is in mutants.toml at the repository root.
+  mutation-testing:
+    name: Mutation Testing — utils.rs (Issue #243)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-mutants-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-mutants
+        run: cargo install --locked cargo-mutants
+
+      # Run mutations scoped to src/utils.rs.
+      # Exit code semantics for cargo-mutants:
+      #   0 — all mutants caught or unviable (test suite is adequate)
+      #   2 — one or more mutants survived (test suite gap detected)
+      #   other — tool error
+      #
+      # We capture the output and also write the mutants-out directory so the
+      # results can be inspected via the uploaded artifact.
+      - name: Run mutation tests on utils.rs
+        run: |
+          cargo mutants \
+            --file src/utils.rs \
+            --output mutants-out \
+            --timeout 120 \
+            2>&1 | tee mutants-out/mutation-run.log
+          EXIT=${PIPESTATUS[0]}
+          echo "cargo-mutants exit code: $EXIT"
+          if [ "$EXIT" -eq 2 ]; then
+            echo "ERROR: One or more mutants in src/utils.rs survived."
+            echo "Surviving mutants represent gaps in the utils.rs test suite."
+            echo "See the mutants-out/ directory or the uploaded artifact for details."
+            cat mutants-out/mutation-run.log || true
+            exit 2
+          elif [ "$EXIT" -ne 0 ]; then
+            echo "ERROR: cargo-mutants exited with unexpected code $EXIT."
+            exit "$EXIT"
+          fi
+          echo "OK: all utils.rs mutants were caught by the test suite."
+
+      - name: Upload mutation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-testing-results
+          path: mutants-out/
+          if-no-files-found: warn
+          retention-days: 14

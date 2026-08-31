@@ -181,6 +181,59 @@ Update CI to Stellar CLI 26.1.0
 
 ---
 
+## Mutation Testing — utils.rs (Issue #243)
+
+Username validation in `src/utils.rs` is a security boundary: it blocks
+homoglyph attacks, enforces consecutive-hyphen rules, and rejects non-ASCII
+bytes. Normal unit tests can miss a _weakened_ check (e.g. a hyphen guard
+accidentally commented out). Mutation testing makes surviving mutants a CI
+failure.
+
+### How it works
+
+[`cargo-mutants`](https://mutants.rs) applies small syntactic mutations to
+`src/utils.rs` one at a time and re-runs the test suite. A mutant that passes
+all tests "survives" — meaning the test suite did **not** catch the weakened
+behaviour. The CI job fails when any mutant survives.
+
+Configuration lives in `mutants.toml` at the repository root. The scope is
+intentionally limited to `src/utils.rs`; the rest of the crate is excluded to
+keep job time bounded.
+
+### Running locally
+
+```bash
+# Install (one-time)
+cargo install cargo-mutants
+
+# Run mutations on utils.rs only
+cargo mutants --file src/utils.rs
+
+# View survived mutants
+cat mutants-out/survived.txt
+```
+
+### Interpreting results
+
+| Outcome | Meaning |
+|---------|---------|
+| **Caught** | Test suite detected the mutation — good |
+| **Survived** | Test suite missed a weakened check — add a test |
+| **Unviable** | Mutant caused a compile error — not a failure |
+| **Timeout** | Mutant triggered an infinite loop — not a failure |
+
+When a mutant survives, add a test that specifically exercises the mutated
+line or branch. Do not simply add an assertion that happens to pass — the new
+test must **fail** on the mutated code and **pass** on the original.
+
+### Do not mutate test-only code
+
+Test helpers and `#[cfg(test)]` modules are excluded in `mutants.toml`.
+Mutating test code produces meaningless results (a mutation that breaks a test
+is a bug in the test, not a gap in coverage).
+
+---
+
 ## Coverage (Issue #248)
 
 CI measures line coverage for `src/storage.rs` using `cargo-tarpaulin`. The
