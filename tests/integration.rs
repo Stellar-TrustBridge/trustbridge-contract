@@ -2987,3 +2987,185 @@ fn test_conformance_admin_reads_while_paused_need_auth_not_pause() {
         );
     });
 }
+
+// ── Issue #306: remove→compact→re-register counter parity ──────────────────
+//
+// #93 and #110 are small; combined with `compact_index`, the total count, the
+// verified count, and the chunked index can drift apart. This scale-ish
+// scenario fills several chunks, removes a band of middle users to leave holes,
+// compacts, then re-registers the same names and asserts `count`, `vcount`,
+// and the chunked index all agree with the live record set. A drift anywhere
+// (stale chunk holes, a counter that didn't move, a duplicate or missing index
+// entry) fails the test.
+#[test]
+fn test_issue306_remove_compact_reregister_counter_parity() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+    // Deterministic, CI-fast size. CHUNK_SIZE == 50, so 8 chunks (400 users).
+    const N: u32 = 400;
+
+    // 1. Fill the registry across several chunks.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        for i in 0..N {
+            let name = format!("user{i:04}");
+            let addr = Address::generate(&env);
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, &name),
+                addr,
+                Vec::new(&env),
+            )
+            .unwrap();
+        }
+        // With CHUNK_SIZE == 50 and N == 400, the registry spans 8 chunks.
+        // Exercise the paginated export across chunk boundaries to prove we
+        // iterate more than a single chunk's worth of records (multiple pages
+        // at the max page limit).
+        let mut pages = 0u32;
+        let mut seen = 0u32;
+        let mut cursor = 0u32;
+        loop {
+            let page = TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 100)
+                .unwrap();
+            pages += 1;
+            seen += page.records.len() as u32;
+            if !page.has_more {
+                break;
+            }
+            cursor += page.records.len() as u32;
+        }
+        assert!(
+            pages >= 4,
+            "expected the {N}-record registry to span several pages/chunks, got {pages}"
+        );
+        assert_eq!(seen, N, "paginated walk must visit every record");
+        let stats = TrustBridgeContract::get_stats(env.clone());
+        assert_eq!(stats.total, N, "total count must equal registered records");
+        assert_eq!(
+            TrustBridgeContract::get_verified_count(env.clone()),
+            0,
+            "no verifications yet"
+        );
+    });
+
+    // Verify a middle band on either side of the removed block, then remove a
+    // contiguous middle band to create holes spanning chunk boundaries.
+    let mut removed = Vec::new(&env);
+    for i in (150..250u32).step_by(3) {
+        let name = format!("user{i:04}");
+        removed.push_back(s(&env, &name));
+    }
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        // Verify a few stayers either side of the removed band so vcount is
+        // non-trivial and must move when those are removed.
+        for i in [140u32, 260, 300] {
+            let name = format!("user{i:04}");
+            TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, &name)).unwrap();
+        }
+        assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 3);
+
+        // Remove the middle band (the removed names were unverified).
+        for i in 0..removed.len() {
+            let name = removed.get(i).unwrap();
+            TrustBridgeContract::remove(env.clone(), admin.clone(), name.clone()).unwrap();
+        }
+    });
+
+    let expected_after_remove = N - removed.len() as u32;
+
+    // 2. Compact the sparse index densely.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let chunks = TrustBridgeContract::compact_index(env.clone()).unwrap();
+        assert!(chunks > 0, "compaction must write at least one chunk");
+        let stats = TrustBridgeContract::get_stats(env.clone());
+        assert_eq!(
+            stats.total,
+            expected_after_remove,
+            "count drift after remove+compact"
+        );
+        assert_eq!(
+            TrustBridgeContract::get_verified_count(env.clone()),
+            3,
+            "vcount drift after remove+compact (removed band was unverified)"
+        );
+    });
+
+    // 3. Re-register the exact same names that were removed, at new addresses.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        for i in 0..removed.len() {
+            let name = removed.get(i).unwrap();
+            let new_addr = Address::generate(&env);
+            TrustBridgeContract::register(env.clone(), name.clone(), new_addr, Vec::new(&env))
+                .unwrap();
+        }
+        let stats = TrustBridgeContract::get_stats(env.clone());
+        assert_eq!(
+            stats.total,
+            N,
+            "re-registering removed names must restore count to {N}, got {}",
+            stats.total
+        );
+        assert_eq!(
+            TrustBridgeContract::get_verified_count(env.clone()),
+            3,
+            "re-registering at new addresses must not re-verify (new records)"
+        );
+    });
+
+    // 4. Final parity: count/vcount/index versus the live record set.
+    env.as_contract(&contract_id, || {
+        let stats = TrustBridgeContract::get_stats(env.clone());
+        let all = TrustBridgeContract::get_all_registered(env.clone()).unwrap();
+        assert_eq!(
+            stats.total,
+            all.len(),
+            "get_stats().total ({}) diverged from live index size ({})",
+            stats.total,
+            all.len()
+        );
+        assert!(
+            stats.total <= N && stats.total >= expected_after_remove,
+            "total out of the expected band after re-register: {}",
+            stats.total
+        );
+
+        // Every live record resolves in the index, and every re-registered
+        // name is present exactly once (no duplicate, no missing, no hole).
+        for i in 0..all.len() {
+            let (name, _addr) = all.get(i).unwrap();
+            assert!(
+                TrustBridgeContract::has_record(env.clone(), name.clone()),
+                "index entry {name} must have a live record"
+            );
+        }
+        for i in 0..removed.len() {
+            let name = removed.get(i).unwrap();
+            assert!(
+                TrustBridgeContract::has_record(env.clone(), name.clone()),
+                "re-registered {name} must be present after compaction"
+            );
+        }
+
+        // Walk the paginated admin export over chunk boundaries and confirm we
+        // see every live record exactly once (I5/I9-style check for the
+        // compacted registry).
+        let mut seen = 0u32;
+        let mut cursor = 0u32;
+        loop {
+            let page = TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 100)
+                .unwrap();
+            let page_size = page.records.len() as u32;
+            seen += page_size;
+            if !page.has_more {
+                break;
+            }
+            cursor += page_size;
+        }
+        assert_eq!(seen, stats.total, "paginated walk must visit every record");
+        assert_eq!(seen, all.len() as u32);
+    });
+}
