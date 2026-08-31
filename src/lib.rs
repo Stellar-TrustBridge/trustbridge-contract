@@ -31,7 +31,8 @@ pub use events::{
     RotationCancelledEvent, RotationExecutedEvent, RotationRequestedEvent,
     ChallengeStartedEvent, EmergencyClearedEvent, EmergencyPausedEvent, PausedEvent,
     RegisteredEvent, RemovedEvent, RoleGrantedEvent, RoleRevokedEvent, UnpausedEvent,
-    UpgradeAttestedEvent, UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
+    UpgradeAttestedEvent, UpgradedEvent, VerificationConfiguredEvent, VerificationRevokedEvent,
+    VerifiedEvent,
 };
 pub use storage::{
     ChallengeRecord, ContributorRecord, ExportPage, HealthSnapshot, Role, Stats,
@@ -1235,6 +1236,9 @@ impl TrustBridgeContract {
     /// Stores the attestation symbol, expiry window, and threshold. May only
     /// be called once — a second invocation returns [`ContractError::AlreadyInitialized`].
     ///
+    /// Emits [`VerificationConfiguredEvent`]. The stored configuration can be
+    /// read back with [`get_verification_config`][Self::get_verification_config].
+    ///
     /// # Auth
     ///
     /// Requires auth from the contract admin.
@@ -1266,13 +1270,22 @@ impl TrustBridgeContract {
             return Err(ContractError::AlreadyInitialized);
         }
 
-        crate::storage::set_verification_config(&env, attestation, expires_in, threshold);
+        crate::storage::set_verification_config(&env, attestation.clone(), expires_in, threshold);
 
         let timestamp = env.ledger().timestamp();
         push_audit_entry(
             &env,
-            AuditLogEntry::new(AuditEventType::AdminAction, timestamp, Some(caller)),
+            AuditLogEntry::new(AuditEventType::AdminAction, timestamp, Some(caller.clone())),
         );
+
+        VerificationConfiguredEvent {
+            admin: caller,
+            attestation,
+            expires_in,
+            threshold,
+            timestamp,
+        }
+        .publish(&env);
 
         Ok(())
     }
@@ -3849,6 +3862,61 @@ mod test {
                 2,
             );
             assert_eq!(res, Err(ContractError::AlreadyInitialized));
+        });
+    }
+
+    #[test]
+    fn test_config_verification_emits_event_and_getter_reflects_it() {
+        let env = Env::default();
+        let (admin, _user, _other, contract_id) = setup(&env);
+        let attestation = soroban_sdk::Symbol::new(&env, "github_att");
+
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_700_000_000);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::config_verification(
+                env.clone(),
+                admin.clone(),
+                attestation.clone(),
+                3600,
+                2,
+            )
+            .unwrap();
+        });
+
+        let expected = VerificationConfiguredEvent {
+            admin: admin.clone(),
+            attestation: attestation.clone(),
+            expires_in: 3600,
+            threshold: 2,
+            timestamp: 1_700_000_000,
+        };
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    expected.topics(&env),
+                    expected.data(&env),
+                )
+            ],
+            "VerificationConfiguredEvent payload or topics changed"
+        );
+
+        let topics = expected.topics(&env);
+        assert_eq!(
+            soroban_sdk::Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+            soroban_sdk::Symbol::new(&env, "verification_configured_event"),
+            "VerificationConfiguredEvent topic symbol changed"
+        );
+
+        env.as_contract(&contract_id, || {
+            let config = TrustBridgeContract::get_verification_config(env.clone())
+                .expect("verification config must be set");
+            assert_eq!(config.attestation, attestation);
+            assert_eq!(config.expires_in, 3600);
+            assert_eq!(config.threshold, 2);
         });
     }
 

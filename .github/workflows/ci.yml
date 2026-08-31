@@ -85,6 +85,42 @@ jobs:
       - name: cargo test
         run: cargo test
 
+      - name: Register budget report
+        id: register_budget
+        continue-on-error: true
+        env:
+          REGISTER_BUDGET_CPU_MAX: 25000000
+          REGISTER_BUDGET_MEM_MAX: 300000
+        run: |
+          mkdir -p artifacts
+          cargo test test_report_register_budget_samples -- --nocapture --test-threads=1 \
+            | tee artifacts/register-budget-samples.csv
+
+          {
+            echo "### Register instruction budget"
+            echo
+            echo "| input | cpu_instructions | memory_bytes | cpu cap | mem cap | status |"
+            echo "|---|---|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          awk -F',' -v cpu_max="$REGISTER_BUDGET_CPU_MAX" -v mem_max="$REGISTER_BUDGET_MEM_MAX" -v summary="$GITHUB_STEP_SUMMARY" '
+            /^register,(baseline|max_username_len),/ {
+              input = $2; cpu = $3 + 0; mem = $4 + 0;
+              status = (cpu > cpu_max || mem > mem_max) ? "OVER CAP" : "OK";
+              printf("| %s | %d | %d | %d | %d | %s |\n", input, cpu, mem, cpu_max, mem_max, status) >> summary;
+              if (cpu > cpu_max || mem > mem_max) failed = 1;
+            }
+            END { if (failed) exit 1 }
+          ' artifacts/register-budget-samples.csv
+
+      - name: Upload register budget artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: register-budget-report
+          path: artifacts/register-budget-samples.csv
+          if-no-files-found: error
+          retention-days: 14
+
       - name: stellar contract build
         run: stellar contract build
 
