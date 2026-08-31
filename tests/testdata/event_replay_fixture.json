@@ -1,0 +1,92 @@
+{
+  "_comment": [
+    "Consumer-oriented replay fixture for Issue #283.",
+    "Six raw event deliveries as an indexer would receive them from Horizon/RPC.",
+    "Deliveries 4 and 5 are exact replays of deliveries 2 and 1 (reconnect / catch-up).",
+    "Delivery 6 is a genuine re-registration of the same username in a later ledger.",
+    "A consumer that keys on `event_id` must apply four distinct events and treat",
+    "the two replays as no-ops, ending with `octocat` registered and NOT verified."
+  ],
+  "network_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472",
+  "contract_id": "CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA",
+  "id_scheme": "{network_id}:{contract_id}:{ledger_sequence}:{tx_hash}:{event_index}",
+  "deliveries": [
+    {
+      "delivery": 1,
+      "event_type": "registered_event",
+      "github_username": "octocat",
+      "stellar_address": "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+      "timestamp": 1732800000,
+      "ledger_sequence": 1000042,
+      "tx_hash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901",
+      "event_index": 0,
+      "event_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472:CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA:1000042:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901:0"
+    },
+    {
+      "delivery": 2,
+      "event_type": "verified_event",
+      "github_username": "octocat",
+      "stellar_address": "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+      "timestamp": 1732800300,
+      "ledger_sequence": 1000050,
+      "tx_hash": "b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2",
+      "event_index": 0,
+      "event_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472:CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA:1000050:b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2:0"
+    },
+    {
+      "delivery": 3,
+      "event_type": "verification_revoked_event",
+      "github_username": "octocat",
+      "stellar_address": "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+      "timestamp": 1732800600,
+      "ledger_sequence": 1000061,
+      "tx_hash": "c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3",
+      "event_index": 1,
+      "event_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472:CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA:1000061:c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3:1"
+    },
+    {
+      "delivery": 4,
+      "_note": "exact replay of delivery 2 on reconnect",
+      "event_type": "verified_event",
+      "github_username": "octocat",
+      "stellar_address": "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+      "timestamp": 1732800300,
+      "ledger_sequence": 1000050,
+      "tx_hash": "b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2",
+      "event_index": 0,
+      "event_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472:CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA:1000050:b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2:0"
+    },
+    {
+      "delivery": 5,
+      "_note": "exact replay of delivery 1 on catch-up",
+      "event_type": "registered_event",
+      "github_username": "octocat",
+      "stellar_address": "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+      "timestamp": 1732800000,
+      "ledger_sequence": 1000042,
+      "tx_hash": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901",
+      "event_index": 0,
+      "event_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472:CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA:1000042:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901:0"
+    },
+    {
+      "delivery": 6,
+      "_note": "genuine re-registration in a later ledger — distinct event_id",
+      "event_type": "registered_event",
+      "github_username": "octocat",
+      "stellar_address": "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H",
+      "timestamp": 1732900000,
+      "ledger_sequence": 1002000,
+      "tx_hash": "d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4",
+      "event_index": 0,
+      "event_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472:CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA:1002000:d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4:0"
+    }
+  ],
+  "expected_final_state": {
+    "octocat": {
+      "stellar_address": "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H",
+      "verified": false,
+      "applied_event_ids": 4,
+      "ignored_replays": 2
+    }
+  }
+}

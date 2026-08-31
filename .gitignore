@@ -49,3 +49,7 @@ pr.md
 # MiMoCode
 .mimocode/
 .mimocode
+
+# Python
+__pycache__/
+*.pyc

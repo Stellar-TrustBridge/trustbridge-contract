@@ -31,12 +31,14 @@ class RegistryRecord:
     stellar_address: str
     verified: bool
     registered_at: int
+    payout_address: str = ""
+    is_bot: bool = False
 
 
 @dataclass(frozen=True)
 class RegistryPage:
     records: list[RegistryRecord]
-    next_cursor: int | None
+    next_cursor: object | None
     total: int
     has_more: bool
 
@@ -90,6 +92,8 @@ class TrustBridgeClient:
             stellar_address=value["stellar_address"],
             verified=bool(value["verified"]),
             registered_at=int(value["registered_at"]),
+            payout_address=value.get("payout_address") or value["stellar_address"],
+            is_bot=bool(value.get("is_bot", False)),
         )
 
     def get_address(self, username: str) -> RegistryRecord | None:
@@ -118,6 +122,40 @@ class TrustBridgeClient:
             total=int(value["total"]),
             has_more=bool(value["has_more"]),
         )
+
+    def get_public_page(self, cursor: object = 0, limit: int = 100) -> RegistryPage:
+        """One page of the unauthenticated ``get_public_paginated`` read.
+
+        ``next_cursor`` is an opaque token — it is passed straight back to the
+        next call and never interpreted here.
+        """
+        value = self._invoke("get_public_paginated", ("--cursor", str(cursor), "--limit", str(limit)))
+        if not isinstance(value, dict):
+            raise ValueError(f"get_public_paginated returned unexpected value: {value!r}")
+        records = [self._record(item[0], item[1]) for item in value["records"]]
+        next_cursor = value.get("next_cursor")
+        return RegistryPage(
+            records=records,
+            next_cursor=None if next_cursor is None else next_cursor,
+            total=int(value["total"]),
+            has_more=bool(value["has_more"]),
+        )
+
+    def iter_public_records(self, page_limit: int = 100):
+        """Yield every registry record via ``get_public_paginated``, guarding
+        against a stalled cursor echoed by an unreliable RPC node."""
+        cursor: object = 0
+        seen: set[str] = set()
+        while True:
+            page = self.get_public_page(cursor, page_limit)
+            yield from page.records
+            if not page.has_more or page.next_cursor is None:
+                return
+            token = str(page.next_cursor)
+            if token in seen:
+                raise RuntimeError(f"pagination stalled at cursor {token}")
+            seen.add(token)
+            cursor = page.next_cursor
 
     def batch_verify(self, usernames: Sequence[str]) -> int:
         value = self._invoke("batch_verify", ("--caller", self.source, "--usernames", json.dumps(list(usernames))), send=True)

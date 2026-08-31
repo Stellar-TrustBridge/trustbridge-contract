@@ -151,3 +151,29 @@ topic assignments, and no event was removed or renamed. Consumers that ignore
 unknown fields need no change to keep working — they simply do not get the
 deduplication benefit. Consumers that parse events positionally must be updated,
 because `domain` is appended to each payload.
+
+---
+
+## Stable event ID (Issue #283)
+
+For a single opaque id per event, derive it from the delivery envelope:
+
+```
+event_id = "{network_id}:{contract_id}:{ledger_sequence}:{tx_hash}:{event_index}"
+```
+
+`event_index` is the zero-based position of the event within its transaction —
+required because one `batch_verify` / `batch_remove` transaction emits many
+events sharing a topic in one ledger. Uniqueness scope is one contract instance
+on one network. Full algorithm, the replay fixture
+(`tests/testdata/event_replay_fixture.json`), and the reference consumer test
+(`tests/event_replay.rs`, `cargo test event`) are in
+[DASHBOARD_SYNC.md](DASHBOARD_SYNC.md#stable-event-id-issue-283).
+
+## GraphQL subgraph schema (Issue #284)
+
+[`docs/subgraph/`](subgraph/) has a Graph-Protocol `schema.graphql` for
+`RegisteredEvent`, `VerifiedEvent`, and `RemovedEvent` plus a derived
+`Contributor` aggregate, the event → entity mapping, a handler sketch, an
+example query, and how to run a schema check and a local event stream without a
+hosted indexer.

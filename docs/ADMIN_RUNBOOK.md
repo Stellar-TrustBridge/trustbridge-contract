@@ -231,7 +231,31 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 - **Partial success:** unknown / already-verified entries are counted as
   `failed` and skipped; the batch does **not** abort. Inspect the returned
   `BatchSummary` — a `success_rate < 100` is informational, not an error.
-- For large lists use `scripts/bulk_verify.sh` (handles paging + RPC pacing).
+- For large lists use `scripts/bulk_verify.sh` (see below).
+
+#### `scripts/bulk_verify.sh` — paged `batch_verify` adapter (Issue #286)
+
+```bash
+CONTRACT_ID="$CONTRACT_ID" SOURCE=admin NETWORK="$NETWORK" \
+  ./scripts/bulk_verify.sh --file usernames.txt \
+  [--dry-run] [--batch-size 25] [--pace-ms 500] \
+  [--audit-log verify-audit.log] [--continue-on-error] [--no-batch]
+```
+
+- Reads usernames one per line (blank lines and `#` comments ignored) and
+  calls `batch_verify` in pages of `--batch-size` (default and ceiling 25 =
+  `MAX_WRITE_BATCH`).
+- **Fallback:** if the deployed contract has no `batch_verify`, the script
+  detects the CLI error on the first call, prints a note, and finishes the
+  run with per-username `verify`. Force this with `--no-batch`.
+- **Idempotency:** a per-batch `successful < total` is reported as `PARTIAL`
+  (already-verified / unknown usernames), not a hard failure — it matches the
+  contract's `BatchSummary` semantics. In fallback mode an `AlreadyVerified`
+  error is likewise treated as success.
+- `--dry-run` submits no transaction and logs the intended batches.
+- `--audit-log` appends one JSON line per batch/username:
+  `{"timestamp","scope","target","network","result","detail"}`.
+- Exit code is non-zero if any username ended unverified.
 
 #### `revoke_verification` — withdraw verification
 
@@ -439,6 +463,25 @@ CONTRACT_ID="$CONTRACT_ID" SOURCE=admin NETWORK="$NETWORK" ./scripts/export_regi
 - Pages `get_registered_paginated` and writes a single
   `registry-export-<network>.json`. `SOURCE` must sign as the admin. Take an
   export **before** any bulk verify/remove or dashboard migration.
+
+#### `scripts/payout_allowlist.sh` — verified-only payout CSV (Issue #285)
+
+```bash
+CONTRACT_ID="$CONTRACT_ID" NETWORK="$NETWORK" \
+  ./scripts/payout_allowlist.sh [--output allowlist.csv] \
+  [--include-unverified] [--include-bots]
+```
+
+- Pages the **unauthenticated** `get_public_paginated` read — no admin key;
+  `SOURCE` can be any funded identity (defaults to `default`).
+- Writes `payout-allowlist-<network>.csv` with columns
+  `github_username,payout_address,stellar_address,verified,registered_at`
+  (`payout_address` falls back to `stellar_address` when unset).
+- **Verified-only by default:** unverified registrations and records flagged
+  `is_bot` are excluded so a squatter or CI account is never paid. Opt back in
+  with `--include-unverified` / `--include-bots`.
+- Read-only; pagination completeness is enforced (a stalled cursor aborts).
+  Payment submission is out of scope.
 
 ---
 
