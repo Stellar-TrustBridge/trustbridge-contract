@@ -1,0 +1,104 @@
+"""
+TrustBridge registry subgraph schema (Issue #284).
+
+Covers the three events a dashboard needs to reconstruct contributor history
+without a bespoke indexer: RegisteredEvent, VerifiedEvent, RemovedEvent.
+Field names and types mirror the on-chain `#[contractevent]` definitions in
+`src/events.rs` exactly — see docs/subgraph/README.md for the event -> entity
+mapping. No payload field here is invented; anything the contract does not emit
+is not modelled.
+
+This schema is written in the Graph Protocol subgraph dialect (entity
+directives, `Bytes`, `BigInt`). It is a schema + mapping spec only; operating a
+hosted indexer is out of scope for this repo.
+"""
+
+"""
+Deployment provenance carried by VerifiedEvent and RemovedEvent (`EventDomain`,
+Issue #226). RegisteredEvent does NOT carry this field — see README.
+Embedded, not a top-level entity: it has no identity of its own.
+"""
+type EventDomain {
+  "Emitting contract instance (C... address)."
+  contractId: Bytes!
+  "SHA-256 of the network passphrase."
+  networkId: Bytes!
+  "Contract version at emit time, as [major, minor, patch]."
+  contractVersion: [Int!]!
+  "Schema version of the domain envelope itself. Currently 1."
+  domainVersion: Int!
+}
+
+"""
+One `RegisteredEvent`: a GitHub username registered or re-registered to a
+Stellar address. Topic: `registered_event`. `github_username` is the event
+topic. `sponsor` is present only when a third party paid for the registration.
+"""
+type RegisteredEvent @entity(immutable: true) {
+  "Stable event id: {networkId}:{contractId}:{ledgerSequence}:{txHash}:{eventIndex} (Issue #283)."
+  id: ID!
+  githubUsername: String!
+  stellarAddress: Bytes!
+  timestamp: BigInt!
+  sponsor: Bytes
+  ledgerSequence: BigInt!
+  txHash: Bytes!
+  contributor: Contributor!
+}
+
+"""
+One `VerifiedEvent`: an admin or Verifier marked a contributor verified.
+Topic: `verified_event`. `github_username` is the event topic.
+"""
+type VerifiedEvent @entity(immutable: true) {
+  "Stable event id (Issue #283)."
+  id: ID!
+  githubUsername: String!
+  stellarAddress: Bytes!
+  timestamp: BigInt!
+  domain: EventDomain!
+  ledgerSequence: BigInt!
+  txHash: Bytes!
+  contributor: Contributor!
+}
+
+"""
+One `RemovedEvent`: a registration removed by the registrant or an admin.
+Topic: `removed_event`. `github_username` is the event topic. A large
+`batch_remove` emits one `RemovedEvent` per successfully removed contributor,
+all in the same transaction — `eventIndex` in the `id` keeps them distinct.
+"""
+type RemovedEvent @entity(immutable: true) {
+  "Stable event id (Issue #283)."
+  id: ID!
+  githubUsername: String!
+  stellarAddress: Bytes!
+  timestamp: BigInt!
+  domain: EventDomain!
+  ledgerSequence: BigInt!
+  txHash: Bytes!
+  contributor: Contributor!
+}
+
+"""
+Derived, mutable aggregate: current best-known state of one GitHub username on
+one contract instance. Rebuilt by the mappings from the event stream; the
+contract's own storage remains the source of truth for reconciliation.
+"""
+type Contributor @entity {
+  "The GitHub username (lower-cased, as stored on-chain)."
+  id: ID!
+  githubUsername: String!
+  "Address from the most recent RegisteredEvent, or null once removed."
+  stellarAddress: Bytes
+  "True after a VerifiedEvent, false after a RemovedEvent or before first verify."
+  verified: Boolean!
+  "False until a RemovedEvent with no later RegisteredEvent."
+  removed: Boolean!
+  firstRegisteredAt: BigInt
+  lastEventAt: BigInt!
+  lastLedgerSequence: BigInt!
+  registrations: [RegisteredEvent!]! @derivedFrom(field: "contributor")
+  verifications: [VerifiedEvent!]! @derivedFrom(field: "contributor")
+  removals: [RemovedEvent!]! @derivedFrom(field: "contributor")
+}

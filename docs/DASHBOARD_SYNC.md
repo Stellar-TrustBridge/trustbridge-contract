@@ -152,6 +152,48 @@ asserts the local `verified` flag is `true` exactly once — i.e. the second
 apply is detected as a duplicate by `(ledger_sequence, tx_hash)` and produces
 no state change, no duplicate row, and no double count in any aggregate.
 
+### Stable event ID (Issue #283)
+
+The composite key above is fine for a relational store but awkward to pass
+around as one value. Consumers that want a single opaque id per event should
+derive it deterministically from the delivery envelope:
+
+```
+event_id = "{network_id}:{contract_id}:{ledger_sequence}:{tx_hash}:{event_index}"
+```
+
+- `network_id` — lower-hex SHA-256 of the network passphrase (same value as
+  `domain.network_id`, see [EVENT_INDEXING.md](EVENT_INDEXING.md#event-domain-separation-issue-226)).
+- `contract_id` — the emitting contract's `C...` address (`domain.contract_id`).
+- `ledger_sequence` — ledger the event was emitted in.
+- `tx_hash` — hex transaction hash that emitted it.
+- `event_index` — zero-based position of this event within that transaction's
+  event list. Required because one `batch_verify` / `batch_remove` transaction
+  emits many events with the same topic in the same ledger.
+
+**Algorithm for a consumer:**
+
+1. On each delivery, compute `event_id`.
+2. If `event_id` is already in the applied-set, drop the delivery — it is a
+   reconnect replay, a catch-up re-read, or a worker retry. Do nothing else.
+3. Otherwise apply the event (a last-write-wins field/record update, never an
+   increment — see the table above), then record `event_id` in the applied-set.
+4. A full re-sync of the entire stream is therefore a no-op once every id has
+   been seen.
+
+**Uniqueness scope: one contract instance on one network.** `network_id` and
+`contract_id` are baked into the id, so it never collides across a redeploy or
+another network — an upgrade re-emitting history, or a testnet stream leaking
+into a public-network table, both produce ids that do not match anything in the
+target store. Consumers that prefer a fixed-width id may hash the string
+(e.g. SHA-256) — the hash inherits the same uniqueness scope.
+
+A language-neutral fixture of replayed deliveries and the expected end state
+lives at
+[`tests/testdata/event_replay_fixture.json`](../tests/testdata/event_replay_fixture.json);
+`tests/event_replay.rs` (`cargo test event`) applies it through a reference
+consumer and asserts the stream is replay-safe.
+
 See [ABI.md — Events](ABI.md#events) for the full topic/payload reference per
 event type.
 

@@ -154,42 +154,26 @@ because `domain` is appended to each payload.
 
 ---
 
-## Payout delegation vs address rotation vs re-registration
+## Stable event ID (Issue #283)
 
-Three different on-chain changes can look similar to an indexer that only
-tracks "the address associated with a username changed." They are **not**
-the same operation and must not be collapsed into one timeline entry:
+For a single opaque id per event, derive it from the delivery envelope:
 
-| Change | Entry point(s) | Event(s) | What actually moves |
-|---|---|---|---|
-| Re-registration | `register` / `register_sponsored` | `registered_event` | `stellar_address` (identity) — same path as first-time registration |
-| Address rotation | `request_address_rotation` / `execute_address_rotation` | `rotation_requested_event` / `rotation_executed_event` | `stellar_address` (identity), after a configurable delay |
-| Payout delegation | `delegate_payout` / `undelegate_payout` | `payout_delegated_event` / `payout_delegation_revoked_event` | `payout_address` only — identity `stellar_address` is untouched |
+```
+event_id = "{network_id}:{contract_id}:{ledger_sequence}:{tx_hash}:{event_index}"
+```
 
-Before `delegate_payout` existed, the only way to steer payouts to a
-different address was implicit: `register`/`register_sponsored` carry
-whatever `payout_address` was already on file forward unchanged, and nothing
-distinguished "this re-registration happens to also be a rotation" from "this
-is a routine re-registration." `delegate_payout` and `undelegate_payout` give
-payout-address changes their own entry points and their own events, so an
-indexer no longer has to infer intent from a shared `registered_event`.
+`event_index` is the zero-based position of the event within its transaction —
+required because one `batch_verify` / `batch_remove` transaction emits many
+events sharing a topic in one ledger. Uniqueness scope is one contract instance
+on one network. Full algorithm, the replay fixture
+(`tests/testdata/event_replay_fixture.json`), and the reference consumer test
+(`tests/event_replay.rs`, `cargo test event`) are in
+[DASHBOARD_SYNC.md](DASHBOARD_SYNC.md#stable-event-id-issue-283).
 
-- **`payout_delegated_event`** — data fields `github_username`,
-  `stellar_address` (unchanged identity address), `delegate_address` (the new
-  payout destination), `timestamp`, `domain`.
-- **`payout_delegation_revoked_event`** — data fields `github_username`,
-  `stellar_address`, `previous_delegate`, `timestamp`, `domain`.
+## GraphQL subgraph schema (Issue #284)
 
-**One live delegate at a time.** The contract enforces at most one active
-payout delegate per registration: `delegate_payout` fails with
-`AlreadyDelegated` (error code 34) if `payout_address` already differs from
-`stellar_address` and from the requested new delegate. Callers must
-`undelegate_payout` (which fails with `NoActiveDelegate`, code 35, if there is
-nothing to revoke) before delegating to a different address. Indexers can
-therefore treat "is there a live delegate" as a simple boolean per username —
-it never needs to track a list.
-
-**Storage note:** delegation reuses the existing `payout_address` field on
-`ContributorRecord` rather than adding a parallel delegate-tracking structure,
-so `get_address` / `get_public_paginated` continue to be the source of truth
-for the current payout destination — no new read path is needed.
+[`docs/subgraph/`](subgraph/) has a Graph-Protocol `schema.graphql` for
+`RegisteredEvent`, `VerifiedEvent`, and `RemovedEvent` plus a derived
+`Contributor` aggregate, the event → entity mapping, a handler sketch, an
+example query, and how to run a schema check and a local event stream without a
+hosted indexer.
