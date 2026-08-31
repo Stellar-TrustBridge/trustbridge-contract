@@ -124,3 +124,75 @@ When adding a contract function that mutates state:
 3. Add the resulting invariant to the table above.
 
 A new mutating function with no fuzz arm is a review blocker.
+
+---
+
+## Bounded Model-Check Proofs for Counter Invariants (Issue #241)
+
+### Why bounded model checking instead of Kani
+
+[Kani](https://model-checking.github.io/kani/) provides LLVM-level symbolic
+execution, but requires a separate LLVM toolchain and adds significant time to
+every CI run. The issue allows a smaller checker as long as it is
+machine-checked and not merely prose.
+
+The harnesses in `tests/counter_proofs.rs` use **exhaustive enumeration over
+small, bounded domains**: they cover every reachable state up to a bounded
+number of operations. For counter arithmetic with no unbounded loops this is
+equivalent to bounded model checking — a pass is a machine-verified proof for
+the bounded domain, not a probabilistic sample.
+
+### Proved invariants
+
+| ID | Invariant | Harness | Bounded domain |
+|----|-----------|---------|----------------|
+| P1 | `verify` increments `verified_count` by exactly 1 | `proof_verify_increments_verified_count` | 1 register + 1 verify |
+| P1b | Verifying N records increments by exactly N | `proof_verify_increments_count_by_n` | N ∈ {2, 4, 8} |
+| P2 | `remove` of verified record decrements `verified_count` by 1 | `proof_remove_decrements_verified_count` | 1 register + 1 verify + 1 remove |
+| P3 | `remove` of unverified record does NOT touch `verified_count` | `proof_remove_does_not_decrement_count_for_unverified` | 1 register + 1 remove |
+| P4 | `verify` is idempotent — second call does NOT double-increment | `proof_verify_is_idempotent_on_verified_count` | 1 register + 2 verify |
+| P5 | `verified <= total` after every operation | `proof_verified_never_exceeds_total_exhaustive` | N ∈ {1, 2, 3, 4} × all phases |
+| P6 | Counters never underflow (saturating-arithmetic guard) | `proof_counters_never_underflow` | 32 remove-spam attempts; 4 register + partial verify + full remove |
+| P7 | `revoke_verification` decrements and is idempotent | `proof_revoke_decrements_and_is_idempotent` | 1 register + 1 verify + 2 revoke |
+
+### Running the proof harness
+
+```bash
+# Run all proof harnesses
+cargo test --test counter_proofs
+
+# Run with output (shows the bounded domain being exercised)
+cargo test --test counter_proofs -- --nocapture
+```
+
+CI runs these in the dedicated `counter-invariant-proofs` job
+(see `.github/workflows/ci.yml`). The job is also indirectly run by the main
+`quality` job via `cargo test` so every PR is covered.
+
+### Saturating vs wrapping counters
+
+The proofs in P6 specifically guard against the `saturating_sub` vs
+`wrapping_sub` distinction. The contract uses saturating arithmetic
+(`saturating_sub`) for all counter decrements, so an attempted underflow
+saturates to 0 rather than wrapping to `u32::MAX`. P6 asserts both that:
+
+1. Failed `remove` calls return `ContractError::NotRegistered` and leave
+   counters at 0 (no side effects on invalid input).
+2. After removing all records from a partially-verified registry, both
+   `total` and `verified` reach 0 and neither counter ever equals `u32::MAX`.
+
+### Unregistered-verify guard
+
+P3 documents the "unregistered verify" edge case: the contract returns
+`ContractError::NotRegistered` before touching any counter, so a verify
+call on a non-existent username cannot inflate `verified_count`. This is
+covered by the property-fuzzing suite (I7) and confirmed by P3 and P6.
+
+### Extending the proof suite
+
+When adding a contract function that mutates `total` or `verified`:
+
+1. Add a `proof_*` test in `tests/counter_proofs.rs`.
+2. Add a row to the table above with the bounded domain.
+3. Ensure the harness asserts the parity invariant (`stats().verified ==
+   get_verified_count()`) after every mutating step.

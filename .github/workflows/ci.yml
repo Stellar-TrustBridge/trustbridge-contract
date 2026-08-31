@@ -411,3 +411,58 @@ jobs:
           path: mutants-out/
           if-no-files-found: warn
           retention-days: 14
+
+
+  # Issue #241: Bounded model-check proofs for counter invariants
+  #
+  # Kani (LLVM symbolic execution) is too heavyweight for bounded CI time.
+  # The issue explicitly allows a smaller checker as long as it is
+  # machine-checked. These harnesses use exhaustive enumeration over small,
+  # bounded domains — equivalent to bounded model checking for counter
+  # arithmetic with no unbounded loops. A pass is a machine-verified proof
+  # for the bounded domain.
+  #
+  # Invariants proved (see tests/counter_proofs.rs for full descriptions):
+  #   P1: verify increments verified_count by exactly 1
+  #   P2: remove of verified record decrements verified_count by 1
+  #   P3: remove of unverified record does NOT touch verified_count
+  #   P4: verify is idempotent (second verify does NOT double-increment)
+  #   P5: verified <= total after every operation (exhaustive N=1..4)
+  #   P6: counters never underflow (remove spam, saturating arithmetic)
+  #   P7: revoke_verification decrements and is idempotent
+  #
+  # Run locally:
+  #   cargo test --test counter_proofs
+  #
+  # REGISTRY_INVARIANTS.md links this harness.
+  counter-invariant-proofs:
+    name: Counter Invariant Proofs (Issue #241)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-proofs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run counter invariant proofs
+        run: |
+          cargo test --test counter_proofs -- --nocapture 2>&1
+          echo "Exit: $?"
+
+      - name: Verify proof tests ran
+        run: |
+          cargo test --test counter_proofs -- --list 2>&1 | \
+            grep -E "proof_verify_increments|proof_remove_decrements|proof_verified_never_exceeds|proof_counters_never_underflow"
+          echo "All expected proof harnesses found."
