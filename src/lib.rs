@@ -14,6 +14,7 @@ mod batch;
 mod domain;
 mod error;
 mod events;
+mod oracle_proof;
 mod storage;
 mod utils;
 mod version;
@@ -39,6 +40,7 @@ pub use storage::{
 };
 pub use events::{PayoutDelegatedEvent, PayoutDelegationRevokedEvent};
 pub use version::Version;
+pub use oracle_proof::{get_oracle_allowlist, set_oracle_allowlist, verify_with_proof, OracleProof};
 
 use crate::storage::get_public_paginated_internal;
 
