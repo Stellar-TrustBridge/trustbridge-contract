@@ -176,8 +176,9 @@ Use this checklist before and during each Wave to avoid rent surprises.
   verified, removed, or re-registered is a cold-extension candidate.
 
 - [ ] Estimate the number of cold records and budget for keeper calls.
-  A single `extend_registry_ttl` call can extend up to `MAX_PAGE_LIMIT` (200) records
-  per invocation (see [ABI.md](ABI.md#extend_registry_ttl)).
+  A single `extend_registry_ttl` call can extend up to **100 records**
+  per invocation (`BatchConfig::default().max_batch_size` — see
+  [ABI.md §extend_registry_ttl](ABI.md#extend_registry_ttlusernames-vecstring---resultu32-contracterror)).
 
 - [ ] Set aside XLM for keeper fees.  The exact amount depends on how many cold records
   exist and how much each extension costs at the time of the Wave.
@@ -202,11 +203,15 @@ Use this checklist before and during each Wave to avoid rent surprises.
 ## Keeper Implementation
 
 The contract exposes `extend_registry_ttl(usernames: Vec<String>)` (permissionless) as the
-on-chain keeper endpoint.  An off-chain job should:
+on-chain keeper endpoint. An off-chain job should:
 
 1. Read the full username index via `get_registered_paginated` (admin-only) or `get_public_paginated`.
 2. For each username, check whether its remaining TTL is approaching `TTL_THRESHOLD` (30 days).
-3. Batch usernames into groups of up to 200 and call `extend_registry_ttl`.
+3. Batch usernames into groups of up to **100** and call `extend_registry_ttl`.
+
+The batch size limit is `BatchConfig::default().max_batch_size = 100`. See
+[ABI.md §extend_registry_ttl](ABI.md#extend_registry_ttlusernames-vecstring---resultu32-contracterror)
+for the complete specification.
 
 ```bash
 # Extend a batch of cold records (example)

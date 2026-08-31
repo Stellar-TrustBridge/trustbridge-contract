@@ -482,6 +482,38 @@ These tests confirm that every form of non-ASCII input — whether a visually
 distinct character like an emoji or a deceptive homoglyph like Cyrillic 'а' —
 is caught and rejected, while every valid ASCII username shape remains accepted.
 
+### Extended homoglyph corpus (Issue #299)
+
+Beyond the baseline homoglyph tests in `src/utils.rs`, `tests/homoglyph_corpus.rs`
+provides an exhaustive test corpus covering additional confusable attack vectors:
+
+**Comprehensive lookalike coverage:**
+- **Cyrillic**: 23 homoglyphs including а, е, о, р, с, х, у (U+0430–U+0443)
+- **Greek**: 20 homoglyphs including α, ο, ν, ρ, τ (U+03B1–U+03C7)
+- **Latin extended**: 16 diacritic variants (á, é, ñ, ü, ç, etc.)
+
+**Invisible characters:**
+- Zero-width joiner (U+200D), zero-width non-joiner (U+200C)
+- Zero-width space (U+200B), word joiner (U+2060)
+- Soft hyphen (U+00AD), invisible operators (U+2061–U+2063)
+
+**Bidirectional text attacks:**
+- Left-to-right / right-to-left marks (U+200E, U+200F)
+- Bidi embedding and override controls (U+202A–U+202E)
+- Directional isolates (U+2066–U+2069)
+
+**Advanced confusables:**
+- Full-width Latin forms (U+FF21–U+FF5A, used in Japanese text)
+- Mathematical alphanumeric symbols (U+1D400–U+1D7FF, bold/italic/script variants)
+- Superscripts, subscripts, and modifier letters
+
+**Documented guarantee:** "We reject all non-ASCII." Every codepoint above U+007F
+is blocked before it reaches storage, regardless of how it renders. The corpus
+tests validate this property against 78+ known confusable characters and ensure
+no bypass path exists at the `register()` entry point.
+
+Run the full corpus: `cargo test homoglyph` or `cargo test unicode`
+
 ### Performance
 
 The check adds no allocations and no UTF-8 decoding overhead. It is a
