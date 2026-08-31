@@ -36,6 +36,7 @@ Related docs: [ABI](ABI.md) · [ARCHITECTURE](ARCHITECTURE.md) · [SECURITY](SEC
 | I7 | A rejected operation moves no counter and mutates no record | `test_fuzz_failure_paths_leave_invariants_intact` |
 | I8 | Counters never underflow, including removal attempts against an empty registry | `test_fuzz_counters_never_underflow_on_empty_registry` |
 | I9 | A complete paginated export visits every live username exactly once, with no duplicate, skip, or reorder across chunk boundaries | `test_paginated_export_at_10k_users` |
+| I10 | After remove → compact → re-register of the same names, `count` and `vcount` stay in sync with the live record set and the chunked index stays hole-free | `test_issue306_remove_compact_reregister_counter_parity` |
 
 ### `get_verified_count()` / `get_stats().verified` parity (Issue #90)
 
@@ -54,6 +55,17 @@ new Stellar address equals the stored one. Any address change resets the record
 to unverified and decrements the verified count. The fuzz model mirrors this
 rule directly, so a change to the carry-over logic surfaces as an I2 or I6
 failure.
+
+### Remove → compact → re-register parity (Issue #306)
+
+`remove` then `compact_index` then a re-register of the same names is the
+combination most likely to let the flat index, the chunked index, and the
+`count`/`vcount` counters drift apart. `test_issue306_remove_compact_reregister_counter_parity`
+in `tests/integration.rs` exercises it at a scale that fills several `CHUNK_SIZE`
+chunks: it fills 400 records (8 chunks), removes a middle band to leave holes,
+compacts, re-registers the exact same names at new addresses, then asserts
+`get_stats().total`, `get_verified_count()`, the chunked index, and a full
+paginated walk all agree with the live record set (I10).
 
 ---
 
