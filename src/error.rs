@@ -110,6 +110,13 @@ pub enum ContractError {
     /// `add_verifier` was given a non-zero `expires_at` that is not in the
     /// future (Issue #293).
     VerifierExpiryInPast = 33,
+    /// `delegate_payout` was called while a different payout delegate is
+    /// already live — only one live payout delegate is allowed at a time;
+    /// call `undelegate_payout` first.
+    AlreadyDelegated = 34,
+    /// `undelegate_payout` was called but `payout_address` already equals
+    /// `stellar_address` — there is no active delegate to revoke.
+    NoActiveDelegate = 35,
 }
 
 impl ContractError {
@@ -157,6 +164,8 @@ impl ContractError {
             31 => Some(ContractError::VerifierAllowlistFull),
             32 => Some(ContractError::VerifierNotAllowlisted),
             33 => Some(ContractError::VerifierExpiryInPast),
+            34 => Some(ContractError::AlreadyDelegated),
+            35 => Some(ContractError::NoActiveDelegate),
             _ => None,
         }
     }

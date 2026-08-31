@@ -37,7 +37,10 @@ pub use storage::{
     VerificationConfig, VerifierAllowEntry, WasmAttestation, WasmProvenance, PauseReason,
     MAX_VERIFIERS,
 };
+pub use events::{PayoutDelegatedEvent, PayoutDelegationRevokedEvent};
 pub use version::Version;
+
+use crate::storage::get_public_paginated_internal;
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, Vec};
 
@@ -2467,6 +2470,14 @@ impl TrustBridgeContract {
     /// this issue's conformance matrix now guards against, and it has been
     /// removed.
     ///
+    /// **Persistent-chunk reads only (dual-index audit).** This reads from
+    /// [`get_public_paginated_internal`], which walks the persistent chunked
+    /// index directly, rather than [`get_registered_paginated_internal`],
+    /// which loads the whole legacy flat index out of instance storage on
+    /// every call. Being unauthenticated and pause-exempt, this is the path
+    /// most exposed to that cost, so it must never fall back to the flat-index
+    /// scan. See the dual-index audit note in `docs/DASHBOARD_SYNC.md`.
+    ///
     /// # Errors
     ///
     /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
@@ -2477,7 +2488,7 @@ impl TrustBridgeContract {
     ) -> Result<ExportPage, ContractError> {
         require_initialized(&env)?;
 
-        get_registered_paginated_internal(&env, cursor, limit)
+        get_public_paginated_internal(&env, cursor, limit)
     }
 
     /// Toggles contract pause state. Admin-only (Issue #3).
@@ -3723,6 +3734,121 @@ impl TrustBridgeContract {
 
         let chunks_written = crate::storage::compact_chunked_index(&env);
         Ok(chunks_written)
+    }
+
+    // ── Payout delegation (Issue: delegate vs rotation) ───────────────────────
+
+    /// Delegates payout for `github_username` to `delegate_address` without
+    /// touching the record's identity `stellar_address`.
+    ///
+    /// This reuses the existing `payout_address` field rather than adding new
+    /// storage. It is distinct from `register` (identity re-registration) and
+    /// from address rotation (`request_rotation` / `execute_rotation`): those
+    /// change `stellar_address` and emit `RegisteredEvent` /
+    /// `RotationExecutedEvent`, whereas this only changes `payout_address` and
+    /// emits [`PayoutDelegatedEvent`] — so indexers no longer have to guess
+    /// whether an address change was a rotation or a payout delegation.
+    ///
+    /// Only one payout delegate may be live at a time: if `payout_address`
+    /// already differs from `stellar_address` (and from `delegate_address`),
+    /// the caller must call `undelegate_payout` first.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotRegistered`] if `github_username` has no record.
+    /// - [`ContractError::ZeroAddress`] if `delegate_address` is the zero address.
+    /// - [`ContractError::AlreadyDelegated`] if a different delegate is already live.
+    pub fn delegate_payout(
+        env: Env,
+        caller: Address,
+        github_username: String,
+        delegate_address: Address,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
+
+        caller.require_auth();
+        if caller != record.stellar_address {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        if is_zero_address(&env, &delegate_address) {
+            return Err(ContractError::ZeroAddress);
+        }
+
+        if record.payout_address != record.stellar_address
+            && record.payout_address != delegate_address
+        {
+            return Err(ContractError::AlreadyDelegated);
+        }
+
+        let timestamp = env.ledger().timestamp();
+        record.payout_address = delegate_address.clone();
+        set_record(&env, &github_username, &record);
+
+        PayoutDelegatedEvent {
+            github_username: github_username.clone(),
+            stellar_address: record.stellar_address.clone(),
+            delegate_address,
+            timestamp,
+            domain: event_domain(&env),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Revokes the live payout delegation for `github_username`, restoring
+    /// `payout_address` back to the record's `stellar_address`.
+    ///
+    /// Emits [`PayoutDelegationRevokedEvent`], distinct from `RegisteredEvent`
+    /// / `RotationExecutedEvent` for the same indexer-disambiguation reason as
+    /// `delegate_payout`.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotRegistered`] if `github_username` has no record.
+    /// - [`ContractError::NoActiveDelegate`] if no delegate is currently live.
+    pub fn undelegate_payout(
+        env: Env,
+        caller: Address,
+        github_username: String,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
+
+        caller.require_auth();
+        if caller != record.stellar_address {
+            return Err(ContractError::NotAuthorized);
+        }
+
+        if record.payout_address == record.stellar_address {
+            return Err(ContractError::NoActiveDelegate);
+        }
+
+        let timestamp = env.ledger().timestamp();
+        let previous_delegate = record.payout_address.clone();
+        record.payout_address = record.stellar_address.clone();
+        set_record(&env, &github_username, &record);
+
+        PayoutDelegationRevokedEvent {
+            github_username: github_username.clone(),
+            stellar_address: record.stellar_address.clone(),
+            previous_delegate,
+            timestamp,
+            domain: event_domain(&env),
+        }
+        .publish(&env);
+
+        Ok(())
     }
 }
 
@@ -10664,6 +10790,248 @@ mod test {
             // A fresh proposal is possible immediately after.
             TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
                 .unwrap();
+        });
+    }
+
+    // ── Payout delegation (delegate vs rotation disambiguation) ───────────────
+
+    #[test]
+    fn test_delegate_payout_emits_distinct_event_and_updates_payout_address_only() {
+        let env = Env::default();
+        let (_admin, user, delegate, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_700_000_000);
+        let name = username(&env, "octocat");
+
+        env.as_contract(&contract_id, || {
+            register_personal(&env, &contract_id, "octocat", &user);
+        });
+
+        // Registration's own event is not what we're asserting on — clear it
+        // so the delegate event below is unambiguous.
+        env.events().all();
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::delegate_payout(
+                env.clone(),
+                user.clone(),
+                name.clone(),
+                delegate.clone(),
+            )
+            .unwrap();
+
+            let record = TrustBridgeContract::get_address(env.clone(), name.clone()).unwrap();
+            // Identity address is untouched by delegation — only payout moves.
+            assert_eq!(record.stellar_address, user);
+            assert_eq!(record.payout_address, delegate);
+        });
+
+        let expected = PayoutDelegatedEvent {
+            github_username: name.clone(),
+            stellar_address: user.clone(),
+            delegate_address: delegate.clone(),
+            timestamp: 1_700_000_000,
+            domain: env.as_contract(&contract_id, || event_domain(&env)),
+        };
+
+        assert_eq!(
+            env.events().all(),
+            soroban_sdk::vec![
+                &env,
+                (
+                    contract_id.clone(),
+                    expected.topics(&env),
+                    expected.data(&env),
+                )
+            ],
+            "delegate_payout must emit PayoutDelegatedEvent, not RegisteredEvent, \
+             so indexers can distinguish delegation from registration/rotation"
+        );
+    }
+
+    #[test]
+    fn test_delegate_payout_rejects_second_distinct_live_delegate() {
+        let env = Env::default();
+        let (_admin, user, delegate, contract_id) = setup(&env);
+        let other_delegate = Address::generate(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            register_personal(&env, &contract_id, "octocat", &user);
+
+            TrustBridgeContract::delegate_payout(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+                delegate.clone(),
+            )
+            .unwrap();
+
+            // Only one live payout delegate is allowed at a time.
+            let res = TrustBridgeContract::delegate_payout(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+                other_delegate.clone(),
+            );
+            assert_eq!(res, Err(ContractError::AlreadyDelegated));
+        });
+    }
+
+    #[test]
+    fn test_undelegate_payout_restores_identity_address_and_allows_new_delegate() {
+        let env = Env::default();
+        let (_admin, user, delegate, contract_id) = setup(&env);
+        let second_delegate = Address::generate(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            register_personal(&env, &contract_id, "octocat", &user);
+            TrustBridgeContract::delegate_payout(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+                delegate.clone(),
+            )
+            .unwrap();
+
+            TrustBridgeContract::undelegate_payout(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+            )
+            .unwrap();
+
+            let record =
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
+            assert_eq!(record.payout_address, user);
+
+            // Delegation slot is free again after undelegate.
+            TrustBridgeContract::delegate_payout(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+                second_delegate.clone(),
+            )
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn test_undelegate_payout_without_active_delegate_fails() {
+        let env = Env::default();
+        let (_admin, user, _delegate, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            register_personal(&env, &contract_id, "octocat", &user);
+            let res = TrustBridgeContract::undelegate_payout(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+            );
+            assert_eq!(res, Err(ContractError::NoActiveDelegate));
+        });
+    }
+
+    #[test]
+    fn test_delegate_payout_rejects_non_owner_caller() {
+        let env = Env::default();
+        let (_admin, user, delegate, contract_id) = setup(&env);
+        let stranger = Address::generate(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            register_personal(&env, &contract_id, "octocat", &user);
+            let res = TrustBridgeContract::delegate_payout(
+                env.clone(),
+                stranger.clone(),
+                username(&env, "octocat"),
+                delegate.clone(),
+            );
+            assert_eq!(res, Err(ContractError::NotAuthorized));
+        });
+    }
+
+    // ── Dual-index audit: get_public_paginated must read persistent chunks ────
+
+    #[test]
+    fn test_get_public_paginated_returns_all_records_from_chunked_index() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        let names = register_batch(&env, &contract_id, 5);
+
+        env.as_contract(&contract_id, || {
+            let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
+            assert_eq!(page.total, 5);
+            assert_eq!(page.records.len(), 5);
+            assert!(!page.has_more);
+            assert!(page.next_cursor.is_none());
+
+            for i in 0..names.len() {
+                let expected_name = names.get(i).unwrap();
+                let found = page
+                    .records
+                    .iter()
+                    .any(|(name, _record)| name == expected_name);
+                assert!(
+                    found,
+                    "get_public_paginated must surface every chunked-index entry"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn test_get_public_paginated_pages_across_chunk_reads_without_duplicates_or_gaps() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        let names = register_batch(&env, &contract_id, 5);
+
+        let mut collected: Vec<String> = Vec::new(&env);
+        let mut cursor = None;
+        loop {
+            let page = env.as_contract(&contract_id, || {
+                TrustBridgeContract::get_public_paginated(env.clone(), cursor.clone(), 2).unwrap()
+            });
+            for i in 0..page.records.len() {
+                let (name, _record) = page.records.get(i).unwrap();
+                collected.push_back(name);
+            }
+            if !page.has_more {
+                break;
+            }
+            cursor = page.next_cursor;
+        }
+
+        assert_eq!(
+            collected.len(),
+            names.len(),
+            "paging by small limits over the chunked index must yield every record exactly once"
+        );
+        for i in 0..names.len() {
+            let expected_name = names.get(i).unwrap();
+            assert!(collected.iter().any(|n| n == expected_name));
+        }
+    }
+
+    #[test]
+    fn test_get_public_paginated_cursor_from_admin_path_is_interchangeable() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        register_batch(&env, &contract_id, 5);
+
+        env.as_contract(&contract_id, || {
+            // A cursor minted by the admin (flat-index-backed) path must still
+            // decode against the public (chunk-backed) path — both share the
+            // same opaque cursor format and index generation.
+            let admin_page =
+                TrustBridgeContract::get_registered_paginated(env.clone(), None, 2).unwrap();
+            assert!(admin_page.next_cursor.is_some());
+
+            let public_page = TrustBridgeContract::get_public_paginated(
+                env.clone(),
+                admin_page.next_cursor,
+                2,
+            )
+            .unwrap();
+            assert_eq!(public_page.records.len(), 2);
         });
     }
 }
