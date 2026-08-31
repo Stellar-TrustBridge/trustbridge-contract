@@ -331,7 +331,7 @@ Register or update a GitHub username mapping. `entity_type` distinguishes person
 `stellar_address` must not be the well-known zero/burn address
 (`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF`, the strkey
 encoding of an all-zero ed25519 public key), or the call fails with
-`ZeroAddress` (code 15), checked before `require_auth`. On a live network
+`ZeroAddress` (code 16), checked before `require_auth`. On a live network
 `require_auth` would already reject this address — no private key exists for
 it — but `mock_all_auths` in tests and local sandboxes bypasses that check, so
 the explicit guard is what actually stops a mistaken zero-address registration
@@ -798,41 +798,181 @@ must pass with the updated golden before release.
 
 ### `get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
 
+
+---
+
+## Pagination API Selection Guide (Issue #302)
+
+The contract exposes **three pagination APIs** for reading the registry. They
+differ in authorization, return type, and intended use case. Choose the right
+one for your integration:
+
+| API | Auth | Return Type | Verified Field | Merkle Root | Use Case |
+|-----|------|-------------|----------------|-------------|----------|
+| **`get_registered_page`** | Admin | `Vec<(String, Address)>` | ❌ No | ❌ No | Legacy offset-based admin export |
+| **`get_registered_paginated`** | Admin | `ExportPage` | ✅ Yes | ✅ Yes | Modern cursor-based admin export |
+| **`get_public_paginated`** | None | `ExportPage` | ✅ Yes | ✅ Yes | Public dashboard/indexer sync |
+
+### When to use each API
+
+**Use `get_registered_paginated` when:**
+- You are the contract admin or hold admin credentials
+- You need full `ContributorRecord` metadata (verified, registered_at, is_bot)
+- You need cursor-based pagination with opaque tokens
+- You need merkle roots for page integrity verification
+- You need export attestation support
+
+**Use `get_public_paginated` when:**
+- You are building a public dashboard or indexer
+- You don't have admin credentials
+- You need the verified flag per record (Issue #96)
+- You need cursor-based pagination with opaque tokens
+- You need merkle roots for page integrity verification
+- Works during pause (Issue #294) — critical for indexer uptime
+
+**Use `get_registered_page` when:**
+- You need simple offset-based pagination (no cursors)
+- You only need username + address (no verified field)
+- You don't need merkle roots or export attestation
+- Legacy tooling that predates cursor pagination (Issue #143)
+
+**Migration path:** `get_registered_page` → `get_registered_paginated`. The
+cursor-based API handles removals better (no silent skip/duplicate) and
+includes full record metadata.
+
+### Parity guarantees (Issue #302)
+
+All three APIs guarantee:
+- ✅ Empty registry returns empty result
+- ✅ Single record returns that record
+- ✅ Middle removal skips removed username (Issue #52)
+- ✅ Last page detection (Issue #143)
+- ✅ Works while paused (admin/public export is read-only)
+- ✅ Multi-page walk visits every live username exactly once
+
+Covered by `tests/pagination_parity.rs`.
+
+---
+
+### `get_registered_page(offset: u32, limit: u32) -> Result<Vec<(String, Address)>, ContractError>`
+
+**Offset-based** admin export returning `(github_username, stellar_address)`
+pairs. Older API — prefer `get_registered_paginated` for new integrations.
+
 | | |
 |---|---|
 | **Auth** | Admin (`admin.require_auth()`) — unchanged by Issue #143 |
 | **Mutates** | No |
-| **Errors** | `NotInitialized` |
+| **Errors** | `NotInitialized`, `NotAuthorized` |
+| **Returns** | `Vec<(String, Address)>` — username + address only |
+| **Pagination** | Offset-based: `offset=0`, `offset=limit`, `offset=2*limit`, ... |
 | **Limit** | `0` → `DEFAULT_PAGE_LIMIT`; `> MAX_PAGE_LIMIT` → clamped to `MAX_PAGE_LIMIT` |
 
+**No verified field:** This API predates Issue #96 and does not include the
+`verified` flag. If you need verification status per record, use
+`get_registered_paginated` or `get_public_paginated`.
+
+**No merkle root:** This API does not compute or return a merkle root over the
+page. For integrity verification, use `get_registered_paginated`.
+
 ```bash
+# Page 1 (offset 0)
 stellar contract invoke --id $ID --source admin --network testnet \
-  -- get_registered_paginated --cursor 0 --limit 100
+  -- get_registered_page --offset 0 --limit 50
+
+# Page 2 (offset 50)
+stellar contract invoke --id $ID --source admin --network testnet \
+  -- get_registered_page --offset 50 --limit 50
 ```
 
-### `get_public_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
+---
 
-Same page shape and limit clamping; no admin auth; requires not paused.
+### `get_registered_paginated(cursor: Option<BytesN<8>>, limit: u32) -> Result<ExportPage, ContractError>`
+
+**Cursor-based** admin export returning full `ContributorRecord` with
+metadata. Modern API — prefer this over `get_registered_page`.
+
+| | |
+|---|---|
+| **Auth** | Admin (`admin.require_auth()`) |
+| **Mutates** | No |
+| **Errors** | `NotInitialized`, `NotAuthorized`, `InvalidCursor` |
+| **Returns** | `ExportPage` — full records + pagination metadata |
+| **Pagination** | Cursor-based: opaque `BytesN<8>` tokens |
+| **Limit** | `0` → `DEFAULT_PAGE_LIMIT`; `> MAX_PAGE_LIMIT` → clamped to `MAX_PAGE_LIMIT` |
+
+**Includes verified field:** Each `ContributorRecord` has the `verified` flag,
+so you know verification status without a second lookup (Issue #96).
+
+**Merkle root included:** `ExportPage.merkle_root` is a SHA-256 commitment over
+the page for integrity verification (Issue #216).
+
+**Opaque cursors:** Never construct or parse `cursor` yourself. Always use
+`None` to start, then pass back `next_cursor` from each page. Cursors become
+invalid after registry mutations (removal) and fail with `InvalidCursor`.
 
 ```bash
-stellar contract invoke --id $ID --source deployer --network testnet \
-  -- get_public_paginated --cursor 0 --limit 100
+# Page 1 (cursor = None to start)
+stellar contract invoke --id $ID --source admin --network testnet \
+  -- get_registered_paginated --cursor null --limit 50
+
+# Page 2 (cursor from page 1's next_cursor)
+stellar contract invoke --id $ID --source admin --network testnet \
+  -- get_registered_paginated --cursor '<opaque_bytes>' --limit 50
 ```
 
-### Consumer loop
+---
+
+### `get_public_paginated(cursor: Option<BytesN<8>>, limit: u32) -> Result<ExportPage, ContractError>`
+
+**Cursor-based public export** with no auth required. Same `ExportPage` shape
+as `get_registered_paginated` — dashboards and indexers get the verified flag
+without admin credentials (Issue #96).
+
+| | |
+|---|---|
+| **Auth** | None — permissionless |
+| **Mutates** | No |
+| **Errors** | `NotInitialized` |
+| **Returns** | `ExportPage` — full records + pagination metadata |
+| **Pagination** | Cursor-based: opaque `BytesN<8>` tokens |
+| **Limit** | `0` → `DEFAULT_PAGE_LIMIT`; `> MAX_PAGE_LIMIT` → clamped to `MAX_PAGE_LIMIT` |
+
+**Works while paused (Issue #294):** Public read must stay available during
+maintenance or security pauses so indexers don't fall behind. Previously this
+returned `Paused`; that gate was removed.
+
+**Includes verified field:** Same full `ContributorRecord` as the admin API —
+no second lookup needed to know who is verified.
+
+**Cursors interchangeable:** A cursor from `get_registered_paginated` can be
+passed to `get_public_paginated` and vice versa — both read the same index.
+
+```bash
+# Page 1 (cursor = None to start, no auth)
+stellar contract invoke --id $ID --network testnet \
+  -- get_public_paginated --cursor null --limit 50
+
+# Page 2 (cursor from page 1's next_cursor)
+stellar contract invoke --id $ID --network testnet \
+  -- get_public_paginated --cursor '<opaque_bytes>' --limit 50
+```
+
+---
+
+### Consumer loop (cursor-based APIs)
 
 ```text
-cursor ← 0
+cursor ← None
 repeat:
   page ← get_registered_paginated(cursor, limit)   # or get_public_paginated
   process(page.records)
-  if page.has_more is false OR page.next_cursor is None:
+  if not page.has_more:
     stop
   cursor ← page.next_cursor
 ```
 
-Exhaustion is when `has_more == false` / `next_cursor == None` (including an
-empty page when `cursor >= total`).
+Exhaustion is when `has_more == false` (equivalently, `next_cursor == None`).
 
 Boundary tests: `test_paginated_export_at_max_page_limit`,
 `test_paginated_export_over_max_page_limit_clamps` in `src/lib.rs`.
@@ -1025,6 +1165,71 @@ with no intervening `revoke_verification` still fails `AlreadyVerified`, even
 after the record has already been through one full cycle. Covered by
 `test_issue_95_verify_revoke_verify_cycle` and
 `test_issue_95_double_verify_without_revoke_fails_mid_cycle` in `src/lib.rs`.
+
+---
+
+### `extend_registry_ttl(usernames: Vec<String>) -> Result<u32, ContractError>`
+
+Extends the time-to-live (TTL) for persistent storage entries of multiple
+registered usernames. Returns the count of successfully extended records.
+
+This is the on-chain keeper endpoint: an off-chain job periodically calls this
+to prevent registered records from being archived when their TTL drops below
+the Soroban host's minimum threshold (~30 days of remaining TTL).
+
+| | |
+|---|---|
+| **Auth** | None — permissionless by design |
+| **Mutates** | TTL only (no state changes beyond bumping TTL) |
+| **Errors** | `NotInitialized`, `InvalidBatchSize` |
+| **Returns** | `u32` — count of usernames that were found and extended |
+| **Since** | 1.0.0 |
+
+**Permissionless access.** Any caller can extend TTL for any username. This is
+intentional: the keeper is not privileged, and allowing any address to help
+keep the registry alive reduces operational single points of failure. The
+operation is read-like (no state mutation beyond TTL extension), so there is
+no griefing risk.
+
+**Batch size limits:**
+- Minimum: 1 username (empty list fails with `InvalidBatchSize`)
+- Maximum: **100 usernames** (`BatchConfig::default().max_batch_size`)
+- Exceeding the limit fails with `InvalidBatchSize` (error code 14)
+
+The 100-username cap is higher than write operations (`batch_verify`,
+`batch_remove` use 25) because TTL extension is cheap — just a persistent
+`.extend_ttl()` call with no record deserialization, event publishing, or
+audit logging.
+
+**Partial success:** If a username in the batch is not registered (e.g.
+removed since the keeper's list was built), it is silently skipped and not
+counted in the returned total. This is by design — the keeper's off-chain
+list can lag behind on-chain removals, and failing the entire batch over one
+stale entry would be worse than skipping it.
+
+**Idempotent:** Extending TTL for a username that was recently extended is
+safe and succeeds again. The host TTL is simply bumped to `current_ledger +
+TTL_BUMP` each time.
+
+**Works while paused:** Unlike state-mutating functions, `extend_registry_ttl`
+remains available when the contract is paused, so the keeper can continue
+extending TTL during a maintenance window.
+
+```bash
+# Keeper extending TTL for cold records
+stellar contract invoke --id $ID --source keeper --network testnet --send=yes \
+  -- extend_registry_ttl --usernames '["alice","bob","carol"]'
+```
+
+**Keeper implementation notes:**
+1. Read the full registry via `get_public_paginated` (permissionless) or
+   `get_registered_paginated` (admin-only)
+2. Identify usernames with remaining TTL below a threshold (e.g. 30 days)
+3. Batch them into groups of up to 100 and call `extend_registry_ttl`
+4. Budget XLM for keeper fees based on registry size and cadence
+
+See [STORAGE_RENT.md](STORAGE_RENT.md#keeper-implementation) for the complete
+keeper workflow and cost estimation.
 
 ---
 
