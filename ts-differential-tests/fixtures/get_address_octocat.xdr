@@ -1,0 +1,2 @@
+# Placeholder: Run `cargo test generate_xdr_fixtures -- --ignored --exact --nocapture`
+# and paste the XDR output here (base64-encoded ScVal)

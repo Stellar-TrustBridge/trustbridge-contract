@@ -26,6 +26,9 @@ Cargo.lock
 /bindings/
 node_modules/
 
+# Differential test fixtures are checked in (not generated)
+!ts-differential-tests/
+
 # Deployment artifacts
 /deployments/
 *.wasm

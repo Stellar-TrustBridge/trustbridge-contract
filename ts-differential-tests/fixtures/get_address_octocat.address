@@ -1,0 +1,2 @@
+# Placeholder: Run `cargo test generate_xdr_fixtures -- --ignored --exact --nocapture`
+# and paste the Stellar address string here (G...)
