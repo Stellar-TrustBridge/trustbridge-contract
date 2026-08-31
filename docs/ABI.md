@@ -9,6 +9,40 @@ updating this document, then include both files in the same change.
 
 Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPLOYMENT](DEPLOYMENT.md)
 
+## Differential Testing: TypeScript Bindings vs Contract Reads
+
+To prevent drift between TypeScript SDK bindings and the contract ABI after Rust changes,
+differential tests verify that TypeScript XDR decoding matches Rust contract outputs.
+
+### How It Works
+
+1. **Generate XDR fixtures**: Run `make xdr-fixtures` to execute a Rust test that
+   calls contract functions (e.g., `get_address`) and outputs the XDR-encoded results.
+
+2. **Check in fixtures**: Copy the XDR output and expected values to
+   `ts-differential-tests/fixtures/*.xdr` and `*.address` files.
+
+3. **TypeScript decode test**: Run `make diff-test` (or CI job `differential-tests`)
+   to decode the XDR using the Stellar TypeScript SDK and compare against the golden
+   Rust values.
+
+### Updating Fixtures
+
+When the contract ABI changes (e.g., field reordering, type changes):
+
+1. Run `make xdr-fixtures` to regenerate XDR from the updated contract.
+2. Update the fixture files in `ts-differential-tests/fixtures/`.
+3. Commit both the Rust changes and updated fixtures together.
+
+If TypeScript decode fails, the bindings have drifted and need regeneration
+(`make bindings`) or the TypeScript test needs updating to match the new ABI.
+
+### CI Integration
+
+The `differential-tests` CI job runs after the main quality gate and verifies
+TypeScript decode matches Rust golden values. This catches ABI drift early in
+the PR pipeline.
+
 ---
 
 ## Types
