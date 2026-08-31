@@ -75,6 +75,14 @@ pub const NETWORK_KEY: Symbol = symbol_short!("network");
 
 pub const ROLE_KEY: Symbol = symbol_short!("role");
 
+/// Seconds a `set_role` grant must wait before it can be activated (Issue #220).
+/// 0 disables the timelock, matching the cooldown convention, so existing
+/// deployments keep their instant-grant behaviour until an admin opts in.
+pub const ROLE_DELAY_KEY: Symbol = symbol_short!("roldelay");
+
+/// Key prefix for a pending (timelocked) role grant, namespaced by address.
+pub const PENDING_ROLE_KEY: Symbol = symbol_short!("pendrole");
+
 /// Key for the enumerable index of addresses that currently hold a role
 /// (Issue #228). Maintained by [`set_role`] and [`remove_role`] so it can
 /// never drift from the per-address `ROLE_KEY` entries.
@@ -201,6 +209,17 @@ pub enum Role {
     Revoker = 4,
 }
 
+/// A role grant that has been requested but is still inside its timelock
+/// window (Issue #220). Held until `activate_role` applies it or
+/// `cancel_role_grant` drops it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+pub struct PendingRoleGrant {
+    pub role: Role,
+    /// Ledger timestamp from which `activate_role` will succeed.
+    pub activate_at: u64,
+}
+
 /// Typed reason code for `pause`, `unpause`, and `set_paused` (Issue #211).
 ///
 /// Stored on-chain alongside the pause flag so incident reviewers can
@@ -316,6 +335,13 @@ pub struct WasmProvenance {
     pub version: Vec<u32>,
     /// Whether the hash had been attested before it was applied.
     pub attested: bool,
+    /// Digest of the SBOM produced for this build (Issue #224). `None` when the
+    /// operator has not recorded one — including every record written before
+    /// this field existed, which is the explicit migration path: call
+    /// `set_provenance_digests` once after upgrading to backfill it.
+    pub sbom_hash: Option<BytesN<32>>,
+    /// Digest of the source tree the WASM was built from (Issue #224).
+    pub source_hash: Option<BytesN<32>>,
 }
 
 /// An admin's advance declaration of the WASM hash they intend to deploy.
@@ -2290,4 +2316,33 @@ pub fn is_batch_remove_proposal_expired(env: &Env, proposal: &PendingBatchRemove
         >= proposal
             .proposed_at
             .saturating_add(BATCH_REMOVE_PROPOSAL_TTL_SECS)
+}
+
+// ─── Role grant timelock (Issue #220) ────────────────────────────────────────
+
+/// Seconds a `set_role` grant waits before activation. 0 == instant grants.
+pub fn get_role_delay(env: &Env) -> u64 {
+    env.storage().instance().get(&ROLE_DELAY_KEY).unwrap_or(0)
+}
+
+pub fn set_role_delay(env: &Env, secs: u64) {
+    env.storage().instance().set(&ROLE_DELAY_KEY, &secs);
+}
+
+pub fn get_pending_role(env: &Env, address: &Address) -> Option<PendingRoleGrant> {
+    env.storage()
+        .instance()
+        .get(&(PENDING_ROLE_KEY, address.clone()))
+}
+
+pub fn set_pending_role(env: &Env, address: &Address, grant: &PendingRoleGrant) {
+    env.storage()
+        .instance()
+        .set(&(PENDING_ROLE_KEY, address.clone()), grant);
+}
+
+pub fn remove_pending_role(env: &Env, address: &Address) {
+    env.storage()
+        .instance()
+        .remove(&(PENDING_ROLE_KEY, address.clone()));
 }

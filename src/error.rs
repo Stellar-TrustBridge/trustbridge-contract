@@ -110,6 +110,16 @@ pub enum ContractError {
     /// `add_verifier` was given a non-zero `expires_at` that is not in the
     /// future (Issue #293).
     VerifierExpiryInPast = 33,
+    /// `activate_role` / `cancel_role_grant` was called for an address with no
+    /// pending grant (Issue #220).
+    NoPendingRoleGrant = 34,
+    /// `activate_role` was called before the grant's timelock elapsed (Issue #220).
+    RoleGrantNotReady = 35,
+    /// `assert_build` was called before any provenance record exists (Issue #225).
+    ProvenanceMissing = 36,
+    /// `assert_build` was given a hash that does not match stored provenance
+    /// (Issue #225).
+    ProvenanceMismatch = 37,
 }
 
 impl ContractError {
@@ -157,6 +167,10 @@ impl ContractError {
             31 => Some(ContractError::VerifierAllowlistFull),
             32 => Some(ContractError::VerifierNotAllowlisted),
             33 => Some(ContractError::VerifierExpiryInPast),
+            34 => Some(ContractError::NoPendingRoleGrant),
+            35 => Some(ContractError::RoleGrantNotReady),
+            36 => Some(ContractError::ProvenanceMissing),
+            37 => Some(ContractError::ProvenanceMismatch),
             _ => None,
         }
     }
@@ -232,6 +246,12 @@ impl ContractError {
             ContractError::ReservedListFull => ErrorCategory::Fatal,
             ContractError::AdminTransferPending => ErrorCategory::Fatal,
             ContractError::NoPendingAdminTransfer => ErrorCategory::Fatal,
+            ContractError::NoPendingRoleGrant => ErrorCategory::Fatal,
+            ContractError::ProvenanceMissing => ErrorCategory::Fatal,
+            ContractError::ProvenanceMismatch => ErrorCategory::Fatal,
+
+            // A pending grant becomes activatable once its timelock elapses.
+            ContractError::RoleGrantNotReady => ErrorCategory::Retry,
         }
     }
 

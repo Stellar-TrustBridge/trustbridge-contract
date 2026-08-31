@@ -329,3 +329,37 @@ pub struct RenamedEvent {
     pub verification_cleared: bool,
     pub timestamp: u64,
 }
+
+/// Emitted when a role grant is queued behind the timelock (Issue #220).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoleGrantPendingEvent {
+    #[topic]
+    pub address: Address,
+    /// Numeric discriminant of the [`Role`][crate::storage::Role] requested.
+    pub role: u32,
+    pub admin: Address,
+    /// Ledger timestamp from which `activate_role` will succeed.
+    pub activate_at: u64,
+    pub timestamp: u64,
+}
+
+/// Emitted when a pending role grant is cancelled before activation (Issue #220).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoleGrantCancelledEvent {
+    #[topic]
+    pub address: Address,
+    pub admin: Address,
+    pub timestamp: u64,
+}
+
+/// Emitted when the guardian address is set, replaced, or removed (Issue #222).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GuardianChangedEvent {
+    /// `None` when the guardian was removed.
+    pub guardian: Option<Address>,
+    pub admin: Address,
+    pub timestamp: u64,
+}

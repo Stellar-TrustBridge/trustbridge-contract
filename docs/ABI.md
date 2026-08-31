@@ -2294,3 +2294,74 @@ Read-only; no auth; works while paused.
 `usernames.len()` exceeds the configured threshold, instead of executing —
 below the threshold, or with the default threshold of `0`, `batch_remove`'s
 behavior is completely unchanged.
+
+## Timelocked role grants (Issue #220)
+
+### `set_role_delay(secs: u64) -> Result<(), ContractError>`
+
+Admin-only. Seconds a future `set_role` grant must wait before activation.
+`0` (the default) keeps grants instant, so existing deployments are unchanged.
+
+### `get_role_delay() -> u64`
+
+Current delay in seconds.
+
+### `set_role(target: Address, role: Role) -> Result<(), ContractError>`
+
+Unchanged when the delay is `0`. When the delay is non-zero the grant is queued
+instead of applied, and `RoleGrantPendingEvent` is emitted in place of
+`RoleGrantedEvent`. The admin address itself is stored separately and is never
+subject to this delay.
+
+### `get_pending_role(target: Address) -> Option<PendingRoleGrant>`
+
+`PendingRoleGrant { role: Role, activate_at: u64 }` — the queued grant, if any.
+
+### `activate_role(target: Address) -> Result<(), ContractError>`
+
+Admin-only. Applies a queued grant once `activate_at` has passed and emits the
+normal `RoleGrantedEvent`.
+
+- `NoPendingRoleGrant` (34) — nothing queued for `target`.
+- `RoleGrantNotReady` (35) — timelock has not elapsed.
+
+### `cancel_role_grant(target: Address) -> Result<(), ContractError>`
+
+Admin-only. Drops a queued grant and emits `RoleGrantCancelledEvent`.
+`remove_role` also drops any queued grant for the same address.
+
+### Events
+
+| Event | Fields |
+|-------|--------|
+| `RoleGrantPendingEvent` | `address` (topic), `role`, `admin`, `activate_at`, `timestamp` |
+| `RoleGrantCancelledEvent` | `address` (topic), `admin`, `timestamp` |
+| `GuardianChangedEvent` | `guardian: Option<Address>`, `admin`, `timestamp` |
+
+## Provenance digests and build verification (Issues #224, #225)
+
+`WasmProvenance` gains two optional digests:
+
+```rust
+pub struct WasmProvenance {
+    // ... existing fields ...
+    pub sbom_hash: Option<BytesN<32>>,
+    pub source_hash: Option<BytesN<32>>,
+}
+```
+
+### `set_provenance_digests(sbom_hash: Option<BytesN<32>>, source_hash: Option<BytesN<32>>) -> Result<(), ContractError>`
+
+Admin-only. Records the digests for the currently deployed WASM. A `None`
+argument leaves the stored value untouched. Fails with `ProvenanceMissing` (36)
+when no provenance record exists.
+
+### `assert_build(hash: BytesN<32>) -> Result<(), ContractError>`
+
+Read-only pre-upgrade check comparing `hash` to `provenance.wasm_hash`.
+
+- `ProvenanceMissing` (36) — nothing deployed via `upgrade` yet.
+- `ProvenanceMismatch` (37) — hashes differ.
+
+`upgrade` still checks the WASM hash exactly as before; `assert_build` is an
+independent read that neither requires nor consumes an attestation.

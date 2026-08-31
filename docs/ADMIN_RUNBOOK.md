@@ -824,3 +824,75 @@ stellar contract invoke \
 
 Available even while paused, so a stuck or mistaken proposal is never
 trapped behind the same freeze that might be the reason to cancel it.
+
+## Watchtower guardian (Issue #222)
+
+The guardian is a **pause-only** key. It exists so incident response does not
+require the upgrade key: whoever can freeze the contract cannot change its code.
+
+| Action | Admin | Guardian |
+|--------|-------|----------|
+| `emergency_pause` | yes | **yes** |
+| `clear_emergency_pause` | yes | no |
+| `upgrade` | yes | no |
+| `set_role` / `activate_role` | yes | no |
+| `set_guardian` / `remove_guardian` | yes | no |
+
+Every change to the guardian address emits `GuardianChangedEvent` (with
+`guardian: None` on removal), so a rotation is visible to indexers.
+
+### Designate or rotate the guardian
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- set_guardian --guardian $GUARDIAN_ADDRESS
+```
+
+Setting a guardian replaces the previous one; the old address loses the ability
+to pause on the same transaction.
+
+### Freeze during an incident
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account guardian-identity --network testnet --send=yes \
+  -- emergency_pause --caller $GUARDIAN_ADDRESS
+```
+
+Unfreezing is admin-only (`clear_emergency_pause`) — a compromised guardian key
+can cost availability, never a silent resumption.
+
+### Remove the guardian
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- remove_guardian
+```
+
+## Timelocked role grants (Issue #220)
+
+`set_role` is instant while `get_role_delay()` is `0`. Once the admin sets a
+delay, a grant is only *queued*: it is visible as `RoleGrantPendingEvent` and via
+`get_pending_role(target)`, and takes effect only when `activate_role(target)` is
+called after `activate_at`. `cancel_role_grant(target)` drops a queued grant, and
+`remove_role(target)` drops it too.
+
+The **admin role itself is the documented exception**: the admin address is
+stored separately and is not granted through `set_role`, so it is never subject
+to this delay.
+
+```bash
+# Opt in to a 24h delay on all future role grants
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- set_role_delay --secs 86400
+
+# Queue, inspect, then activate after the window
+stellar contract invoke --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- set_role --target $TARGET --role Verifier
+stellar contract invoke --id $CONTRACT_ID --network testnet -- get_pending_role --target $TARGET
+stellar contract invoke --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- activate_role --target $TARGET
+```

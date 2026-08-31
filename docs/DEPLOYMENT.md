@@ -719,3 +719,60 @@ If intentional feature growth pushes the binary past 200 KB:
    - `.github/workflows/ci.yml` — the `WASM_SIZE_LIMIT:` env variable
 4. Document the new limit and the feature that required the bump in this table.
 5. Include before/after sizes in the PR description.
+
+## Provenance digests: SBOM and source (Issue #224)
+
+`WasmProvenance` carries two digests beyond `wasm_hash`:
+
+| Field | Meaning |
+|-------|---------|
+| `sbom_hash` | SHA-256 of the SBOM generated for this build |
+| `source_hash` | SHA-256 of the source tree the WASM was built from |
+
+Both are `Option<BytesN<32>>`. `upgrade` writes them as `None` — the chain cannot
+know them — and the operator backfills them right after the upgrade:
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- set_provenance_digests --sbom_hash $SBOM_SHA256 --source_hash $SOURCE_SHA256
+```
+
+Passing `None` for either argument leaves the stored value untouched, so the two
+can be filled in independently.
+
+**Migration.** Provenance records written before these fields existed decode with
+both digests absent, which reads as "not recorded" rather than "verified empty".
+The migration is one `set_provenance_digests` call per deployed instance; there is
+no automatic backfill, because only the operator holds the build outputs.
+
+Suggested way to produce the values:
+
+```bash
+sha256sum target/wasm32v1-none/release/trustbridge_contract.wasm   # wasm_hash
+sha256sum sbom.spdx.json                                           # sbom_hash
+git archive --format=tar HEAD | sha256sum                          # source_hash
+```
+
+## Pre-upgrade reproducible-build check (Issue #225)
+
+`assert_build(hash)` compares a locally built hash against the hash in stored
+provenance and fails with a typed error instead of a mismatched deploy:
+
+| Situation | Result |
+|-----------|--------|
+| Hash equals stored provenance | `Ok(())` |
+| No provenance recorded yet (never upgraded) | `ProvenanceMissing` (36) |
+| Hash differs | `ProvenanceMismatch` (37) |
+
+It is a read-only check on **provenance only**. It does not read, require, or
+consume an upgrade attestation — `attest_upgrade` remains a separate, optional
+control over the *next* upgrade, while `assert_build` describes what is deployed
+*now*. On a contract that has never been upgraded there is nothing to compare
+against, and the check fails closed rather than passing.
+
+```bash
+stellar contract build
+HASH=$(sha256sum target/wasm32v1-none/release/trustbridge_contract.wasm | cut -d' ' -f1)
+make assert-build CONTRACT_ID=$CONTRACT_ID WASM_HASH=$HASH
+```
