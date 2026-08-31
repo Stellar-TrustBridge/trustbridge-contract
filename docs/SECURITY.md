@@ -1044,3 +1044,54 @@ For production deployments, consider:
 - Bug bounty program
 - Staged rollout on testnet/futurenet first
 
+
+---
+
+### Index Repair (`repair_index`)
+
+`count` and `verified` are maintained incrementally by every mutating call
+(`register`, `remove`, `verify`, `revoke_verification`, batch operations,
+…). Under normal operation they never need correcting — the property fuzz
+suite (see [REGISTRY_INVARIANTS.md](REGISTRY_INVARIANTS.md)) exercises long
+random operation sequences precisely to catch a code change that would make
+them drift, before it ever reaches testnet or mainnet.
+
+That fuzz coverage does not extend to state that reaches storage by some
+path other than these public entry points — a bug in a future migration
+step, a hand-crafted storage write during an incident, or an upgrade that
+changes the counters' encoding. Nothing on-chain currently detects that
+class of drift.
+
+`repair_index(apply: bool)` (admin-only) recomputes `count` and `verified`
+by walking the chunked username index and checking each entry's stored
+record, independent of the counters themselves, and returns a
+`RepairReport` with both the stored and recomputed values.
+
+**When to use it:**
+
+- After any incident that involved a manual/scripted storage write, a
+  migration, or a WASM upgrade you are not fully confident preserved the
+  counters.
+- Whenever `get_stats()` or `get_health()` looks implausible relative to
+  what an off-chain indexer's own tally of `Registered`/`Removed`/`Verified`
+  events says it should be.
+- As a routine post-upgrade sanity check, called once with `apply = false`.
+
+**How to use it:**
+
+1. Call with `apply = false` first. This is a pure read — it writes
+   nothing — and returns whether `drifted` is `true` along with the stored
+   vs. recomputed values for both counters.
+2. Only if `drifted` is `true` and the recomputed values have been reviewed,
+   call again with `apply = true` to write the corrected values. A call
+   that finds no drift never writes, even with `apply = true`.
+
+**What it deliberately does not do:** `repair_index` is never invoked
+automatically by any other entry point — a silent repair on every call
+would mask the very drift this operation exists to surface, and would let
+an issue in one counter path go unnoticed behind an automatic fix on
+another. Every repair is an explicit, auditable admin transaction.
+
+Covered by `tests/repair_index.rs`, which drifts the counters against a
+known-good fixture and checks both the dry-run report and the corrected
+on-chain state after `apply = true`.

@@ -38,7 +38,7 @@ pub use storage::{
     VerificationConfig, VerifierAllowEntry, WasmAttestation, WasmProvenance, PauseReason,
     MAX_VERIFIERS,
 };
-pub use events::{PayoutDelegatedEvent, PayoutDelegationRevokedEvent};
+pub use storage::RepairReport;
 pub use version::Version;
 pub use oracle_proof::{get_oracle_allowlist, set_oracle_allowlist, verify_with_proof, OracleProof};
 
@@ -3738,119 +3738,30 @@ impl TrustBridgeContract {
         Ok(chunks_written)
     }
 
-    // ── Payout delegation (Issue: delegate vs rotation) ───────────────────────
+    // ── Index repair (admin) ────────────────────────────────────────────────
 
-    /// Delegates payout for `github_username` to `delegate_address` without
-    /// touching the record's identity `stellar_address`.
+    /// Recomputes `count` and `verified` from the chunked username index and
+    /// each entry's stored record, independent of the counters themselves.
+    /// Admin-only.
     ///
-    /// This reuses the existing `payout_address` field rather than adding new
-    /// storage. It is distinct from `register` (identity re-registration) and
-    /// from address rotation (`request_rotation` / `execute_rotation`): those
-    /// change `stellar_address` and emit `RegisteredEvent` /
-    /// `RotationExecutedEvent`, whereas this only changes `payout_address` and
-    /// emits [`PayoutDelegatedEvent`] — so indexers no longer have to guess
-    /// whether an address change was a rotation or a payout delegation.
-    ///
-    /// Only one payout delegate may be live at a time: if `payout_address`
-    /// already differs from `stellar_address` (and from `delegate_address`),
-    /// the caller must call `undelegate_payout` first.
+    /// Pass `apply = false` for a dry run: nothing is written, only the
+    /// [`RepairReport`] comparing stored vs. recomputed values is returned.
+    /// Pass `apply = true` to have any drift corrected in the same call — a
+    /// call that finds no drift never writes, even with `apply = true`.
+    /// This is never run automatically on any other entry point; see
+    /// `docs/SECURITY.md#index-repair-repair_index` for when an operator
+    /// should reach for it.
     ///
     /// # Errors
     ///
     /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
-    /// - [`ContractError::Paused`] if the contract is paused.
-    /// - [`ContractError::NotRegistered`] if `github_username` has no record.
-    /// - [`ContractError::ZeroAddress`] if `delegate_address` is the zero address.
-    /// - [`ContractError::AlreadyDelegated`] if a different delegate is already live.
-    pub fn delegate_payout(
-        env: Env,
-        caller: Address,
-        github_username: String,
-        delegate_address: Address,
-    ) -> Result<(), ContractError> {
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
+    pub fn repair_index(env: Env, apply: bool) -> Result<RepairReport, ContractError> {
         require_initialized(&env)?;
-        require_not_paused(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
 
-        let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
-
-        caller.require_auth();
-        if caller != record.stellar_address {
-            return Err(ContractError::NotAuthorized);
-        }
-
-        if is_zero_address(&env, &delegate_address) {
-            return Err(ContractError::ZeroAddress);
-        }
-
-        if record.payout_address != record.stellar_address
-            && record.payout_address != delegate_address
-        {
-            return Err(ContractError::AlreadyDelegated);
-        }
-
-        let timestamp = env.ledger().timestamp();
-        record.payout_address = delegate_address.clone();
-        set_record(&env, &github_username, &record);
-
-        PayoutDelegatedEvent {
-            github_username: github_username.clone(),
-            stellar_address: record.stellar_address.clone(),
-            delegate_address,
-            timestamp,
-            domain: event_domain(&env),
-        }
-        .publish(&env);
-
-        Ok(())
-    }
-
-    /// Revokes the live payout delegation for `github_username`, restoring
-    /// `payout_address` back to the record's `stellar_address`.
-    ///
-    /// Emits [`PayoutDelegationRevokedEvent`], distinct from `RegisteredEvent`
-    /// / `RotationExecutedEvent` for the same indexer-disambiguation reason as
-    /// `delegate_payout`.
-    ///
-    /// # Errors
-    ///
-    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
-    /// - [`ContractError::Paused`] if the contract is paused.
-    /// - [`ContractError::NotRegistered`] if `github_username` has no record.
-    /// - [`ContractError::NoActiveDelegate`] if no delegate is currently live.
-    pub fn undelegate_payout(
-        env: Env,
-        caller: Address,
-        github_username: String,
-    ) -> Result<(), ContractError> {
-        require_initialized(&env)?;
-        require_not_paused(&env)?;
-
-        let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
-
-        caller.require_auth();
-        if caller != record.stellar_address {
-            return Err(ContractError::NotAuthorized);
-        }
-
-        if record.payout_address == record.stellar_address {
-            return Err(ContractError::NoActiveDelegate);
-        }
-
-        let timestamp = env.ledger().timestamp();
-        let previous_delegate = record.payout_address.clone();
-        record.payout_address = record.stellar_address.clone();
-        set_record(&env, &github_username, &record);
-
-        PayoutDelegationRevokedEvent {
-            github_username: github_username.clone(),
-            stellar_address: record.stellar_address.clone(),
-            previous_delegate,
-            timestamp,
-            domain: event_domain(&env),
-        }
-        .publish(&env);
-
-        Ok(())
+        Ok(crate::storage::repair_index(&env, apply))
     }
 }
 
