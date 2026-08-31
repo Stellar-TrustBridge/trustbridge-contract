@@ -75,6 +75,14 @@ pub const NETWORK_KEY: Symbol = symbol_short!("network");
 
 pub const ROLE_KEY: Symbol = symbol_short!("role");
 
+/// Seconds a `set_role` grant must wait before it can be activated (Issue #220).
+/// 0 disables the timelock, matching the cooldown convention, so existing
+/// deployments keep their instant-grant behaviour until an admin opts in.
+pub const ROLE_DELAY_KEY: Symbol = symbol_short!("roldelay");
+
+/// Key prefix for a pending (timelocked) role grant, namespaced by address.
+pub const PENDING_ROLE_KEY: Symbol = symbol_short!("pendrole");
+
 /// Key for the enumerable index of addresses that currently hold a role
 /// (Issue #228). Maintained by [`set_role`] and [`remove_role`] so it can
 /// never drift from the per-address `ROLE_KEY` entries.
@@ -201,6 +209,17 @@ pub enum Role {
     Revoker = 4,
 }
 
+/// A role grant that has been requested but is still inside its timelock
+/// window (Issue #220). Held until `activate_role` applies it or
+/// `cancel_role_grant` drops it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+pub struct PendingRoleGrant {
+    pub role: Role,
+    /// Ledger timestamp from which `activate_role` will succeed.
+    pub activate_at: u64,
+}
+
 /// Typed reason code for `pause`, `unpause`, and `set_paused` (Issue #211).
 ///
 /// Stored on-chain alongside the pause flag so incident reviewers can
@@ -316,6 +335,13 @@ pub struct WasmProvenance {
     pub version: Vec<u32>,
     /// Whether the hash had been attested before it was applied.
     pub attested: bool,
+    /// Digest of the SBOM produced for this build (Issue #224). `None` when the
+    /// operator has not recorded one — including every record written before
+    /// this field existed, which is the explicit migration path: call
+    /// `set_provenance_digests` once after upgrading to backfill it.
+    pub sbom_hash: Option<BytesN<32>>,
+    /// Digest of the source tree the WASM was built from (Issue #224).
+    pub source_hash: Option<BytesN<32>>,
 }
 
 /// An admin's advance declaration of the WASM hash they intend to deploy.
@@ -2388,80 +2414,31 @@ pub fn is_batch_remove_proposal_expired(env: &Env, proposal: &PendingBatchRemove
             .saturating_add(BATCH_REMOVE_PROPOSAL_TTL_SECS)
 }
 
-// ── Index repair (admin) ──────────────────────────────────────────────────────
+// ─── Role grant timelock (Issue #220) ────────────────────────────────────────
 
-/// Report returned by `repair_index`: what `count` / `verified` currently say
-/// on chain versus what a fresh walk of the chunked index and every stored
-/// record says they should be.
-#[derive(Clone, Debug, Eq, PartialEq)]
-#[soroban_sdk::contracttype]
-pub struct RepairReport {
-    /// `count` as stored on chain before this call.
-    pub stored_count: u32,
-    /// `count` recomputed by walking every chunk and counting entries that
-    /// still have a live record.
-    pub recomputed_count: u32,
-    /// `verified` as stored on chain before this call.
-    pub stored_verified: u32,
-    /// `verified` recomputed the same way, counting only entries whose
-    /// record has `verified == true`.
-    pub recomputed_verified: u32,
-    /// Whether either stored counter disagreed with the recomputed value.
-    pub drifted: bool,
-    /// Whether the stored counters were overwritten with the recomputed
-    /// values by this call. Always `false` when `apply` was `false` (dry
-    /// run) or when no drift was found — a clean report never writes, even
-    /// with `apply == true`.
-    pub applied: bool,
+/// Seconds a `set_role` grant waits before activation. 0 == instant grants.
+pub fn get_role_delay(env: &Env) -> u64 {
+    env.storage().instance().get(&ROLE_DELAY_KEY).unwrap_or(0)
 }
 
-/// Recomputes `count` and `verified` from the chunked username index and
-/// each entry's stored record, independent of the counters themselves — so
-/// it reports correctly even if `count` or `verified` have already drifted.
-///
-/// With `apply == false` this is a dry run: nothing is written, only a
-/// [`RepairReport`] is returned. With `apply == true`, the stored counters
-/// are corrected to the recomputed values, but only if drift was actually
-/// found. Never touches the flat index, individual records, or the chunked
-/// index itself — only the two aggregate counters.
-///
-/// See `docs/SECURITY.md#index-repair-repair_index` for when an operator
-/// should reach for this instead of trusting the live counters.
-pub fn repair_index(env: &Env, apply: bool) -> RepairReport {
-    let chunk_count = get_chunk_count(env);
-    let mut recomputed_count: u32 = 0;
-    let mut recomputed_verified: u32 = 0;
+pub fn set_role_delay(env: &Env, secs: u64) {
+    env.storage().instance().set(&ROLE_DELAY_KEY, &secs);
+}
 
-    for c in 0..chunk_count {
-        let chunk = get_chunk(env, c);
-        for i in 0..chunk.len() {
-            if let Some(username) = chunk.get(i) {
-                if let Some(record) = get_record(env, &username) {
-                    recomputed_count = recomputed_count.saturating_add(1);
-                    if record.verified {
-                        recomputed_verified = recomputed_verified.saturating_add(1);
-                    }
-                }
-            }
-        }
-    }
+pub fn get_pending_role(env: &Env, address: &Address) -> Option<PendingRoleGrant> {
+    env.storage()
+        .instance()
+        .get(&(PENDING_ROLE_KEY, address.clone()))
+}
 
-    let stored_count = get_count(env);
-    let stored_verified = get_verified_count(env);
-    let drifted = stored_count != recomputed_count || stored_verified != recomputed_verified;
-    let applied = apply && drifted;
+pub fn set_pending_role(env: &Env, address: &Address, grant: &PendingRoleGrant) {
+    env.storage()
+        .instance()
+        .set(&(PENDING_ROLE_KEY, address.clone()), grant);
+}
 
-    if applied {
-        set_count(env, recomputed_count);
-        set_verified_count(env, recomputed_verified);
-    }
-
-    RepairReport {
-        stored_count,
-        recomputed_count,
-        stored_verified,
-        recomputed_verified,
-        drifted,
-        applied,
-    }
+pub fn remove_pending_role(env: &Env, address: &Address) {
+    env.storage()
+        .instance()
+        .remove(&(PENDING_ROLE_KEY, address.clone()));
 }

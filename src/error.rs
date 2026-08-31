@@ -110,24 +110,16 @@ pub enum ContractError {
     /// `add_verifier` was given a non-zero `expires_at` that is not in the
     /// future (Issue #293).
     VerifierExpiryInPast = 33,
-    /// `upgrade` was called with a hash that differs from the staged WASM slot
-    /// (Issue #300).
-    StagedWasmMismatch = 34,
-    /// `propose_multisig_upgrade` was called while a proposal is already pending
-    /// (Issue #301).
-    UpgradeProposalAlreadyPending = 35,
-    /// `approve_upgrade` or `execute_upgrade` was called with no live proposal
-    /// (Issue #301).
-    NoUpgradeProposalPending = 36,
-    /// `approve_upgrade` was called by an address that has already approved
-    /// (Issue #301).
-    UpgradeProposalAlreadyApproved = 37,
-    /// `execute_upgrade` was called before the proposal delay elapsed
-    /// (Issue #301).
-    UpgradeProposalDelayActive = 38,
-    /// `execute_upgrade` was called before the approval threshold was reached
-    /// (Issue #301).
-    UpgradeProposalInsufficientApprovals = 39,
+    /// `activate_role` / `cancel_role_grant` was called for an address with no
+    /// pending grant (Issue #220).
+    NoPendingRoleGrant = 34,
+    /// `activate_role` was called before the grant's timelock elapsed (Issue #220).
+    RoleGrantNotReady = 35,
+    /// `assert_build` was called before any provenance record exists (Issue #225).
+    ProvenanceMissing = 36,
+    /// `assert_build` was given a hash that does not match stored provenance
+    /// (Issue #225).
+    ProvenanceMismatch = 37,
 }
 
 impl ContractError {
@@ -175,12 +167,10 @@ impl ContractError {
             31 => Some(ContractError::VerifierAllowlistFull),
             32 => Some(ContractError::VerifierNotAllowlisted),
             33 => Some(ContractError::VerifierExpiryInPast),
-            34 => Some(ContractError::StagedWasmMismatch),
-            35 => Some(ContractError::UpgradeProposalAlreadyPending),
-            36 => Some(ContractError::NoUpgradeProposalPending),
-            37 => Some(ContractError::UpgradeProposalAlreadyApproved),
-            38 => Some(ContractError::UpgradeProposalDelayActive),
-            39 => Some(ContractError::UpgradeProposalInsufficientApprovals),
+            34 => Some(ContractError::NoPendingRoleGrant),
+            35 => Some(ContractError::RoleGrantNotReady),
+            36 => Some(ContractError::ProvenanceMissing),
+            37 => Some(ContractError::ProvenanceMismatch),
             _ => None,
         }
     }
@@ -254,17 +244,12 @@ impl ContractError {
             ContractError::ReservedListFull => ErrorCategory::Fatal,
             ContractError::AdminTransferPending => ErrorCategory::Fatal,
             ContractError::NoPendingAdminTransfer => ErrorCategory::Fatal,
-            ContractError::VerifierAllowlistFull => ErrorCategory::Fatal,
-            ContractError::VerifierNotAllowlisted => ErrorCategory::Fatal,
-            ContractError::VerifierExpiryInPast => ErrorCategory::Fatal,
-            // ── Staged WASM (Issue #300) ──────────────────────────────────
-            ContractError::StagedWasmMismatch => ErrorCategory::Fatal,
-            // ── Multisig upgrade (Issue #301) ─────────────────────────────
-            ContractError::UpgradeProposalAlreadyPending => ErrorCategory::Fatal,
-            ContractError::NoUpgradeProposalPending => ErrorCategory::Fatal,
-            ContractError::UpgradeProposalAlreadyApproved => ErrorCategory::Fatal,
-            ContractError::UpgradeProposalDelayActive => ErrorCategory::Retry,
-            ContractError::UpgradeProposalInsufficientApprovals => ErrorCategory::Retry,
+            ContractError::NoPendingRoleGrant => ErrorCategory::Fatal,
+            ContractError::ProvenanceMissing => ErrorCategory::Fatal,
+            ContractError::ProvenanceMismatch => ErrorCategory::Fatal,
+
+            // A pending grant becomes activatable once its timelock elapses.
+            ContractError::RoleGrantNotReady => ErrorCategory::Retry,
         }
     }
 

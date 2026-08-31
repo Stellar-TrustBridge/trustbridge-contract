@@ -31,7 +31,8 @@ pub use events::{
     BatchRemoveProposedEvent, ChallengeCancelledEvent, ChallengeCompletedEvent, RenamedEvent,
     RotationCancelledEvent, RotationExecutedEvent, RotationRequestedEvent,
     ChallengeStartedEvent, EmergencyClearedEvent, EmergencyPausedEvent, PausedEvent,
-    RegisteredEvent, RemovedEvent, RoleGrantedEvent, RoleRevokedEvent, UnpausedEvent,
+    GuardianChangedEvent, RegisteredEvent, RemovedEvent, RoleGrantCancelledEvent,
+    RoleGrantPendingEvent, RoleGrantedEvent, RoleRevokedEvent, UnpausedEvent,
     UpgradeAttestedEvent, UpgradedEvent, VerificationRevokedEvent, VerifiedEvent,
     // Staged WASM (Issue #300)
     WasmStagedEvent, StagedWasmClearedEvent,
@@ -41,7 +42,8 @@ pub use events::{
 };
 pub use storage::{
     ChallengeRecord, ContributorRecord, ExportPage, HealthSnapshot, Role, Stats,
-    VerificationConfig, VerifierAllowEntry, WasmAttestation, WasmProvenance, PauseReason,
+    PendingRoleGrant, VerificationConfig, VerifierAllowEntry, WasmAttestation, WasmProvenance,
+    PauseReason,
     MAX_VERIFIERS,
 };
 pub use staged_wasm::StagedWasm;
@@ -80,6 +82,9 @@ use crate::storage::{
     get_guardian as storage_get_guardian,
     remove_guardian as storage_remove_guardian,
     add_verifier as storage_add_verifier, remove_verifier as storage_remove_verifier,
+    get_pending_role as storage_get_pending_role, get_role_delay as storage_get_role_delay,
+    remove_pending_role, set_pending_role, set_role_delay as storage_set_role_delay,
+    PendingRoleGrant as PendingRoleGrantRecord,
     get_verifier_allowlist, is_active_verifier as storage_is_active_verifier,
     verifier_allowlist_active, verifier_slots_remaining, prune_expired_verifiers,
 };
@@ -323,6 +328,12 @@ impl TrustBridgeContract {
         let admin = get_admin(&env)?;
         admin.require_auth();
         set_guardian_address(&env, &guardian);
+        GuardianChangedEvent {
+            guardian: Some(guardian),
+            admin,
+            timestamp: env.ledger().timestamp(),
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -347,6 +358,12 @@ impl TrustBridgeContract {
         let admin = get_admin(&env)?;
         admin.require_auth();
         storage_remove_guardian(&env);
+        GuardianChangedEvent {
+            guardian: None,
+            admin,
+            timestamp: env.ledger().timestamp(),
+        }
+        .publish(&env);
         Ok(())
     }
 
@@ -483,14 +500,137 @@ impl TrustBridgeContract {
         let admin = get_admin(&env)?;
         admin.require_auth();
 
-        storage_set_role(&env, &target, &role);
         let timestamp = env.ledger().timestamp();
+        let delay = storage_get_role_delay(&env);
+        if delay > 0 {
+            // Timelocked path (Issue #220): the grant is only queued here, so a
+            // stolen admin key cannot mint a Verifier/Upgrader and use it in the
+            // same transaction — the window is observable and cancellable.
+            let activate_at = timestamp.saturating_add(delay);
+            set_pending_role(
+                &env,
+                &target,
+                &PendingRoleGrantRecord {
+                    role,
+                    activate_at,
+                },
+            );
+            RoleGrantPendingEvent {
+                address: target,
+                role: role as u32,
+                admin,
+                activate_at,
+                timestamp,
+            }
+            .publish(&env);
+            return Ok(());
+        }
+
+        storage_set_role(&env, &target, &role);
         RoleGrantedEvent {
             address: target,
             role: role as u32,
             admin,
             timestamp,
             domain: event_domain(&env),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Sets the timelock applied to future `set_role` grants, in seconds.
+    /// Admin-only. `0` restores instant grants.
+    ///
+    /// The admin address itself is stored separately and is unaffected — the
+    /// admin never has to wait out its own timelock to act (Issue #220).
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the admin.
+    pub fn set_role_delay(env: Env, secs: u64) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+        storage_set_role_delay(&env, secs);
+        Ok(())
+    }
+
+    /// Current `set_role` timelock in seconds. `0` == grants take effect immediately.
+    #[must_use]
+    pub fn get_role_delay(env: Env) -> u64 {
+        storage_get_role_delay(&env)
+    }
+
+    /// The pending (not yet active) role grant for `target`, if any.
+    #[must_use]
+    pub fn get_pending_role(env: Env, target: Address) -> Option<PendingRoleGrant> {
+        storage_get_pending_role(&env, &target)
+    }
+
+    /// Applies a pending role grant once its timelock has elapsed. Admin-only.
+    ///
+    /// Emits [`RoleGrantedEvent`] — the same event an instant grant emits, so
+    /// indexers do not need a second code path for the activated role.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the admin.
+    /// - [`ContractError::NoPendingRoleGrant`] if `target` has no pending grant.
+    /// - [`ContractError::RoleGrantNotReady`] if the timelock has not elapsed.
+    pub fn activate_role(env: Env, target: Address) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        let pending =
+            storage_get_pending_role(&env, &target).ok_or(ContractError::NoPendingRoleGrant)?;
+        let timestamp = env.ledger().timestamp();
+        if timestamp < pending.activate_at {
+            return Err(ContractError::RoleGrantNotReady);
+        }
+
+        storage_set_role(&env, &target, &pending.role);
+        remove_pending_role(&env, &target);
+        RoleGrantedEvent {
+            address: target,
+            role: pending.role as u32,
+            admin,
+            timestamp,
+            domain: event_domain(&env),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Drops a pending role grant before it activates. Admin-only.
+    ///
+    /// Emits [`RoleGrantCancelledEvent`].
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the admin.
+    /// - [`ContractError::NoPendingRoleGrant`] if `target` has no pending grant.
+    pub fn cancel_role_grant(env: Env, target: Address) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        if storage_get_pending_role(&env, &target).is_none() {
+            return Err(ContractError::NoPendingRoleGrant);
+        }
+        remove_pending_role(&env, &target);
+        RoleGrantCancelledEvent {
+            address: target,
+            admin,
+            timestamp: env.ledger().timestamp(),
         }
         .publish(&env);
 
@@ -525,6 +665,9 @@ impl TrustBridgeContract {
         admin.require_auth();
 
         storage_remove_role(&env, &target);
+        // A revoke also drops any grant still inside its timelock (Issue #220),
+        // otherwise the pending grant would resurrect the role on activation.
+        remove_pending_role(&env, &target);
         let timestamp = env.ledger().timestamp();
         RoleRevokedEvent {
             address: target,
@@ -1131,6 +1274,10 @@ impl TrustBridgeContract {
                 upgraded_at: now,
                 version: soroban_sdk::vec![&env, version.0, version.1, version.2],
                 attested,
+                // Digests are recorded out of band by the operator after the
+                // upgrade; `upgrade` itself has no way to know them (Issue #224).
+                sbom_hash: None,
+                source_hash: None,
             },
         );
 
@@ -1147,6 +1294,63 @@ impl TrustBridgeContract {
         }
         .publish(&env);
 
+        Ok(())
+    }
+
+    /// Records the SBOM and source digests for the currently deployed WASM.
+    /// Admin-only (Issue #224).
+    ///
+    /// Kept separate from `upgrade` because these digests are produced by the
+    /// build pipeline, not by the chain. Passing `None` leaves the existing
+    /// value untouched, so the two digests can be filled in independently. This
+    /// is also the migration path for provenance records written before the
+    /// fields existed — see `docs/DEPLOYMENT.md`.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the admin.
+    /// - [`ContractError::ProvenanceMissing`] if no provenance record exists yet.
+    pub fn set_provenance_digests(
+        env: Env,
+        sbom_hash: Option<BytesN<32>>,
+        source_hash: Option<BytesN<32>>,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        let mut provenance = get_wasm_provenance(&env).ok_or(ContractError::ProvenanceMissing)?;
+        if sbom_hash.is_some() {
+            provenance.sbom_hash = sbom_hash;
+        }
+        if source_hash.is_some() {
+            provenance.source_hash = source_hash;
+        }
+        set_wasm_provenance(&env, &provenance);
+        Ok(())
+    }
+
+    /// Reproducible-build check: fails unless `hash` equals the WASM hash in
+    /// stored provenance (Issue #225).
+    ///
+    /// An operator runs `stellar contract build`, takes the resulting hash, and
+    /// calls this before authorising an upgrade. A read-only check by design —
+    /// it does not consume or require an attestation, and does not touch state,
+    /// so it is safe to call from a `Makefile` target or CI step.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::ProvenanceMissing`] if nothing has been deployed via
+    ///   `upgrade` yet, so there is no recorded hash to compare against.
+    /// - [`ContractError::ProvenanceMismatch`] if the hashes differ.
+    pub fn assert_build(env: Env, hash: BytesN<32>) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        let provenance = get_wasm_provenance(&env).ok_or(ContractError::ProvenanceMissing)?;
+        if provenance.wasm_hash != hash {
+            return Err(ContractError::ProvenanceMismatch);
+        }
         Ok(())
     }
 
@@ -11153,245 +11357,241 @@ mod test {
         });
     }
 
-    // ── Payout delegation (delegate vs rotation disambiguation) ───────────────
+    // ── Issue #220: set_role timelock ────────────────────────────────────────
 
     #[test]
-    fn test_delegate_payout_emits_distinct_event_and_updates_payout_address_only() {
+    fn test_set_role_is_immediate_when_delay_is_zero() {
         let env = Env::default();
-        let (_admin, user, delegate, contract_id) = setup(&env);
+        let (_admin, user, _other, contract_id) = setup(&env);
+
         env.mock_all_auths();
-        env.ledger().set_timestamp(1_700_000_000);
-        let name = username(&env, "octocat");
+        env.as_contract(&contract_id, || {
+            assert_eq!(TrustBridgeContract::get_role_delay(env.clone()), 0);
+            TrustBridgeContract::set_role(env.clone(), user.clone(), Role::Verifier).unwrap();
+            assert_eq!(
+                TrustBridgeContract::get_role(env.clone(), user.clone()),
+                Some(Role::Verifier)
+            );
+        });
+    }
+
+    #[test]
+    fn test_set_role_grant_waits_out_the_timelock() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role_delay(env.clone(), 3600).unwrap();
+            TrustBridgeContract::set_role(env.clone(), user.clone(), Role::Upgrader).unwrap();
+
+            // Queued, not active.
+            assert!(TrustBridgeContract::get_role(env.clone(), user.clone()).is_none());
+            let pending =
+                TrustBridgeContract::get_pending_role(env.clone(), user.clone()).unwrap();
+            assert_eq!(pending.role, Role::Upgrader);
+
+            // Too early.
+            assert_eq!(
+                TrustBridgeContract::activate_role(env.clone(), user.clone()),
+                Err(ContractError::RoleGrantNotReady)
+            );
+
+            env.ledger().set_timestamp(pending.activate_at);
+            TrustBridgeContract::activate_role(env.clone(), user.clone()).unwrap();
+            assert_eq!(
+                TrustBridgeContract::get_role(env.clone(), user.clone()),
+                Some(Role::Upgrader)
+            );
+            assert!(TrustBridgeContract::get_pending_role(env.clone(), user.clone()).is_none());
+        });
+    }
+
+    #[test]
+    fn test_set_role_grant_can_be_cancelled_before_activation() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role_delay(env.clone(), 3600).unwrap();
+            TrustBridgeContract::set_role(env.clone(), user.clone(), Role::Verifier).unwrap();
+            TrustBridgeContract::cancel_role_grant(env.clone(), user.clone()).unwrap();
+
+            assert!(TrustBridgeContract::get_pending_role(env.clone(), user.clone()).is_none());
+            assert_eq!(
+                TrustBridgeContract::activate_role(env.clone(), user.clone()),
+                Err(ContractError::NoPendingRoleGrant)
+            );
+            assert_eq!(
+                TrustBridgeContract::cancel_role_grant(env.clone(), user.clone()),
+                Err(ContractError::NoPendingRoleGrant)
+            );
+        });
+    }
+
+    #[test]
+    fn test_set_role_remove_role_drops_pending_grant() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role_delay(env.clone(), 3600).unwrap();
+            TrustBridgeContract::set_role(env.clone(), user.clone(), Role::Verifier).unwrap();
+            TrustBridgeContract::remove_role(env.clone(), user.clone()).unwrap();
+
+            assert!(TrustBridgeContract::get_pending_role(env.clone(), user.clone()).is_none());
+        });
+    }
+
+    // ── Issue #222: guardian is pause-only ───────────────────────────────────
+
+    #[test]
+    fn test_guardian_cannot_set_role_or_clear_pause() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        let guardian = Address::generate(&env);
 
         env.as_contract(&contract_id, || {
-            register_personal(&env, &contract_id, "octocat", &user);
+            env.mock_all_auths();
+            TrustBridgeContract::set_guardian(env.clone(), guardian.clone()).unwrap();
+
+            // The guardian holds no role, so it cannot reach any Upgrader- or
+            // Verifier-gated path, and set_role stays admin-authorised.
+            assert!(TrustBridgeContract::get_role(env.clone(), guardian.clone()).is_none());
+
+            TrustBridgeContract::emergency_pause(env.clone(), guardian.clone()).unwrap();
+            // Pause is a full stop: even the admin's own set_role is blocked
+            // while the breaker is tripped, so the guardian's freeze holds.
+            assert_eq!(
+                TrustBridgeContract::set_role(env.clone(), user.clone(), Role::Verifier),
+                Err(ContractError::Paused)
+            );
         });
+    }
 
-        // Registration's own event is not what we're asserting on — clear it
-        // so the delegate event below is unambiguous.
-        env.events().all();
+    #[test]
+    fn test_guardian_rotation_replaces_previous_guardian() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+        let first = Address::generate(&env);
+        let second = Address::generate(&env);
 
+        env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::delegate_payout(
-                env.clone(),
-                user.clone(),
-                name.clone(),
-                delegate.clone(),
-            )
-            .unwrap();
+            TrustBridgeContract::set_guardian(env.clone(), first.clone()).unwrap();
+            TrustBridgeContract::set_guardian(env.clone(), second.clone()).unwrap();
+            assert_eq!(TrustBridgeContract::get_guardian(env.clone()), Some(second));
 
-            let record = TrustBridgeContract::get_address(env.clone(), name.clone()).unwrap();
-            // Identity address is untouched by delegation — only payout moves.
-            assert_eq!(record.stellar_address, user);
-            assert_eq!(record.payout_address, delegate);
+            TrustBridgeContract::remove_guardian(env.clone()).unwrap();
+            assert!(TrustBridgeContract::get_guardian(env.clone()).is_none());
+            // The removed guardian can no longer freeze the contract.
+            assert_eq!(
+                TrustBridgeContract::emergency_pause(env.clone(), first.clone()),
+                Err(ContractError::NotAuthorized)
+            );
         });
+    }
 
-        let expected = PayoutDelegatedEvent {
-            github_username: name.clone(),
-            stellar_address: user.clone(),
-            delegate_address: delegate.clone(),
-            timestamp: 1_700_000_000,
-            domain: env.as_contract(&contract_id, || event_domain(&env)),
-        };
+    // ── Issues #224 / #225: provenance digests and build verification ────────
 
-        assert_eq!(
-            env.events().all(),
-            soroban_sdk::vec![
+    #[test]
+    fn test_provenance_records_sbom_and_source_digests() {
+        let env = Env::default();
+        let (_admin, _user, _other, contract_id) = setup(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            // No provenance until something has been deployed.
+            assert_eq!(
+                TrustBridgeContract::set_provenance_digests(
+                    env.clone(),
+                    Some(BytesN::from_array(&env, &[1u8; 32])),
+                    None,
+                ),
+                Err(ContractError::ProvenanceMissing)
+            );
+
+            let wasm_hash = BytesN::from_array(&env, &[7u8; 32]);
+            set_wasm_provenance(
                 &env,
-                (
-                    contract_id.clone(),
-                    expected.topics(&env),
-                    expected.data(&env),
-                )
-            ],
-            "delegate_payout must emit PayoutDelegatedEvent, not RegisteredEvent, \
-             so indexers can distinguish delegation from registration/rotation"
-        );
-    }
-
-    #[test]
-    fn test_delegate_payout_rejects_second_distinct_live_delegate() {
-        let env = Env::default();
-        let (_admin, user, delegate, contract_id) = setup(&env);
-        let other_delegate = Address::generate(&env);
-        env.mock_all_auths();
-        env.as_contract(&contract_id, || {
-            register_personal(&env, &contract_id, "octocat", &user);
-
-            TrustBridgeContract::delegate_payout(
-                env.clone(),
-                user.clone(),
-                username(&env, "octocat"),
-                delegate.clone(),
-            )
-            .unwrap();
-
-            // Only one live payout delegate is allowed at a time.
-            let res = TrustBridgeContract::delegate_payout(
-                env.clone(),
-                user.clone(),
-                username(&env, "octocat"),
-                other_delegate.clone(),
+                &WasmProvenance {
+                    wasm_hash: wasm_hash.clone(),
+                    previous_wasm_hash: None,
+                    upgraded_by: get_admin(&env).unwrap(),
+                    upgraded_at: 0,
+                    version: Vec::new(&env),
+                    attested: false,
+                    // Pre-#224 records carry no digests; backfilling them is
+                    // exactly the migration this test walks through.
+                    sbom_hash: None,
+                    source_hash: None,
+                },
             );
-            assert_eq!(res, Err(ContractError::AlreadyDelegated));
-        });
-    }
 
-    #[test]
-    fn test_undelegate_payout_restores_identity_address_and_allows_new_delegate() {
-        let env = Env::default();
-        let (_admin, user, delegate, contract_id) = setup(&env);
-        let second_delegate = Address::generate(&env);
-        env.mock_all_auths();
-        env.as_contract(&contract_id, || {
-            register_personal(&env, &contract_id, "octocat", &user);
-            TrustBridgeContract::delegate_payout(
+            let sbom = BytesN::from_array(&env, &[2u8; 32]);
+            let source = BytesN::from_array(&env, &[3u8; 32]);
+            TrustBridgeContract::set_provenance_digests(
                 env.clone(),
-                user.clone(),
-                username(&env, "octocat"),
-                delegate.clone(),
+                Some(sbom.clone()),
+                Some(source.clone()),
             )
             .unwrap();
 
-            TrustBridgeContract::undelegate_payout(
-                env.clone(),
-                user.clone(),
-                username(&env, "octocat"),
-            )
-            .unwrap();
+            let provenance = TrustBridgeContract::get_provenance(env.clone()).unwrap();
+            assert_eq!(provenance.sbom_hash, Some(sbom.clone()));
+            assert_eq!(provenance.source_hash, Some(source));
+            assert_eq!(provenance.wasm_hash, wasm_hash);
 
-            let record =
-                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
-            assert_eq!(record.payout_address, user);
-
-            // Delegation slot is free again after undelegate.
-            TrustBridgeContract::delegate_payout(
-                env.clone(),
-                user.clone(),
-                username(&env, "octocat"),
-                second_delegate.clone(),
-            )
-            .unwrap();
-        });
-    }
-
-    #[test]
-    fn test_undelegate_payout_without_active_delegate_fails() {
-        let env = Env::default();
-        let (_admin, user, _delegate, contract_id) = setup(&env);
-        env.mock_all_auths();
-        env.as_contract(&contract_id, || {
-            register_personal(&env, &contract_id, "octocat", &user);
-            let res = TrustBridgeContract::undelegate_payout(
-                env.clone(),
-                user.clone(),
-                username(&env, "octocat"),
+            // A None argument leaves the stored digest alone.
+            TrustBridgeContract::set_provenance_digests(env.clone(), None, None).unwrap();
+            assert_eq!(
+                TrustBridgeContract::get_provenance(env.clone())
+                    .unwrap()
+                    .sbom_hash,
+                Some(sbom)
             );
-            assert_eq!(res, Err(ContractError::NoActiveDelegate));
         });
     }
 
     #[test]
-    fn test_delegate_payout_rejects_non_owner_caller() {
-        let env = Env::default();
-        let (_admin, user, delegate, contract_id) = setup(&env);
-        let stranger = Address::generate(&env);
-        env.mock_all_auths();
-        env.as_contract(&contract_id, || {
-            register_personal(&env, &contract_id, "octocat", &user);
-            let res = TrustBridgeContract::delegate_payout(
-                env.clone(),
-                stranger.clone(),
-                username(&env, "octocat"),
-                delegate.clone(),
-            );
-            assert_eq!(res, Err(ContractError::NotAuthorized));
-        });
-    }
-
-    // ── Dual-index audit: get_public_paginated must read persistent chunks ────
-
-    #[test]
-    fn test_get_public_paginated_returns_all_records_from_chunked_index() {
+    fn test_provenance_assert_build_rejects_unmatched_hash() {
         let env = Env::default();
         let (_admin, _user, _other, contract_id) = setup(&env);
-        let names = register_batch(&env, &contract_id, 5);
 
+        env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
-            assert_eq!(page.total, 5);
-            assert_eq!(page.records.len(), 5);
-            assert!(!page.has_more);
-            assert!(page.next_cursor.is_none());
+            let wasm_hash = BytesN::from_array(&env, &[7u8; 32]);
 
-            for i in 0..names.len() {
-                let expected_name = names.get(i).unwrap();
-                let found = page
-                    .records
-                    .iter()
-                    .any(|(name, _record)| name == expected_name);
-                assert!(
-                    found,
-                    "get_public_paginated must surface every chunked-index entry"
-                );
-            }
-        });
-    }
+            // Nothing deployed yet: the check fails closed rather than passing.
+            assert_eq!(
+                TrustBridgeContract::assert_build(env.clone(), wasm_hash.clone()),
+                Err(ContractError::ProvenanceMissing)
+            );
 
-    #[test]
-    fn test_get_public_paginated_pages_across_chunk_reads_without_duplicates_or_gaps() {
-        let env = Env::default();
-        let (_admin, _user, _other, contract_id) = setup(&env);
-        let names = register_batch(&env, &contract_id, 5);
+            set_wasm_provenance(
+                &env,
+                &WasmProvenance {
+                    wasm_hash: wasm_hash.clone(),
+                    previous_wasm_hash: None,
+                    upgraded_by: get_admin(&env).unwrap(),
+                    upgraded_at: 0,
+                    version: Vec::new(&env),
+                    attested: false,
+                    sbom_hash: None,
+                    source_hash: None,
+                },
+            );
 
-        let mut collected: Vec<String> = Vec::new(&env);
-        let mut cursor = None;
-        loop {
-            let page = env.as_contract(&contract_id, || {
-                TrustBridgeContract::get_public_paginated(env.clone(), cursor.clone(), 2).unwrap()
-            });
-            for i in 0..page.records.len() {
-                let (name, _record) = page.records.get(i).unwrap();
-                collected.push_back(name);
-            }
-            if !page.has_more {
-                break;
-            }
-            cursor = page.next_cursor;
-        }
-
-        assert_eq!(
-            collected.len(),
-            names.len(),
-            "paging by small limits over the chunked index must yield every record exactly once"
-        );
-        for i in 0..names.len() {
-            let expected_name = names.get(i).unwrap();
-            assert!(collected.iter().any(|n| n == expected_name));
-        }
-    }
-
-    #[test]
-    fn test_get_public_paginated_cursor_from_admin_path_is_interchangeable() {
-        let env = Env::default();
-        let (_admin, _user, _other, contract_id) = setup(&env);
-        register_batch(&env, &contract_id, 5);
-
-        env.as_contract(&contract_id, || {
-            // A cursor minted by the admin (flat-index-backed) path must still
-            // decode against the public (chunk-backed) path — both share the
-            // same opaque cursor format and index generation.
-            let admin_page =
-                TrustBridgeContract::get_registered_paginated(env.clone(), None, 2).unwrap();
-            assert!(admin_page.next_cursor.is_some());
-
-            let public_page = TrustBridgeContract::get_public_paginated(
-                env.clone(),
-                admin_page.next_cursor,
-                2,
-            )
-            .unwrap();
-            assert_eq!(public_page.records.len(), 2);
+            TrustBridgeContract::assert_build(env.clone(), wasm_hash).unwrap();
+            assert_eq!(
+                TrustBridgeContract::assert_build(
+                    env.clone(),
+                    BytesN::from_array(&env, &[9u8; 32])
+                ),
+                Err(ContractError::ProvenanceMismatch)
+            );
         });
     }
 }

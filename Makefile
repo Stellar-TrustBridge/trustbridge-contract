@@ -32,7 +32,7 @@ FUTURENET_DRY_RUN ?= false
 .PHONY: help build build-legacy test test-rehearsal fuzz bench bench-export bench-username bench-double-verify bench-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
-	export-registry validate-registry dr-test futurenet-smoke xdr-fixtures diff-test
+	export-registry validate-registry dr-test futurenet-smoke assert-build
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -409,11 +409,9 @@ export-registry: require-contract-id ## Export full registry to JSON (admin) —
 validate-registry: require-contract-id ## Validate a registry export JSON against live state, no writes (CONTRACT_ID, EXPORT_FILE, ADMIN_SOURCE=admin for full diff)
 	CONTRACT_ID=$(CONTRACT_ID) SOURCE=$(SOURCE) ADMIN_SOURCE=$(ADMIN_SOURCE) NETWORK=$(NETWORK) ./scripts/validate_registry.sh $(EXPORT_FILE)
 
-xdr-fixtures: ## Generate XDR fixtures for TypeScript differential testing
-	@echo "Generating XDR fixtures from Rust contract tests..."
-	@cargo test generate_xdr_fixtures -- --ignored --exact --nocapture
-	@echo "Copy the XDR output to ts-differential-tests/fixtures/get_address_octocat.xdr"
-	@echo "Copy the Stellar address to ts-differential-tests/fixtures/get_address_octocat.address"
-
-diff-test: ## Run TypeScript differential tests against XDR fixtures
-	@cd ts-differential-tests && npm install && npm test
+assert-build: require-contract-id ## Verify a locally built WASM hash matches stored provenance (WASM_HASH, CONTRACT_ID)
+	@test -n "$(WASM_HASH)" || (echo "WASM_HASH is required — run 'stellar contract build' and hash the artifact" && exit 1)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--network $(NETWORK) \
+		-- assert_build --hash $(WASM_HASH)
