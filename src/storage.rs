@@ -104,6 +104,11 @@ pub const CHUNK_CNT_KEY: Symbol = symbol_short!("chkcnt");
 /// drifted offset.
 pub const INDEX_GEN_KEY: Symbol = symbol_short!("idx_gen");
 pub const LAST_ACT_KEY: Symbol = symbol_short!("lastact");
+/// Ledger sequence containing the most recently emitted contract event (Issue #282).
+///
+/// This instance value is updated as part of the same invocation that publishes
+/// an event. `0` means the deployed instance has not emitted an event yet.
+pub const LAST_EVENT_LEDGER_KEY: Symbol = symbol_short!("evt_ledger");
 /// Key for the WASM provenance record (Wave #24).
 pub const PROV_KEY: Symbol = symbol_short!("prov");
 /// Key for the pending upgrade attestation (Wave #24).
@@ -1760,7 +1765,10 @@ pub fn is_admin_caller(env: &Env, address: &Address) -> bool {
     matches!(get_admin(env), Ok(admin) if admin == *address)
 }
 
-#[allow(dead_code)] // Staged for role-gated entry points; covered by role tests.
+#[allow(dead_code)] // Issue #248: staged for consolidated role-gated entry points.
+                    // Covered directly by `test_has_role_or_admin_*` tests below.
+                    // Do NOT remove: used by future role-consolidation refactor tracked
+                    // in the issue backlog. Emergency keys are also covered by this helper.
 pub fn has_role_or_admin(env: &Env, address: &Address, expected_role: Role) -> bool {
     if let Ok(admin) = get_admin(env) {
         if *address == admin {
@@ -2414,31 +2422,138 @@ pub fn is_batch_remove_proposal_expired(env: &Env, proposal: &PendingBatchRemove
             .saturating_add(BATCH_REMOVE_PROPOSAL_TTL_SECS)
 }
 
-// ─── Role grant timelock (Issue #220) ────────────────────────────────────────
-
-/// Seconds a `set_role` grant waits before activation. 0 == instant grants.
-pub fn get_role_delay(env: &Env) -> u64 {
-    env.storage().instance().get(&ROLE_DELAY_KEY).unwrap_or(0)
-}
-
-pub fn set_role_delay(env: &Env, secs: u64) {
-    env.storage().instance().set(&ROLE_DELAY_KEY, &secs);
-}
-
-pub fn get_pending_role(env: &Env, address: &Address) -> Option<PendingRoleGrant> {
+/// Returns the ledger sequence containing the latest contract event.
+///
+/// The value is `0` until the first event is emitted. It intentionally uses
+/// instance storage: it is a small, cheap cursor for indexers rather than a
+/// historical event log.
+#[must_use]
+pub fn get_last_event_ledger(env: &Env) -> u32 {
     env.storage()
         .instance()
-        .get(&(PENDING_ROLE_KEY, address.clone()))
+        .get(&LAST_EVENT_LEDGER_KEY)
+        .unwrap_or(0)
 }
 
-pub fn set_pending_role(env: &Env, address: &Address, grant: &PendingRoleGrant) {
+/// Records the ledger sequence for an event being emitted in this invocation.
+pub fn set_last_event_ledger(env: &Env) {
     env.storage()
         .instance()
-        .set(&(PENDING_ROLE_KEY, address.clone()), grant);
+        .set(&LAST_EVENT_LEDGER_KEY, &env.ledger().sequence());
 }
 
-pub fn remove_pending_role(env: &Env, address: &Address) {
-    env.storage()
-        .instance()
-        .remove(&(PENDING_ROLE_KEY, address.clone()));
+// ── Issue #248: Direct coverage for has_role_or_admin ────────────────────────
+//
+// These tests run against the storage helper directly, providing machine-
+// checked coverage for every branch so the #[allow(dead_code)] annotation is
+// backed by real test execution rather than only by a prose comment.
+
+#[cfg(test)]
+mod storage_dead_code_tests {
+    use super::*;
+    use soroban_sdk::{Address, Env};
+
+    fn make_env() -> Env {
+        Env::default()
+    }
+
+    fn setup_contract(env: &Env) -> Address {
+        let contract_id = env.register(crate::TrustBridgeContract, ());
+        let admin = Address::generate(env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            set_admin(env, &admin);
+        });
+        contract_id
+    }
+
+    /// The admin address returns `true` regardless of the `expected_role`.
+    #[test]
+    fn test_has_role_or_admin_admin_always_true() {
+        let env = make_env();
+        let contract_id = setup_contract(&env);
+        let admin = env.as_contract(&contract_id, || get_admin(&env).unwrap());
+
+        env.as_contract(&contract_id, || {
+            assert!(
+                has_role_or_admin(&env, &admin, Role::Verifier),
+                "admin must return true for Verifier role check"
+            );
+            assert!(
+                has_role_or_admin(&env, &admin, Role::Revoker),
+                "admin must return true for Revoker role check"
+            );
+            assert!(
+                has_role_or_admin(&env, &admin, Role::Upgrader),
+                "admin must return true for Upgrader role check"
+            );
+        });
+    }
+
+    /// An address that holds the exact expected role returns `true`.
+    #[test]
+    fn test_has_role_or_admin_matching_role_true() {
+        let env = make_env();
+        let contract_id = setup_contract(&env);
+        let verifier = Address::generate(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            set_role(&env, &verifier, Role::Verifier);
+            assert!(
+                has_role_or_admin(&env, &verifier, Role::Verifier),
+                "address with Verifier role must return true for Verifier check"
+            );
+        });
+    }
+
+    /// An address that holds a *different* role returns `false`.
+    #[test]
+    fn test_has_role_or_admin_wrong_role_false() {
+        let env = make_env();
+        let contract_id = setup_contract(&env);
+        let revoker = Address::generate(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            set_role(&env, &revoker, Role::Revoker);
+            assert!(
+                !has_role_or_admin(&env, &revoker, Role::Verifier),
+                "Revoker must not pass a Verifier role check"
+            );
+        });
+    }
+
+    /// An address with no role at all returns `false`.
+    #[test]
+    fn test_has_role_or_admin_no_role_false() {
+        let env = make_env();
+        let contract_id = setup_contract(&env);
+        let stranger = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            assert!(
+                !has_role_or_admin(&env, &stranger, Role::Verifier),
+                "address with no role must return false"
+            );
+        });
+    }
+
+    /// An address explicitly assigned `Role::Admin` via RBAC (not the primary
+    /// admin key) also returns `true`.
+    #[test]
+    fn test_has_role_or_admin_rbac_admin_true() {
+        let env = make_env();
+        let contract_id = setup_contract(&env);
+        let rbac_admin = Address::generate(&env);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            set_role(&env, &rbac_admin, Role::Admin);
+            assert!(
+                has_role_or_admin(&env, &rbac_admin, Role::Revoker),
+                "RBAC Admin must return true for any role check"
+            );
+        });
+    }
 }

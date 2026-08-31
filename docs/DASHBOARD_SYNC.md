@@ -61,6 +61,78 @@ risking a resource-limit failure on a large registry. See
 `test_get_registered_page_paginates_and_gates_on_admin` in `src/lib.rs`.
 
 ## Event Idempotency & Replay Handling
+## Event lag signal (Issue #282)
+
+### What it is
+
+`get_last_event_ledger() -> u32` returns the ledger **sequence** containing the
+most recently emitted contract event. `0` means the instance has not emitted
+any event yet. The value is stored in cheap instance storage and updated as part
+of the same invocation that publishes each event, so it is always consistent
+with on-chain state.
+
+### Who updates it
+
+Every event-publishing code path in the contract calls `event_domain()`, which
+in turn calls `set_last_event_ledger`. This covers:
+
+- `register` / `register_sponsored`
+- `verify` / `batch_verify`
+- `revoke_verification`
+- `remove` / `batch_remove` / `execute_batch_remove`
+- `rename`
+- `pause` / `unpause` / `set_paused` / `emergency_pause` / `clear_emergency_pause`
+- `set_role` / `remove_role` / `set_role_with_expiry`
+- `add_verifier` / `remove_verifier`
+- `upgrade` / `attest_upgrade`
+- Challenge lifecycle: `start_challenge`, `cancel_challenge`, `complete_challenge`
+- Rotation lifecycle: `request_address_rotation`, `execute_address_rotation`, `cancel_address_rotation`
+
+If the contract is paused and no events are emitted, the cursor does not
+advance — which is itself a useful signal for dashboards monitoring freeze
+windows.
+
+### How to use it — indexer lag detection
+
+```
+watermark = highest ledger fully applied in the indexer's database
+
+loop:
+  last = get_last_event_ledger()   # one cheap instance-storage read
+  if watermark < last:
+    events = horizon.getEvents(startLedger=watermark+1, endLedger=last)
+    apply_events_in_order(events)
+    watermark = last
+    commit_database_transaction()
+  else:
+    # no known lag; indexer is current
+    sleep(poll_interval)
+```
+
+Rules:
+1. Advance `watermark` only **after** the database transaction that records the
+   events commits. A crash between fetching and committing is safe to replay
+   because applying an already-applied event is idempotent (upsert semantics —
+   see the idempotency table above).
+2. If `watermark >= last_event_ledger`, the indexer has no known contract lag.
+   Network-level latest-ledger is a separate Horizon/RPC concept; this signal
+   is contract-local only.
+3. The signal is readable **while paused**, so a paused registry can still be
+   reconciled without first unpausing.
+
+### Constraints and limitations
+
+- The value is a ledger **sequence**, not a timestamp. Compare it against the
+  `ledgerSeq` field in Horizon event envelopes, not the `timestamp` in event
+  payloads.
+- The contract cannot read its own Horizon latest-ledger. A gap of
+  `latest_horizon_ledger - last_event_ledger` ledgers means no contract event
+  was emitted in that range — not necessarily that the indexer is current with
+  the chain tip.
+- For very high-throughput periods, one Horizon `getEvents` call may not return
+  all events between `watermark` and `last`; paginate using the Horizon cursor
+  as usual.
+
 
 Issue #135: Horizon/RPC replays and worker retries are normal operating conditions, not
 failure modes. An indexer that treats every delivery as new will double-count

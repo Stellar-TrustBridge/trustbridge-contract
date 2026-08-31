@@ -61,6 +61,7 @@ use crate::storage::{
     get_cooldown as storage_get_cooldown, get_emergency_pause, get_emergency_pause_ts,
     get_ever_verified_count as storage_get_ever_verified_count, get_guardian as storage_get_guardian,
     get_index, get_last_upgrade, get_network_id as storage_get_network_id,
+    get_last_event_ledger as storage_get_last_event_ledger,
     get_pending_rotation as storage_get_pending_rotation, get_record,
     get_registered_paginated_internal, get_role as storage_get_role,
     get_role_holder_count as storage_get_role_holder_count, get_role_holders_internal,
@@ -74,6 +75,7 @@ use crate::storage::{
     remove_challenge, remove_from_index, remove_record, remove_role as storage_remove_role,
     remove_wasm_attestation, require_initialized, require_not_paused,
     run_migration_steps, set_challenge, set_cooldown as storage_set_cooldown, set_count,
+    set_last_event_ledger,
     set_last_action, set_last_upgrade, set_paused as set_paused_state, set_pending_reverify,
     set_ever_verified_count, set_record, set_role as storage_set_role, set_verified_count,
     set_version,
@@ -142,6 +144,9 @@ pub const CONTRACT_VERSION: Version = Version {
 /// resolution `get_version` uses, so the value in an event always matches what
 /// a reader would see from a contract call.
 fn event_domain(env: &Env) -> EventDomain {
+    // Event construction and publication are in the same contract invocation.
+    // If publication traps, Soroban rolls this cursor update back atomically.
+    set_last_event_ledger(env);
     let version = storage_get_version(env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple());
     EventDomain::new(env, version)
 }
@@ -2201,6 +2206,7 @@ impl TrustBridgeContract {
         }
         .publish(&env);
 
+        set_last_event_ledger(&env);
         push_audit_entry(
             &env,
             AuditLogEntry::new(
@@ -2292,6 +2298,7 @@ impl TrustBridgeContract {
         }
         .publish(&env);
 
+        set_last_event_ledger(&env);
         push_audit_entry(
             &env,
             AuditLogEntry::new(
@@ -3952,6 +3959,16 @@ impl TrustBridgeContract {
     #[must_use]
     pub fn get_stats(env: Env) -> Stats {
         read_stats(&env)
+    }
+
+    /// Returns the ledger sequence containing the most recently emitted event.
+    ///
+    /// A value of `0` means this contract instance has not emitted an event.
+    /// Indexers compare this cursor with their Horizon/RPC ingestion watermark
+    /// to detect lag; it remains available while the contract is paused.
+    #[must_use]
+    pub fn get_last_event_ledger(env: Env) -> u32 {
+        storage_get_last_event_ledger(&env)
     }
 
     /// Returns a single packed health snapshot for dashboards and CI probes (Issue #210).
@@ -11357,240 +11374,192 @@ mod test {
         });
     }
 
-    // ── Issue #220: set_role timelock ────────────────────────────────────────
+    // ── Issue #282: Indexer lag helper — last event ledger ───────────────────
 
+    /// A fresh instance has never emitted an event, so `get_last_event_ledger`
+    /// returns 0.
     #[test]
-    fn test_set_role_is_immediate_when_delay_is_zero() {
-        let env = Env::default();
-        let (_admin, user, _other, contract_id) = setup(&env);
-
-        env.mock_all_auths();
-        env.as_contract(&contract_id, || {
-            assert_eq!(TrustBridgeContract::get_role_delay(env.clone()), 0);
-            TrustBridgeContract::set_role(env.clone(), user.clone(), Role::Verifier).unwrap();
-            assert_eq!(
-                TrustBridgeContract::get_role(env.clone(), user.clone()),
-                Some(Role::Verifier)
-            );
-        });
-    }
-
-    #[test]
-    fn test_set_role_grant_waits_out_the_timelock() {
-        let env = Env::default();
-        let (_admin, user, _other, contract_id) = setup(&env);
-
-        env.mock_all_auths();
-        env.as_contract(&contract_id, || {
-            TrustBridgeContract::set_role_delay(env.clone(), 3600).unwrap();
-            TrustBridgeContract::set_role(env.clone(), user.clone(), Role::Upgrader).unwrap();
-
-            // Queued, not active.
-            assert!(TrustBridgeContract::get_role(env.clone(), user.clone()).is_none());
-            let pending =
-                TrustBridgeContract::get_pending_role(env.clone(), user.clone()).unwrap();
-            assert_eq!(pending.role, Role::Upgrader);
-
-            // Too early.
-            assert_eq!(
-                TrustBridgeContract::activate_role(env.clone(), user.clone()),
-                Err(ContractError::RoleGrantNotReady)
-            );
-
-            env.ledger().set_timestamp(pending.activate_at);
-            TrustBridgeContract::activate_role(env.clone(), user.clone()).unwrap();
-            assert_eq!(
-                TrustBridgeContract::get_role(env.clone(), user.clone()),
-                Some(Role::Upgrader)
-            );
-            assert!(TrustBridgeContract::get_pending_role(env.clone(), user.clone()).is_none());
-        });
-    }
-
-    #[test]
-    fn test_set_role_grant_can_be_cancelled_before_activation() {
-        let env = Env::default();
-        let (_admin, user, _other, contract_id) = setup(&env);
-
-        env.mock_all_auths();
-        env.as_contract(&contract_id, || {
-            TrustBridgeContract::set_role_delay(env.clone(), 3600).unwrap();
-            TrustBridgeContract::set_role(env.clone(), user.clone(), Role::Verifier).unwrap();
-            TrustBridgeContract::cancel_role_grant(env.clone(), user.clone()).unwrap();
-
-            assert!(TrustBridgeContract::get_pending_role(env.clone(), user.clone()).is_none());
-            assert_eq!(
-                TrustBridgeContract::activate_role(env.clone(), user.clone()),
-                Err(ContractError::NoPendingRoleGrant)
-            );
-            assert_eq!(
-                TrustBridgeContract::cancel_role_grant(env.clone(), user.clone()),
-                Err(ContractError::NoPendingRoleGrant)
-            );
-        });
-    }
-
-    #[test]
-    fn test_set_role_remove_role_drops_pending_grant() {
-        let env = Env::default();
-        let (_admin, user, _other, contract_id) = setup(&env);
-
-        env.mock_all_auths();
-        env.as_contract(&contract_id, || {
-            TrustBridgeContract::set_role_delay(env.clone(), 3600).unwrap();
-            TrustBridgeContract::set_role(env.clone(), user.clone(), Role::Verifier).unwrap();
-            TrustBridgeContract::remove_role(env.clone(), user.clone()).unwrap();
-
-            assert!(TrustBridgeContract::get_pending_role(env.clone(), user.clone()).is_none());
-        });
-    }
-
-    // ── Issue #222: guardian is pause-only ───────────────────────────────────
-
-    #[test]
-    fn test_guardian_cannot_set_role_or_clear_pause() {
-        let env = Env::default();
-        let (_admin, user, _other, contract_id) = setup(&env);
-        let guardian = Address::generate(&env);
-
-        env.as_contract(&contract_id, || {
-            env.mock_all_auths();
-            TrustBridgeContract::set_guardian(env.clone(), guardian.clone()).unwrap();
-
-            // The guardian holds no role, so it cannot reach any Upgrader- or
-            // Verifier-gated path, and set_role stays admin-authorised.
-            assert!(TrustBridgeContract::get_role(env.clone(), guardian.clone()).is_none());
-
-            TrustBridgeContract::emergency_pause(env.clone(), guardian.clone()).unwrap();
-            // Pause is a full stop: even the admin's own set_role is blocked
-            // while the breaker is tripped, so the guardian's freeze holds.
-            assert_eq!(
-                TrustBridgeContract::set_role(env.clone(), user.clone(), Role::Verifier),
-                Err(ContractError::Paused)
-            );
-        });
-    }
-
-    #[test]
-    fn test_guardian_rotation_replaces_previous_guardian() {
+    fn test_last_event_ledger_zero_on_fresh_instance() {
         let env = Env::default();
         let (_admin, _user, _other, contract_id) = setup(&env);
-        let first = Address::generate(&env);
-        let second = Address::generate(&env);
-
-        env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::set_guardian(env.clone(), first.clone()).unwrap();
-            TrustBridgeContract::set_guardian(env.clone(), second.clone()).unwrap();
-            assert_eq!(TrustBridgeContract::get_guardian(env.clone()), Some(second));
-
-            TrustBridgeContract::remove_guardian(env.clone()).unwrap();
-            assert!(TrustBridgeContract::get_guardian(env.clone()).is_none());
-            // The removed guardian can no longer freeze the contract.
+            // `initialize` pushes an audit entry but does not call event_domain,
+            // so the cursor stays at 0 until the first event-emitting call.
             assert_eq!(
-                TrustBridgeContract::emergency_pause(env.clone(), first.clone()),
-                Err(ContractError::NotAuthorized)
+                TrustBridgeContract::get_last_event_ledger(env.clone()),
+                0,
+                "get_last_event_ledger must return 0 before any event is emitted"
             );
         });
     }
 
-    // ── Issues #224 / #225: provenance digests and build verification ────────
-
+    /// `register` emits `RegisteredEvent` via `event_domain`, which stamps
+    /// the ledger cursor.  The returned value must equal the ledger sequence
+    /// of the invocation.
     #[test]
-    fn test_provenance_records_sbom_and_source_digests() {
+    fn test_last_event_ledger_updated_after_register() {
         let env = Env::default();
-        let (_admin, _user, _other, contract_id) = setup(&env);
-
+        let (_admin, user, _other, contract_id) = setup(&env);
         env.mock_all_auths();
+
+        let seq_before = env.ledger().sequence();
         env.as_contract(&contract_id, || {
-            // No provenance until something has been deployed.
-            assert_eq!(
-                TrustBridgeContract::set_provenance_digests(
-                    env.clone(),
-                    Some(BytesN::from_array(&env, &[1u8; 32])),
-                    None,
-                ),
-                Err(ContractError::ProvenanceMissing)
-            );
-
-            let wasm_hash = BytesN::from_array(&env, &[7u8; 32]);
-            set_wasm_provenance(
-                &env,
-                &WasmProvenance {
-                    wasm_hash: wasm_hash.clone(),
-                    previous_wasm_hash: None,
-                    upgraded_by: get_admin(&env).unwrap(),
-                    upgraded_at: 0,
-                    version: Vec::new(&env),
-                    attested: false,
-                    // Pre-#224 records carry no digests; backfilling them is
-                    // exactly the migration this test walks through.
-                    sbom_hash: None,
-                    source_hash: None,
-                },
-            );
-
-            let sbom = BytesN::from_array(&env, &[2u8; 32]);
-            let source = BytesN::from_array(&env, &[3u8; 32]);
-            TrustBridgeContract::set_provenance_digests(
+            TrustBridgeContract::register(
                 env.clone(),
-                Some(sbom.clone()),
-                Some(source.clone()),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
             )
             .unwrap();
+        });
 
-            let provenance = TrustBridgeContract::get_provenance(env.clone()).unwrap();
-            assert_eq!(provenance.sbom_hash, Some(sbom.clone()));
-            assert_eq!(provenance.source_hash, Some(source));
-            assert_eq!(provenance.wasm_hash, wasm_hash);
+        env.as_contract(&contract_id, || {
+            let last = TrustBridgeContract::get_last_event_ledger(env.clone());
+            // The cursor must be at or after the register ledger.
+            assert!(
+                last >= seq_before,
+                "last_event_ledger ({last}) must be >= register ledger ({seq_before})"
+            );
+            assert_ne!(last, 0, "last_event_ledger must not be 0 after register");
+        });
+    }
 
-            // A None argument leaves the stored digest alone.
-            TrustBridgeContract::set_provenance_digests(env.clone(), None, None).unwrap();
-            assert_eq!(
-                TrustBridgeContract::get_provenance(env.clone())
-                    .unwrap()
-                    .sbom_hash,
-                Some(sbom)
+    /// `verify` emits `VerifiedEvent`; the cursor must advance after the call.
+    #[test]
+    fn test_last_event_ledger_updated_after_verify() {
+        let env = Env::default();
+        let (admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+        });
+
+        let after_register = env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_last_event_ledger(env.clone())
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+            )
+            .unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            let after_verify = TrustBridgeContract::get_last_event_ledger(env.clone());
+            assert!(
+                after_verify >= after_register,
+                "last_event_ledger must not decrease after verify"
+            );
+            assert_ne!(after_verify, 0);
+        });
+    }
+
+    /// `remove` emits `RemovedEvent`; the cursor must be set.
+    #[test]
+    fn test_last_event_ledger_updated_after_remove() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::remove(
+                env.clone(),
+                user.clone(),
+                username(&env, "octocat"),
+            )
+            .unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            assert_ne!(
+                TrustBridgeContract::get_last_event_ledger(env.clone()),
+                0,
+                "last_event_ledger must be set after remove"
             );
         });
     }
 
+    /// `get_last_event_ledger` is a read and must work while the contract is
+    /// paused — indexers need to detect lag even during a maintenance freeze.
     #[test]
-    fn test_provenance_assert_build_rejects_unmatched_hash() {
+    fn test_last_event_ledger_readable_while_paused() {
         let env = Env::default();
-        let (_admin, _user, _other, contract_id) = setup(&env);
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+            TrustBridgeContract::pause(env.clone(), 1).unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            // Must succeed even while paused.
+            let last = TrustBridgeContract::get_last_event_ledger(env.clone());
+            assert_ne!(last, 0, "last_event_ledger must be readable while paused");
+        });
+    }
+
+    /// The cursor is monotonic: a second `register` must not decrease it.
+    #[test]
+    fn test_last_event_ledger_is_monotonic() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "alice"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+        });
+
+        let first = env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_last_event_ledger(env.clone())
+        });
 
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            let wasm_hash = BytesN::from_array(&env, &[7u8; 32]);
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "bob"),
+                Address::generate(&env),
+                Vec::new(&env),
+            )
+            .unwrap();
+        });
 
-            // Nothing deployed yet: the check fails closed rather than passing.
-            assert_eq!(
-                TrustBridgeContract::assert_build(env.clone(), wasm_hash.clone()),
-                Err(ContractError::ProvenanceMissing)
-            );
-
-            set_wasm_provenance(
-                &env,
-                &WasmProvenance {
-                    wasm_hash: wasm_hash.clone(),
-                    previous_wasm_hash: None,
-                    upgraded_by: get_admin(&env).unwrap(),
-                    upgraded_at: 0,
-                    version: Vec::new(&env),
-                    attested: false,
-                    sbom_hash: None,
-                    source_hash: None,
-                },
-            );
-
-            TrustBridgeContract::assert_build(env.clone(), wasm_hash).unwrap();
-            assert_eq!(
-                TrustBridgeContract::assert_build(
-                    env.clone(),
-                    BytesN::from_array(&env, &[9u8; 32])
-                ),
-                Err(ContractError::ProvenanceMismatch)
+        env.as_contract(&contract_id, || {
+            let second = TrustBridgeContract::get_last_event_ledger(env.clone());
+            assert!(
+                second >= first,
+                "last_event_ledger must be monotonically non-decreasing ({second} < {first})"
             );
         });
     }

@@ -139,46 +139,72 @@ A new mutating function with no fuzz arm is a review blocker.
 
 ---
 
-## Hole Policy
+## Bounded Model-Check Proofs for Counter Invariants (Issue #241)
 
-The registry keeps two structures over the same username set: the legacy
-flat index (`INDEX_KEY`) and the chunked index (`CHUNK_KEY` pages). This
-section is the documented answer to "what does a hole mean here", so a test
-or reviewer has something to check the code against instead of inferring it
-from behavior.
+### Why bounded model checking instead of Kani
 
-**Membership holes are not allowed.** `remove_from_index` rewrites the flat
-index and the one chunk that held the removed entry to exclude it
-immediately — there is no tombstone state where a username remains
-enumerable in the index but has no record. This is an unconditional
-invariant:
+[Kani](https://model-checking.github.io/kani/) provides LLVM-level symbolic
+execution, but requires a separate LLVM toolchain and adds significant time to
+every CI run. The issue allows a smaller checker as long as it is
+machine-checked and not merely prose.
 
-> For every username in the flat index: it has a live record (`has_record`
-> is `true`) and it appears in exactly one chunk. For every username in any
-> chunk: it appears in the flat index. (I.e. index membership, chunk
-> membership, and record existence are always kept in lockstep — an "iff",
-> not just a one-directional guarantee.)
+The harnesses in `tests/counter_proofs.rs` use **exhaustive enumeration over
+small, bounded domains**: they cover every reachable state up to a bounded
+number of operations. For counter arithmetic with no unbounded loops this is
+equivalent to bounded model checking — a pass is a machine-verified proof for
+the bounded domain, not a probabilistic sample.
 
-**Capacity holes (chunk under-fill) are allowed.** A chunk can shrink below
-`CHUNK_SIZE` (50) entries after a removal, and a middle chunk can end up
-smaller than a later chunk — `remove_from_index` only rewrites the one
-chunk the removed entry was found in, it does not rebalance neighboring
-chunks. This is *not* a membership violation; it is expected fragmentation.
-`compact_index` (Issue #209) repacks the chunked index into dense,
-contiguous, `CHUNK_SIZE`-full pages plus one partial tail, and reclaims
-persistent entries for chunks it no longer needs — but compaction changes
-only chunk *density*, never index membership.
+### Proved invariants
 
-This is checked directly — not through `get_all_registered` or a paginated
-export, both of which silently skip any index entry with no backing record
-and so cannot themselves detect a membership violation — by
-`tests/registry_hole_policy.rs::test_index_membership_property_holds_across_register_remove_compact_sequence`
-and
-`...::test_index_membership_property_holds_at_chunk_boundary`, which read
-the flat index and every chunk directly out of storage and assert the iff
-property above across register/remove/compact sequences, including one that
-straddles a chunk boundary.
+| ID | Invariant | Harness | Bounded domain |
+|----|-----------|---------|----------------|
+| P1 | `verify` increments `verified_count` by exactly 1 | `proof_verify_increments_verified_count` | 1 register + 1 verify |
+| P1b | Verifying N records increments by exactly N | `proof_verify_increments_count_by_n` | N ∈ {2, 4, 8} |
+| P2 | `remove` of verified record decrements `verified_count` by 1 | `proof_remove_decrements_verified_count` | 1 register + 1 verify + 1 remove |
+| P3 | `remove` of unverified record does NOT touch `verified_count` | `proof_remove_does_not_decrement_count_for_unverified` | 1 register + 1 remove |
+| P4 | `verify` is idempotent — second call does NOT double-increment | `proof_verify_is_idempotent_on_verified_count` | 1 register + 2 verify |
+| P5 | `verified <= total` after every operation | `proof_verified_never_exceeds_total_exhaustive` | N ∈ {1, 2, 3, 4} × all phases |
+| P6 | Counters never underflow (saturating-arithmetic guard) | `proof_counters_never_underflow` | 32 remove-spam attempts; 4 register + partial verify + full remove |
+| P7 | `revoke_verification` decrements and is idempotent | `proof_revoke_decrements_and_is_idempotent` | 1 register + 1 verify + 2 revoke |
 
-| ID | Invariant | Enforced by |
-|----|-----------|-------------|
-| I10 | Flat-index membership, chunk membership, and record existence agree in both directions (no membership holes) | `tests/registry_hole_policy.rs` |
+### Running the proof harness
+
+```bash
+# Run all proof harnesses
+cargo test --test counter_proofs
+
+# Run with output (shows the bounded domain being exercised)
+cargo test --test counter_proofs -- --nocapture
+```
+
+CI runs these in the dedicated `counter-invariant-proofs` job
+(see `.github/workflows/ci.yml`). The job is also indirectly run by the main
+`quality` job via `cargo test` so every PR is covered.
+
+### Saturating vs wrapping counters
+
+The proofs in P6 specifically guard against the `saturating_sub` vs
+`wrapping_sub` distinction. The contract uses saturating arithmetic
+(`saturating_sub`) for all counter decrements, so an attempted underflow
+saturates to 0 rather than wrapping to `u32::MAX`. P6 asserts both that:
+
+1. Failed `remove` calls return `ContractError::NotRegistered` and leave
+   counters at 0 (no side effects on invalid input).
+2. After removing all records from a partially-verified registry, both
+   `total` and `verified` reach 0 and neither counter ever equals `u32::MAX`.
+
+### Unregistered-verify guard
+
+P3 documents the "unregistered verify" edge case: the contract returns
+`ContractError::NotRegistered` before touching any counter, so a verify
+call on a non-existent username cannot inflate `verified_count`. This is
+covered by the property-fuzzing suite (I7) and confirmed by P3 and P6.
+
+### Extending the proof suite
+
+When adding a contract function that mutates `total` or `verified`:
+
+1. Add a `proof_*` test in `tests/counter_proofs.rs`.
+2. Add a row to the table above with the bounded domain.
+3. Ensure the harness asserts the parity invariant (`stats().verified ==
+   get_verified_count()`) after every mutating step.

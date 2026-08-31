@@ -2,6 +2,24 @@
 
 TrustBridge emits events so dashboards and indexers can build a readable contributor timeline.
 
+## Lag detection (Issue #282)
+
+Before polling for new events, call `get_last_event_ledger()` on the contract.
+It returns the ledger **sequence** of the most recently emitted event, or `0`
+if the instance has not emitted any event yet.
+
+Compare the result against your indexer's persisted watermark (the last fully
+applied ledger sequence):
+
+- `watermark < last_event_ledger` → lag detected; fetch and apply events from
+  `(watermark+1, last_event_ledger]`, then advance the watermark.
+- `watermark >= last_event_ledger` → no known contract lag.
+
+The call is a single cheap instance-storage read. It is available while the
+contract is paused, so freeze windows do not block reconciliation. See
+[DASHBOARD_SYNC.md](DASHBOARD_SYNC.md#event-lag-signal-issue-282) for the full
+polling loop recipe and constraints.
+
 ## Reference indexer (`scripts/event_indexer.sh`, Issue #288)
 
 A runnable reference indexer now lives in the repo. It polls the Stellar RPC

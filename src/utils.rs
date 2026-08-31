@@ -5,9 +5,9 @@
 //! here works on a fixed stack buffer: the contract is `#![no_std]` and must
 //! not allocate on the validation path.
 
-// Some helpers here are staged ahead of their call sites: they are covered by
-// this module's own tests but are not yet wired into `lib.rs`.
-#![allow(dead_code)]
+// NOTE: The crate-level #![allow(dead_code)] has been removed (Issue #248).
+// Each helper that is not yet wired into a call site carries its own per-item
+// allow with an explanation below.
 
 use soroban_sdk::{Address, Env, String};
 
@@ -50,11 +50,19 @@ fn copy_into_buf(s: &String, buf: &mut [u8; USERNAME_BUF]) -> Option<usize> {
 }
 
 /// Check if a string is empty.
+///
+/// Staged: not yet wired into a call site in `lib.rs` — kept so future
+/// validation layers can use it without re-introducing the logic.
+#[allow(dead_code)] // Issue #248: covered by tests; staged for future input-guard call sites.
 pub fn is_empty(s: &String) -> bool {
     s.is_empty()
 }
 
 /// Check if a string is empty or contains only ASCII whitespace.
+///
+/// Staged: not yet wired into a call site in `lib.rs` — intended for a
+/// display-name validation layer that is tracked but not yet shipped.
+#[allow(dead_code)] // Issue #248: covered by tests; staged for display-name validation.
 pub fn is_empty_or_whitespace(s: &String) -> bool {
     let len = s.len() as usize;
     if len == 0 {
@@ -212,6 +220,10 @@ pub fn canonicalize_username(env: &Env, s: &String) -> String {
 }
 
 /// Calculate the percentage of verified contributors out of total.
+///
+/// Staged: not yet wired into a call site — intended for the dashboard
+/// stats endpoint once a percentage field is added to `Stats`.
+#[allow(dead_code)] // Issue #248: covered by tests; staged for Stats percentage field.
 pub fn calculate_verification_percentage(verified: u32, total: u32) -> u32 {
     if total == 0 {
         return 0;
@@ -220,6 +232,10 @@ pub fn calculate_verification_percentage(verified: u32, total: u32) -> u32 {
 }
 
 /// Generate a timestamped event ID for audit trails.
+///
+/// Staged: not yet wired into a call site — intended for a deduplicated
+/// audit-log path that assigns unique IDs to emitted events.
+#[allow(dead_code)] // Issue #248: covered by tests; staged for audit-log event-ID assignment.
 pub fn generate_event_id(env: &Env, nonce: u32) -> u64 {
     let timestamp = env.ledger().timestamp();
     (timestamp << 32) | (nonce as u64)
@@ -631,5 +647,35 @@ mod tests {
     #[test]
     fn test_percentage_does_not_overflow_at_u32_max() {
         assert_eq!(calculate_verification_percentage(u32::MAX, u32::MAX), 100);
+    }
+
+    // ── Event ID helper ───────────────────────────────────────────────────────
+
+    /// `generate_event_id` packs the ledger timestamp into the high 32 bits and
+    /// the nonce into the low 32 bits.
+    #[test]
+    fn test_generate_event_id_encodes_timestamp_and_nonce() {
+        let env = Env::default();
+        env.ledger().set_timestamp(42);
+        let id = generate_event_id(&env, 7);
+        assert_eq!(id >> 32, 42, "high 32 bits must be the ledger timestamp");
+        assert_eq!(id & 0xFFFF_FFFF, 7, "low 32 bits must be the nonce");
+    }
+
+    #[test]
+    fn test_generate_event_id_nonce_zero() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000_000);
+        let id = generate_event_id(&env, 0);
+        assert_eq!(id, 1_000_000u64 << 32);
+    }
+
+    #[test]
+    fn test_generate_event_id_different_nonces_differ() {
+        let env = Env::default();
+        env.ledger().set_timestamp(100);
+        let id_a = generate_event_id(&env, 1);
+        let id_b = generate_event_id(&env, 2);
+        assert_ne!(id_a, id_b);
     }
 }

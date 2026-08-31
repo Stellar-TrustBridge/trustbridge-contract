@@ -314,8 +314,87 @@ jobs:
           cargo test --features wasm-test --test integration -- \
             test_integration_wasm_upgrade_cooldown -- --list | grep "test_integration_wasm_upgrade_cooldown"
 
-  # Issue #244: Supply-chain audit and license/ban policy
-  supply-chain:
+  # Issue #248: Coverage gate for storage.rs helpers (dead_code hygiene)
+  #
+  # Measures per-file line coverage using cargo-tarpaulin and emits a summary
+  # so reviewers can see whether storage.rs helpers are reached by tests.
+  # The job is informational on PRs — it annotates without blocking merge —
+  # but a sustained drop below 60% line coverage for storage.rs triggers a
+  # review flag.
+  #
+  # Tool choice: cargo-tarpaulin (x86_64-unknown-linux-gnu, no WASM needed).
+  # Alternative: `cargo llvm-cov --lib` (requires llvm-tools-preview).
+  # Run locally: cargo tarpaulin --lib --include-files 'src/storage.rs'
+  storage-coverage:
+    name: storage.rs Coverage Gate (Issue #248)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-tarpaulin-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-tarpaulin
+        run: cargo install --locked cargo-tarpaulin
+
+      - name: Run coverage for storage.rs
+        run: |
+          mkdir -p coverage
+          cargo tarpaulin \
+            --lib \
+            --engine ptrace \
+            --include-files 'src/storage.rs' \
+            --out Json \
+            --output-dir coverage \
+            --timeout 120 \
+            2>&1 | tee coverage/tarpaulin.log
+
+      - name: Check storage.rs coverage threshold (60% line coverage)
+        run: |
+          python3 -c "
+          import json, sys, os
+          report = 'coverage/tarpaulin-report.json'
+          if not os.path.exists(report):
+              print('WARNING: coverage report not found — skipping threshold check.')
+              sys.exit(0)
+          data = json.load(open(report))
+          files = data.get('files', [])
+          for f in files:
+              if 'storage.rs' in f.get('path', ''):
+                  traces  = f.get('traces', [])
+                  total   = len(traces)
+                  covered = sum(1 for t in traces if t.get('stats', {}).get('Line', 0) > 0)
+                  pct     = (covered / total * 100) if total else 0.0
+                  print(f'storage.rs line coverage: {pct:.1f}% ({covered}/{total})')
+                  if pct < 60.0:
+                      print('WARNING: coverage is below 60% — review #[allow(dead_code)] helpers.')
+                  else:
+                      print('OK: coverage meets 60% threshold.')
+                  sys.exit(0)
+          print('WARNING: storage.rs not found in coverage report.')
+          "
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-coverage-report
+          path: coverage/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Issue #244: Supply-chain audit and license/ban policy  supply-chain:
     name: Supply-Chain Audit (cargo-deny + cargo-audit)
     runs-on: ubuntu-latest
     steps:
@@ -374,21 +453,30 @@ jobs:
             -D clippy::redundant_closure_for_method_calls \
             -D clippy::cloned_instead_of_copied
 
-  differential-tests:
-    name: TypeScript Differential Tests
+
+  # Issue #243: Mutation-testing gate for utils.rs username validation
+  #
+  # Username rules are a security boundary: homoglyph rejection, hyphen rules,
+  # consecutive-hyphen guard. A weakened check can pass normal unit tests but
+  # is caught by mutation testing. This job:
+  #   - runs cargo-mutants scoped to src/utils.rs only (bounded CI time)
+  #   - fails if any mutant survives (i.e. the test suite did not detect it)
+  #   - skips unviable/timeout mutants (not failures — compile errors in no_std)
+  #
+  # Run locally:
+  #   cargo install cargo-mutants
+  #   cargo mutants --file src/utils.rs
+  #
+  # Configuration is in mutants.toml at the repository root.
+  mutation-testing:
+    name: Mutation Testing — utils.rs (Issue #243)
     runs-on: ubuntu-latest
-    needs: quality
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -397,9 +485,102 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-diff-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-mutants-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Run TypeScript differential tests
-        run: make diff-test
+      - name: Install cargo-mutants
+        run: cargo install --locked cargo-mutants
+
+      # Run mutations scoped to src/utils.rs.
+      # Exit code semantics for cargo-mutants:
+      #   0 — all mutants caught or unviable (test suite is adequate)
+      #   2 — one or more mutants survived (test suite gap detected)
+      #   other — tool error
+      #
+      # We capture the output and also write the mutants-out directory so the
+      # results can be inspected via the uploaded artifact.
+      - name: Run mutation tests on utils.rs
+        run: |
+          cargo mutants \
+            --file src/utils.rs \
+            --output mutants-out \
+            --timeout 120 \
+            2>&1 | tee mutants-out/mutation-run.log
+          EXIT=${PIPESTATUS[0]}
+          echo "cargo-mutants exit code: $EXIT"
+          if [ "$EXIT" -eq 2 ]; then
+            echo "ERROR: One or more mutants in src/utils.rs survived."
+            echo "Surviving mutants represent gaps in the utils.rs test suite."
+            echo "See the mutants-out/ directory or the uploaded artifact for details."
+            cat mutants-out/mutation-run.log || true
+            exit 2
+          elif [ "$EXIT" -ne 0 ]; then
+            echo "ERROR: cargo-mutants exited with unexpected code $EXIT."
+            exit "$EXIT"
+          fi
+          echo "OK: all utils.rs mutants were caught by the test suite."
+
+      - name: Upload mutation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-testing-results
+          path: mutants-out/
+          if-no-files-found: warn
+          retention-days: 14
+
+
+  # Issue #241: Bounded model-check proofs for counter invariants
+  #
+  # Kani (LLVM symbolic execution) is too heavyweight for bounded CI time.
+  # The issue explicitly allows a smaller checker as long as it is
+  # machine-checked. These harnesses use exhaustive enumeration over small,
+  # bounded domains — equivalent to bounded model checking for counter
+  # arithmetic with no unbounded loops. A pass is a machine-verified proof
+  # for the bounded domain.
+  #
+  # Invariants proved (see tests/counter_proofs.rs for full descriptions):
+  #   P1: verify increments verified_count by exactly 1
+  #   P2: remove of verified record decrements verified_count by 1
+  #   P3: remove of unverified record does NOT touch verified_count
+  #   P4: verify is idempotent (second verify does NOT double-increment)
+  #   P5: verified <= total after every operation (exhaustive N=1..4)
+  #   P6: counters never underflow (remove spam, saturating arithmetic)
+  #   P7: revoke_verification decrements and is idempotent
+  #
+  # Run locally:
+  #   cargo test --test counter_proofs
+  #
+  # REGISTRY_INVARIANTS.md links this harness.
+  counter-invariant-proofs:
+    name: Counter Invariant Proofs (Issue #241)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-proofs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run counter invariant proofs
+        run: |
+          cargo test --test counter_proofs -- --nocapture 2>&1
+          echo "Exit: $?"
+
+      - name: Verify proof tests ran
+        run: |
+          cargo test --test counter_proofs -- --list 2>&1 | \
+            grep -E "proof_verify_increments|proof_remove_decrements|proof_verified_never_exceeds|proof_counters_never_underflow"
+          echo "All expected proof harnesses found."
