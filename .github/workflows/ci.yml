@@ -196,8 +196,87 @@ jobs:
           cargo test --features wasm-test --test integration -- \
             test_integration_wasm_upgrade_cooldown -- --list | grep "test_integration_wasm_upgrade_cooldown"
 
-  # Issue #244: Supply-chain audit and license/ban policy
-  supply-chain:
+  # Issue #248: Coverage gate for storage.rs helpers (dead_code hygiene)
+  #
+  # Measures per-file line coverage using cargo-tarpaulin and emits a summary
+  # so reviewers can see whether storage.rs helpers are reached by tests.
+  # The job is informational on PRs — it annotates without blocking merge —
+  # but a sustained drop below 60% line coverage for storage.rs triggers a
+  # review flag.
+  #
+  # Tool choice: cargo-tarpaulin (x86_64-unknown-linux-gnu, no WASM needed).
+  # Alternative: `cargo llvm-cov --lib` (requires llvm-tools-preview).
+  # Run locally: cargo tarpaulin --lib --include-files 'src/storage.rs'
+  storage-coverage:
+    name: storage.rs Coverage Gate (Issue #248)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-tarpaulin-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-tarpaulin
+        run: cargo install --locked cargo-tarpaulin
+
+      - name: Run coverage for storage.rs
+        run: |
+          mkdir -p coverage
+          cargo tarpaulin \
+            --lib \
+            --engine ptrace \
+            --include-files 'src/storage.rs' \
+            --out Json \
+            --output-dir coverage \
+            --timeout 120 \
+            2>&1 | tee coverage/tarpaulin.log
+
+      - name: Check storage.rs coverage threshold (60% line coverage)
+        run: |
+          python3 -c "
+          import json, sys, os
+          report = 'coverage/tarpaulin-report.json'
+          if not os.path.exists(report):
+              print('WARNING: coverage report not found — skipping threshold check.')
+              sys.exit(0)
+          data = json.load(open(report))
+          files = data.get('files', [])
+          for f in files:
+              if 'storage.rs' in f.get('path', ''):
+                  traces  = f.get('traces', [])
+                  total   = len(traces)
+                  covered = sum(1 for t in traces if t.get('stats', {}).get('Line', 0) > 0)
+                  pct     = (covered / total * 100) if total else 0.0
+                  print(f'storage.rs line coverage: {pct:.1f}% ({covered}/{total})')
+                  if pct < 60.0:
+                      print('WARNING: coverage is below 60% — review #[allow(dead_code)] helpers.')
+                  else:
+                      print('OK: coverage meets 60% threshold.')
+                  sys.exit(0)
+          print('WARNING: storage.rs not found in coverage report.')
+          "
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-coverage-report
+          path: coverage/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Issue #244: Supply-chain audit and license/ban policy  supply-chain:
     name: Supply-Chain Audit (cargo-deny + cargo-audit)
     runs-on: ubuntu-latest
     steps:

@@ -181,7 +181,44 @@ Update CI to Stellar CLI 26.1.0
 
 ---
 
-## Supply-Chain Audit (Issue #244)
+## Coverage (Issue #248)
+
+CI measures line coverage for `src/storage.rs` using `cargo-tarpaulin`. The
+threshold is 60% line coverage; sustained drops below that level trigger a
+review flag in the CI output. The job is non-blocking on PRs but annotates the
+run with a pass/warning message.
+
+### Running coverage locally
+
+```bash
+# Install tarpaulin (one-time)
+cargo install --locked cargo-tarpaulin
+
+# Coverage for storage.rs only
+cargo tarpaulin --lib --include-files 'src/storage.rs'
+
+# Full library coverage (slower)
+cargo tarpaulin --lib
+
+# Alternative: llvm-cov (requires nightly or llvm-tools-preview)
+rustup component add llvm-tools-preview
+cargo install cargo-llvm-cov
+cargo llvm-cov --lib
+```
+
+### dead_code hygiene policy
+
+Every `#[allow(dead_code)]` attribute in `src/` must:
+
+1. Have an inline comment explaining **why** it is staged and **what future
+   work** will wire it in (or a reference to the tracking issue).
+2. Be covered by at least one test in the same file's `#[cfg(test)]` module.
+
+The crate-level `#![allow(dead_code)]` in `utils.rs` has been removed in favour
+of per-item attributes (Issue #248). New crate-level dead_code suppressions are
+rejected in code review.
+
+---
 
 CI runs `cargo audit` and `cargo deny check` on every PR. These catch:
 
