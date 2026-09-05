@@ -26,9 +26,6 @@ Cargo.lock
 /bindings/
 node_modules/
 
-# Differential test fixtures are checked in (not generated)
-!ts-differential-tests/
-
 # Deployment artifacts
 /deployments/
 *.wasm
@@ -41,18 +38,10 @@ Thumbs.db
 # Stellar CLI local config (machine-specific)
 .stellar/
 
-# Local-only issue push helper (keep for next wave; do not commit)
+# Local scratch / issue drafts
 push_issues.sh
 issues.md
+issues*.md
 issues.d/
-
-issue.md
-pr.md
-
-# MiMoCode
-.mimocode/
-.mimocode
-
-# Python
-__pycache__/
-*.pyc
+.agents/
+.codex/

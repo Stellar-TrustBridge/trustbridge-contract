@@ -296,6 +296,8 @@ client fails fast instead of on an unexpected ABI. Full walkthrough:
 
 ## Documentation Index
 
+Full index: [docs/README.md](docs/README.md)
+
 | Document | Description |
 |----------|-------------|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Storage layout, auth model, event design, data flow |

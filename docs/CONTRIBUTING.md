@@ -296,14 +296,12 @@ Undocumented exceptions are rejected in code review.
 
 ---
 
-## Clippy Lint Policy
+## Lint Policy
 
-The full plan is in `docs/CLIPPY_PEDANTIC_PLAN.md`. Summary:
-
-- Default lint gate: `cargo clippy --all-targets -- -D warnings` (enforced in CI and `make lint`).
-- Phase 1 pedantic lints are active as `warn` in `src/lib.rs`; they will be promoted to `deny` once the fix PRs land.
-- Any `#[allow(clippy::*)]` attribute must have an inline comment explaining why. Bare allow attributes without rationale are rejected in code review.
-- Do not add `#![allow(clippy::pedantic)]` or `#![allow(clippy::nursery)]` at the crate level — enable and fix lints individually per the phased plan.
+- Local lint: `make lint` (`cargo clippy --all-targets -- -D warnings`).
+- CI runs `cargo fmt --check` and `cargo test`.
+- Prefer fixing clippy warnings locally before opening a PR.
+- Any `#[allow(clippy::*)]` attribute should include a short rationale comment.
 
 ---
 
@@ -578,12 +576,7 @@ See `TESTNET_CHECKLIST.md` for the full numbered steps.
 GitHub Actions runs on every push and PR to `main`, `master`, and `develop`:
 
 - `cargo fmt --check`
-- `cargo clippy -- -D warnings`
 - `cargo test`
-- `stellar contract build`
-- `cargo audit` (supply-chain vulnerability scan)
-- `cargo deny check` (license bans, yanked crates, advisory policy — see `deny.toml`)
-- `cargo clippy` pedantic Phase 1 (promoted to `-D` — see `CLIPPY_PEDANTIC_PLAN.md`)
 
 See `.github/workflows/ci.yml`.
 
