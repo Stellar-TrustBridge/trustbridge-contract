@@ -16,6 +16,7 @@ GITHUB_USER ?=
 STELLAR_ADDR ?=
 CALLER      ?=
 FUZZ_SEEDS  ?=
+FUZZ_RUNS   ?= 1000
 BENCH_OUT   ?= bench-results.txt
 NORM_BENCH_OUT ?= bench-username-normalization.txt
 REGISTER_BUDGET_CPU_MAX ?= 25000000
@@ -32,7 +33,7 @@ FUTURENET_FRIENDBOT_URL ?= https://friendbot-futurenet.stellar.org
 FUTURENET_IDENTITY ?= $(SOURCE)
 FUTURENET_DRY_RUN ?= false
 
-.PHONY: help build build-legacy test test-rehearsal fuzz storage-keys-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
+.PHONY: help build build-legacy test test-rehearsal fuzz fuzz-parser storage-keys-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
         ttl-keeper \
@@ -73,6 +74,9 @@ fuzz: ## Run the invariant property fuzzing suite (seeds: tests/fuzz/seeds.txt o
 	n=$$(echo "$$out" | sed -nE 's/^test result: ok\. ([0-9]+) passed.*/\1/p' | awk '{s+=$$1} END {print s+0}'); \
 	if [ "$$n" -eq 0 ]; then echo "make fuzz: no fuzz tests executed" >&2; exit 1; fi; \
 	echo "make fuzz: $$n fuzz tests passed"
+
+fuzz-parser: ## Fuzz export cursor parsing (install cargo-fuzz + nightly; FUZZ_RUNS=1000 for CI smoke, 0 for continuous)
+	cargo +nightly fuzz run export_cursor -- -runs=$(FUZZ_RUNS) -max_len=9 -timeout=5 -rss_limit_mb=1024
 
 storage-keys-check: ## Fail if a storage.rs key is missing from docs/STORAGE_KEYS.md
 	./scripts/check_storage_keys.sh

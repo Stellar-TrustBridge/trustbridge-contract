@@ -124,8 +124,21 @@ cargo test fuzz              # invariant suite only
 cargo test                   # full suite
 make fuzz                    # cargo test --lib fuzz; fails if 0 tests ran (CI runs this)
 make fuzz FUZZ_SEEDS=0x1,0x2,0x3,0x4   # explore with custom seeds
+make fuzz-parser                 # dedicated export-cursor libFuzzer smoke (1000 runs)
+make fuzz-parser FUZZ_RUNS=0     # keep fuzzing locally until interrupted
 make check                   # fmt + clippy + test + build
 ```
+
+The dedicated `fuzz/export_cursor` target calls the public paginated export
+with arbitrary 8-byte cursors and bounded page limits. It checks that valid
+offsets return bounded pages and malformed generations or out-of-range
+offsets return `InvalidCursor`, without traps or unbounded allocation. Its
+binary seeds live in `fuzz/corpus/export_cursor/`. Install `cargo-fuzz` and
+the Rust nightly toolchain before running `make fuzz-parser`; CI can use the
+default finite run count. Reproduce any crash from the saved artifact with
+`cargo +nightly fuzz run export_cursor fuzz/artifacts/export_cursor/<file>`
+and keep a minimized reproducer in the corpus. This parser target complements
+the deterministic registry-state invariant suite above.
 
 ### 10k-user pagination scale test
 

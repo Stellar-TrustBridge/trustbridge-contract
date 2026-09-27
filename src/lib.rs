@@ -6,6 +6,7 @@ mod domain;
 mod error;
 mod events;
 mod multisig_upgrade;
+mod oracle_proof;
 mod staged_wasm;
 mod storage;
 mod utils;
