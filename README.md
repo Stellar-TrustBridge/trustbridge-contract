@@ -424,3 +424,6 @@ Copyright © 2026 [Stellar-TrustBridge](https://github.com/Stellar-TrustBridge)
 
 <!-- handsoff-issue-403 -->
 - #403: Document and test fallback_addresses storage helpers
+
+<!-- handsoff-issue-404 -->
+- #404: Clarify entity_type in storage and ABI
