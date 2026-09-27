@@ -418,3 +418,6 @@ Copyright © 2026 [Stellar-TrustBridge](https://github.com/Stellar-TrustBridge)
 
 <!-- handsoff-issue-370 -->
 - #370: Implement public admin-transfer entry points documented in ABI
+
+<!-- handsoff-issue-376 -->
+- #376: Consolidate role gates onto has_role_or_admin
