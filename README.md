@@ -418,3 +418,6 @@ Copyright © 2026 [Stellar-TrustBridge](https://github.com/Stellar-TrustBridge)
 
 <!-- handsoff-issue-370 -->
 - #370: Implement public admin-transfer entry points documented in ABI
+
+<!-- handsoff-issue-405 -->
+- #405: Expose get_pending_reverify in client-facing ABI
