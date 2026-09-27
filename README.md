@@ -421,3 +421,6 @@ Copyright © 2026 [Stellar-TrustBridge](https://github.com/Stellar-TrustBridge)
 
 <!-- handsoff-issue-383 -->
 - #383: Add tests for role-grant timelock
+
+<!-- handsoff-issue-403 -->
+- #403: Document and test fallback_addresses storage helpers
