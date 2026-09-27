@@ -421,3 +421,6 @@ Copyright © 2026 [Stellar-TrustBridge](https://github.com/Stellar-TrustBridge)
 
 <!-- handsoff-issue-376 -->
 - #376: Consolidate role gates onto has_role_or_admin
+
+<!-- handsoff-issue-377 -->
+- #377: Fix stale ContractError rustdoc code table (codes 17+)
