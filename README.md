@@ -319,6 +319,27 @@ make invoke-stats CONTRACT_ID=$CONTRACT_ID
 
 More examples (verify, remove, admin export): [docs/ABI.md](docs/ABI.md)
 
+### Common admin operations
+
+The [admin runbook](docs/ADMIN_RUNBOOK.md#stellar-lab--cli-invoke-recipes)
+explains the authorization and recovery steps behind these Makefile targets.
+Set `CONTRACT_ID` (or `CONTRACT`), `NETWORK`, and the signing CLI identity
+`SOURCE`. The targets submit by default; add `SEND=no` to simulate first.
+
+```bash
+make invoke-pause CONTRACT_ID="$CONTRACT_ID" NETWORK=testnet SOURCE=admin
+make invoke-unpause CONTRACT_ID="$CONTRACT_ID" NETWORK=testnet SOURCE=admin
+make invoke-set-guardian CONTRACT_ID="$CONTRACT_ID" NETWORK=testnet SOURCE=admin GUARDIAN_ADDRESS=G...
+make invoke-set-role CONTRACT_ID="$CONTRACT_ID" NETWORK=testnet SOURCE=admin TARGET_ADDRESS=G... ROLE=Verifier
+make invoke-set-cooldown CONTRACT_ID="$CONTRACT_ID" NETWORK=testnet SOURCE=admin COOLDOWN_SECONDS=86400
+make invoke-adopt-network-tag CONTRACT_ID="$CONTRACT_ID" NETWORK=testnet SOURCE=admin SEND=no
+```
+
+`invoke-pause` uses reason code `1` (maintenance) and `invoke-unpause` uses
+code `4` (resume); override `PAUSE_REASON_CODE` or `UNPAUSE_REASON_CODE` for
+another documented reason. Run `make help` for the guardian, emergency pause,
+role removal, and idempotent `invoke-set-paused` targets.
+
 ---
 
 ## Contract ABI Summary

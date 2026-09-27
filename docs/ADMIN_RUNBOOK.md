@@ -75,6 +75,11 @@ stellar contract invoke --id "$CONTRACT_ID" --network "$NETWORK" -- --help
 stellar contract invoke --id "$CONTRACT_ID" --network "$NETWORK" -- <fn> --help
 ```
 
+For routine operations, use the [Makefile invoke targets](../README.md#common-admin-operations)
+with `CONTRACT_ID` (or `CONTRACT`), `NETWORK`, and `SOURCE` set explicitly.
+`make help` lists them. Set `SEND=no` to simulate before submitting; the direct
+CLI recipes below show the equivalent submitted commands.
+
 ### Conventions & auth gotchas
 
 | Item | Rule |
@@ -101,7 +106,7 @@ procedure; these are the bare invoke lines.
 
 ```bash
 stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
-  -- pause
+  -- pause --reason-code 1
 ```
 
 - **Auth:** admin only. **Works while paused:** yes (idempotent).
@@ -112,7 +117,7 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 
 ```bash
 stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
-  -- unpause
+  -- unpause --reason-code 4
 ```
 
 - **Auth:** admin only. Emits `UnpausedEvent`.
@@ -124,8 +129,12 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 
 ```bash
 stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
-  -- set_paused --paused true      # or --paused false
+  -- set_paused --paused true --reason-code 1
 ```
+
+Use `--paused false --reason-code 4` to resume. Reason codes are `1`
+maintenance, `2` security incident, `3` regulatory hold, `4` unpause, and
+`99` other.
 
 - **Auth:** admin only. Emits `PausedEvent` / `UnpausedEvent` **only on a state
   change** (Issue #197) — a no-op call is silent, which is what makes it safe
