@@ -38,6 +38,21 @@ jobs:
       - name: Rustdoc
         run: make docs-check
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: ts-differential-tests/package-lock.json
+
+      - name: Install locked dependencies
+        working-directory: ts-differential-tests
+        run: npm ci
+
+      - name: Compare JS decoding with Rust golden
+        working-directory: ts-differential-tests
+        run: npm test
+
   build:
     name: Contract build + WASM hash gate
     runs-on: ubuntu-latest

@@ -22,7 +22,7 @@ differential tests verify that TypeScript XDR decoding matches Rust contract out
 2. **Check in fixtures**: Copy the XDR output and expected values to
    `ts-differential-tests/fixtures/*.xdr` and `*.address` files.
 
-3. **TypeScript decode test**: Run `make diff-test` (or CI job `differential-tests`)
+3. **TypeScript decode test**: Run `make diff-test` (or the CI `quality` job)
    to decode the XDR using the Stellar TypeScript SDK and compare against the golden
    Rust values.
 
@@ -48,9 +48,8 @@ uploads the file as the `bindings-golden-fixtures` artifact for
 
 ### CI Integration
 
-The `differential-tests` CI job runs after the main quality gate and verifies
-TypeScript decode matches Rust golden values. This catches ABI drift early in
-the PR pipeline.
+The CI `quality` job runs the TypeScript decoder after Rust checks and verifies
+it matches Rust golden values. A mismatch fails the same PR quality check.
 
 ---
 
