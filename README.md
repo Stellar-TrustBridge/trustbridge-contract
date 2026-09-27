@@ -424,3 +424,6 @@ Copyright © 2026 [Stellar-TrustBridge](https://github.com/Stellar-TrustBridge)
 
 <!-- handsoff-issue-377 -->
 - #377: Fix stale ContractError rustdoc code table (codes 17+)
+
+<!-- handsoff-issue-381 -->
+- #381: Add integration tests for staged WASM flow
