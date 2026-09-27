@@ -6,6 +6,7 @@ mod domain;
 mod error;
 mod events;
 mod multisig_upgrade;
+mod oracle_proof;
 mod staged_wasm;
 mod storage;
 mod utils;
@@ -178,6 +179,9 @@ impl TrustBridgeContract {
     ///
     /// Returns [`ContractError::AlreadyInitialized`] if `initialize` has already been called.
     pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
+        // A restored instance from another network must fail closed even when
+        // the admin key is already present. Fresh instances have no tag yet.
+        crate::storage::require_matching_network(&env)?;
         if env.storage().instance().has(&ADMIN_KEY) {
             return Err(ContractError::AlreadyInitialized);
         }
@@ -12552,6 +12556,79 @@ mod test {
                 crate::storage::require_initialized(&env),
                 Err(ContractError::NetworkMismatch)
             );
+        });
+    }
+
+    #[test]
+    fn mutating_entry_points_reject_foreign_network_before_writing() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, user, _, contract_id) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            let foreign = BytesN::from_array(&env, &[0xAB; 32]);
+            crate::storage::set_network_id(&env, &foreign);
+
+            // Initialization, ordinary writes, delegated batch writes, and
+            // permissionless maintenance all reject the restored state.
+            assert_eq!(
+                TrustBridgeContract::initialize(env.clone(), admin.clone()),
+                Err(ContractError::NetworkMismatch)
+            );
+            assert_eq!(
+                TrustBridgeContract::register(
+                    env.clone(),
+                    username(&env, "alice"),
+                    user,
+                    Vec::new(&env),
+                ),
+                Err(ContractError::NetworkMismatch)
+            );
+            assert_eq!(
+                TrustBridgeContract::batch_verify(env.clone(), admin.clone(), Vec::new(&env)),
+                Err(ContractError::NetworkMismatch)
+            );
+            assert_eq!(
+                TrustBridgeContract::prune_expired_verifiers(env.clone()),
+                Err(ContractError::NetworkMismatch)
+            );
+            assert_eq!(
+                TrustBridgeContract::pause(env.clone(), PauseReason::Maintenance as u32),
+                Err(ContractError::NetworkMismatch)
+            );
+            assert_eq!(
+                TrustBridgeContract::compact_index(env.clone()),
+                Err(ContractError::NetworkMismatch)
+            );
+            assert_eq!(
+                TrustBridgeContract::adopt_network_tag(env.clone()),
+                Err(ContractError::NetworkMismatch)
+            );
+
+            assert_eq!(crate::storage::get_network_id(&env), Some(foreign));
+            assert_eq!(crate::storage::get_count(&env), 0);
+            assert!(!crate::storage::is_paused(&env));
+        });
+    }
+
+    #[test]
+    fn matching_and_legacy_untagged_state_keep_mutation_behavior() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, contract_id) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::initialize(env.clone(), admin.clone()),
+                Err(ContractError::AlreadyInitialized)
+            );
+
+            // Pre-network-tagging deployments have no recorded id and remain
+            // usable until an admin explicitly adopts the current network.
+            env.storage().instance().remove(&crate::storage::NETWORK_KEY);
+            assert_eq!(TrustBridgeContract::set_cooldown(env.clone(), 42), Ok(()));
+            assert_eq!(crate::storage::get_cooldown(&env), 42);
+            assert_eq!(crate::storage::get_network_id(&env), None);
         });
     }
 

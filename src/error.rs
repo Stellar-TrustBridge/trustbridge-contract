@@ -147,8 +147,8 @@ pub enum ContractError {
     /// A gated call was made on instance state whose recorded network id does
     /// not match the network executing it (Issue #231 / #401).
     ///
-    /// Raised by `storage::require_matching_network`, which rides along inside
-    /// `require_initialized` so a new entry point cannot forget the check.
+    /// Raised by `storage::require_matching_network`, directly in `initialize`
+    /// and through `require_initialized` in later guarded entry points.
     /// State restored onto the wrong network is the case this catches — a
     /// testnet snapshot replayed against mainnet, or the reverse.
     ///
