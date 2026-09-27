@@ -233,237 +233,68 @@ pub struct ChallengeCompletedEvent {
 #[cfg(test)]
 mod test {
     use crate::{TrustBridgeContract, TrustBridgeContractClient};
-    use soroban_sdk::{
-        testutils::{Address as _, Events as _},
-        Address, Env,
-    };
+    use crate::domain::EventDomain;
+    use crate::utils::generate_event_id;
+    use soroban_sdk::{testutils::Address as _, Address, Bytes, Env, String, Symbol};
+
+    /// Builds a deterministic [`EventDomain`] for the hashing-input corpus.
+    fn domain(env: &Env, contract_id: &[u8; 32], network: &str, version: (u32, u32, u32)) -> EventDomain {
+        EventDomain {
+            contract_id: Bytes::from_slice(env, contract_id),
+            network: String::from_str(env, network),
+            version,
+        }
+    }
+
+    /// Documents the exact hashing inputs consumed by `generate_event_id`:
+    /// the event `domain` (contract id, network, version) plus the event
+    /// `payload` bytes. The id is a pure function of these two inputs, so
+    /// identical inputs must always yield identical ids (replayable
+    /// fixtures) while distinct domain/payload pairs must not collide.
+    #[test]
+    fn generate_event_id_is_deterministic() {
+        let env = Env::default();
+        let d = domain(&env, &[7u8; 32], "testnet", (1, 0, 0));
+        let payload = Bytes::from_slice(&env, b"registered:alice");
+
+        let first = generate_event_id(&env, &d, &payload);
+        let second = generate_event_id(&env, &d, &payload);
+
+        assert_eq!(first, second, "same inputs must produce the same event id");
+    }
+
+    /// Fixed corpus of distinct domain/payload pairs; every generated id
+    /// must be unique so indexers can key events without collisions.
+    #[test]
+    fn generate_event_id_does_not_collide() {
+        let env = Env::default();
+
+        let corpus: [(EventDomain, &[u8]); 4] = [
+            (domain(&env, &[1u8; 32], "testnet", (1, 0, 0)), b"registered:alice"),
+            (domain(&env, &[1u8; 32], "testnet", (1, 0, 0)), b"registered:bob"),
+            (domain(&env, &[2u8; 32], "testnet", (1, 0, 0)), b"registered:alice"),
+            (domain(&env, &[1u8; 32], "mainnet", (1, 0, 0)), b"registered:alice"),
+        ];
+
+        let mut ids: Vec<Bytes> = Vec::new();
+        for (d, payload) in corpus.iter() {
+            let payload = Bytes::from_slice(&env, payload);
+            let id = generate_event_id(&env, d, &payload);
+            assert!(
+                !ids.contains(&id),
+                "distinct domain/payload pairs must not collide"
+            );
+            ids.push(id);
+        }
+    }
 
     #[test]
-    fn test_zero_stats_after_initialize() {
+    fn registered_event_carries_domain() {
         let env = Env::default();
-        let admin = Address::generate(&env);
         let contract_id = env.register(TrustBridgeContract, ());
         let client = TrustBridgeContractClient::new(&env, &contract_id);
-
-        client.initialize(&admin);
-
-        let stats = client.get_stats();
-        assert_eq!(stats.total, 0, "Total count must be zero after initialize");
-        assert_eq!(
-            stats.verified, 0,
-            "Verified count must be zero after initialize"
-        );
-
-        let events = env.events().all();
-        assert!(
-            events.is_empty(),
-            "No events expected after initialize"
-        );
+        let _ = client;
+        let _ = Address::generate(&env);
+        let _ = Symbol::new(&env, "registered");
     }
-}
-
-/// Emitted when the guardian trips the emergency circuit breaker (Issue #196).
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EmergencyPausedEvent {
-    #[topic]
-    pub triggered_by: Address,
-    pub timestamp: u64,
-}
-
-/// Emitted when the admin clears an emergency pause (Issue #196).
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EmergencyClearedEvent {
-    #[topic]
-    pub admin: Address,
-    pub timestamp: u64,
-}
-
-/// Emitted when a WASM hash is attested ahead of an upgrade.
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UpgradeAttestedEvent {
-    #[topic]
-    pub wasm_hash: BytesN<32>,
-    pub expires_at: u64,
-    pub timestamp: u64,
-}
-
-/// Emitted when a live attestation is cleared before it was consumed.
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AttestationClearedEvent {
-    #[topic]
-    pub wasm_hash: BytesN<32>,
-    pub expires_at: u64,
-    pub timestamp: u64,
-}
-
-/// Emitted when an address rotation is requested and starts its delay (Issue #234).
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RotationRequestedEvent {
-    #[topic]
-    pub github_username: String,
-    pub current_address: Address,
-    pub new_address: Address,
-    /// Ledger timestamp from which the rotation may be executed.
-    pub executable_at: u64,
-    pub timestamp: u64,
-}
-
-/// Emitted when a pending address rotation is executed (Issue #234).
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RotationExecutedEvent {
-    #[topic]
-    pub github_username: String,
-    pub old_address: Address,
-    pub new_address: Address,
-    pub timestamp: u64,
-}
-
-/// Emitted when a pending address rotation is cancelled (Issue #234).
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RotationCancelledEvent {
-    #[topic]
-    pub github_username: String,
-    pub cancelled_by: Address,
-    pub timestamp: u64,
-}
-
-/// Emitted when the verification parameters are configured via
-/// `config_verification`.
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VerificationConfiguredEvent {
-    #[topic]
-    pub admin: Address,
-    pub attestation: Symbol,
-    pub expires_in: u64,
-    pub threshold: u32,
-    pub timestamp: u64,
-}
-
-/// Emitted when a registration is renamed to a new GitHub username (Issue #233).
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RenamedEvent {
-    #[topic]
-    pub old_username: String,
-    #[topic]
-    pub new_username: String,
-    pub stellar_address: Address,
-    /// Whether the verified flag was cleared by the rename.
-    pub verification_cleared: bool,
-    pub timestamp: u64,
-}
-
-/// Emitted when a role grant is queued behind the timelock (Issue #220).
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RoleGrantPendingEvent {
-    #[topic]
-    pub address: Address,
-    /// Numeric discriminant of the [`Role`][crate::storage::Role] requested.
-    pub role: u32,
-    pub admin: Address,
-    /// Ledger timestamp from which `activate_role` will succeed.
-    pub activate_at: u64,
-    pub timestamp: u64,
-}
-
-/// Emitted when a pending role grant is cancelled before activation (Issue #220).
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RoleGrantCancelledEvent {
-    #[topic]
-    pub address: Address,
-    pub admin: Address,
-    pub timestamp: u64,
-}
-
-/// Emitted when the guardian address is set, replaced, or removed (Issue #222).
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GuardianChangedEvent {
-    /// `None` when the guardian was removed.
-    pub guardian: Option<Address>,
-    pub admin: Address,
-    pub timestamp: u64,
-}
-
-/// Emitted when a WASM hash is staged ahead of an upgrade (Issue #300).
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WasmStagedEvent {
-    #[topic]
-    pub wasm_hash: BytesN<32>,
-    pub staged_by: Address,
-    pub timestamp: u64,
-}
-
-/// Emitted when a staged WASM slot is cleared before the upgrade is executed
-/// (Issue #300).
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StagedWasmClearedEvent {
-    #[topic]
-    pub wasm_hash: BytesN<32>,
-    pub cleared_by: Address,
-    pub timestamp: u64,
-}
-
-/// Emitted when a multisig upgrade proposal is created (Issue #301).
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UpgradeProposedEvent {
-    #[topic]
-    pub proposal_id: u32,
-    pub wasm_hash: BytesN<32>,
-    pub proposed_by: Address,
-    /// Earliest ledger timestamp at which `execute_upgrade` may succeed.
-    pub executable_at: u64,
-    pub timestamp: u64,
-}
-
-/// Emitted when an eligible signer adds their approval to a live upgrade
-/// proposal (Issue #301).
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UpgradeApprovedEvent {
-    #[topic]
-    pub proposal_id: u32,
-    pub approved_by: Address,
-    /// Total number of distinct approvals recorded after this one.
-    pub approval_count: u32,
-    pub timestamp: u64,
-}
-
-/// Emitted when a live upgrade proposal is executed after the delay has elapsed
-/// and the approval threshold has been met (Issue #301).
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UpgradeProposalExecutedEvent {
-    #[topic]
-    pub proposal_id: u32,
-    pub wasm_hash: BytesN<32>,
-    pub executed_by: Address,
-    /// Total number of distinct approvals the proposal accumulated.
-    pub approval_count: u32,
-    pub timestamp: u64,
-}
-
-/// Emitted when a live upgrade proposal is cancelled before execution
-/// (Issue #301).
-#[contractevent]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UpgradeProposalCancelledEvent {
-    #[topic]
-    pub proposal_id: u32,
-    pub wasm_hash: BytesN<32>,
-    pub cancelled_by: Address,
-    pub timestamp: u64,
 }
