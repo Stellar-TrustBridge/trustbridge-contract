@@ -51,7 +51,7 @@ This contract provides that mapping **on-chain**:
 - `revoke_verification` — admin or `Verifier`-role holder revokes verified status
 - `get_all_registered` — admin-only full export for dashboard sync
 - `scripts/export_registry.sh` / `scripts/validate_registry.sh` — CLI export to JSON and validate-only diff against live state (see [Registry Export & Import](docs/DEPLOYMENT.md#registry-export--import))
-- `scripts/trustbridge_client.py` — typed Python wrappers for operator reads and batch operations
+- `scripts/trustbridge_client.py` — typed Python wrappers for operator reads and batch operations. CLI/RPC failures raise `StellarCLIError` with an actionable `HINT:` line on stderr; operator scripts exit `0` on success and non-zero on failure (see [Admin Runbook](docs/ADMIN_RUNBOOK.md#python-operator-client))
 - `get_stats` — total and verified registration counts
 - `pause` / `unpause` / `is_paused` — emergency circuit breaker to pause mutating contract state
 - `set_role` / `remove_role` / `get_role` — Role-Based Access Control (`Admin`, `Upgrader`, `Verifier`, `Revoker`) — see [ABI Role Matrix](docs/ABI.md#role-u32-discriminant) and [Architecture](docs/ARCHITECTURE.md#authorization-model) for details.
@@ -233,10 +233,19 @@ on every PR.
 
 ### Devcontainer / Codespaces
 
-The repository devcontainer installs Stellar CLI `26.1.0` and the required
-`wasm32v1-none` target. After reopening the repository in the container, verify
-the toolchain with `stellar --version` and
-`rustup target list --installed | grep wasm32v1-none`.
+The repository `.devcontainer` installs everything the Makefile test targets
+need: Stellar CLI `26.1.0`, the `wasm32v1-none` (plus legacy) targets,
+Python 3, `jq`, and Node LTS (for `make diff-test` / bindings). No secrets
+are baked into the image — sign with `stellar keys` identities at runtime.
+
+Open it via **Remote-Containers: Reopen in Container** (or GitHub Codespaces
+on this repo), then smoke-verify the fresh container with:
+
+```bash
+stellar --version
+rustup target list --installed | grep wasm32v1-none
+make test          # unit-suite smoke test for a fresh container
+```
 
 > **Note on WASM targets:** `soroban-sdk` 26.x requires the `wasm32v1-none` target. Building with `wasm32-unknown-unknown` on Rust 1.82+ is unsupported by the Soroban environment. The release profile uses `opt-level = "z"` and `lto = true` as specified in `Cargo.toml`.
 

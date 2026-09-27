@@ -58,6 +58,34 @@ operation with an actionable error instead of being inferred with `grep` or
 `jq`. Keep the Stellar CLI identity and network explicit for every operation;
 the WASM hash remains independently checked by `make wasm-hash-pin`.
 
+### Error handling and exit codes
+
+`StellarCLIError` appends a `HINT:` line for common failure classes so the
+next step is visible without re-reading CLI internals:
+
+| Failure text (stderr) | Hint points at |
+|---|---|
+| RPC connect / reset / timeout / DNS | `--network` / `NETWORK`, RPC connectivity, retry with backoff |
+| Contract ID not found | `CONTRACT_ID` and network-vs-deployment mismatch |
+| Account missing / unfunded / insufficient balance | `SOURCE` funding on that network |
+| `require_auth` / not authorized / signature | `--caller` must equal the signing `--source-account` |
+| Contract paused | `is_paused` / `is_emergency_paused` before retrying writes |
+| Rate-limited / overloaded RPC | Backoff, slower pacing, smaller `--page-limit` |
+| CLI binary missing / not executable | Install `stellar-cli >= 26.x`, `PATH`, or `STELLAR=<path>` |
+| Non-JSON CLI output | CLI version and live `<fn> --help` signature match |
+
+Exit contract for `scripts/export_registry.py` and
+`scripts/payout_allowlist.py` (both delegate to this client):
+
+- `0` — success; the artifact was written.
+- `1` — CLI/RPC failure, malformed response, pagination stall, or invalid
+  response shape. The `ERROR:` line goes to stderr and carries the hint.
+- `2` — argument/config errors via `argparse` (missing `--contract` /
+  `CONTRACT_ID`, bad `--page-limit`).
+
+These examples keep working unchanged — same environment-variable interface,
+same commands as above. Only the failure output is richer.
+
 ---
 
 ## Stellar Lab & CLI invoke recipes

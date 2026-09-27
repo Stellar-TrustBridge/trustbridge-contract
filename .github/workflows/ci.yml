@@ -38,6 +38,9 @@ jobs:
       - name: Rustdoc
         run: make docs-check
 
+      - name: ABI JSON freshness
+        run: make abi-check
+
   build:
     name: Contract build + WASM hash gate
     runs-on: ubuntu-latest

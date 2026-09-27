@@ -32,7 +32,7 @@ FUTURENET_FRIENDBOT_URL ?= https://friendbot-futurenet.stellar.org
 FUTURENET_IDENTITY ?= $(SOURCE)
 FUTURENET_DRY_RUN ?= false
 
-.PHONY: help build build-legacy test test-rehearsal fuzz storage-keys-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
+.PHONY: help build build-legacy test test-rehearsal fuzz storage-keys-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi abi-check check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
         ttl-keeper \
@@ -177,6 +177,9 @@ docs-check: ## Build rustdoc without opening browser (CI-equivalent)
 abi: ## Generate the machine-readable ABI JSON artifact
 	python3 scripts/generate_abi_json.py
 
+abi-check: ## Fail if docs/abi.json is stale vs docs/ABI.md (no files written)
+	python3 scripts/generate_abi_json.py --check
+
 wasm-size: build ## Report release WASM size and check against budget (WASM_SIZE_LIMIT)
 	@if [ -f $(WASM_V1) ]; then \
 		WASM=$(WASM_V1); \
@@ -213,7 +216,7 @@ error-codes: ## Verify ContractError discriminants agree across enum, golden, an
 event-topics: ## Verify the indexer's topic table matches src/events.rs (Issue #399)
 	./scripts/check_event_topics.sh
 
-check: fmt lint error-codes event-topics test build docs-check wasm-size ## Run full local quality gate
+check: fmt lint error-codes event-topics abi-check test build docs-check wasm-size ## Run full local quality gate
 
 wasm-hash-pin: build ## Verify release WASM hash matches wasm-hash.pin (mirrors CI hash gate)
 	@if [ -f $(WASM_V1) ]; then WASM=$(WASM_V1); elif [ -f $(WASM_LEGACY) ]; then WASM=$(WASM_LEGACY); else echo "ERROR: No WASM artifact found. Run 'make build' first."; exit 1; fi; \
