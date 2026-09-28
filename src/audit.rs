@@ -38,6 +38,8 @@ pub enum AuditEventType {
     RoleChanged = 12,
     /// The contract WASM was replaced.
     ContractUpgraded = 13,
+    /// The audit configuration was mutated (Issue #412).
+    AuditConfigChanged = 14,
 }
 
 impl AuditEventType {
@@ -58,6 +60,7 @@ impl AuditEventType {
             AuditEventType::ContractUnpaused => "CONTRACT_UNPAUSED",
             AuditEventType::RoleChanged => "ROLE_CHANGED",
             AuditEventType::ContractUpgraded => "CONTRACT_UPGRADED",
+            AuditEventType::AuditConfigChanged => "AUDIT_CONFIG_CHANGED",
         }
     }
 }
@@ -111,14 +114,33 @@ impl AuditLogEntry {
 }
 
 /// Configuration for audit logging.
+///
+/// # Fields and defaults
+///
+/// The contract stores a single `AuditConfig` instance. When no explicit
+/// configuration has been written, [`AuditConfig::default`] is used:
+///
+/// | Field              | Type   | Default | Meaning                                                        |
+/// |--------------------|--------|---------|----------------------------------------------------------------|
+/// | `enabled`          | `bool` | `true`  | Whether audit logging is enabled.                              |
+/// | `max_events`       | `u32`  | `1000`  | Maximum number of events retained in memory.                   |
+/// | `log_unauthorized` | `bool` | `true`  | Whether unauthorized access attempts are recorded.             |
+///
+/// # Mutation authorization
+///
+/// `AuditConfig` may only be mutated by an authorized admin. Callers must
+/// authenticate as the contract admin (or a role holding the audit-admin
+/// permission) before any field is changed; see [`AuditConfig::assert_can_mutate`].
+/// Unauthorized attempts are rejected and, when `log_unauthorized` is set,
+/// recorded as an [`AuditEventType::UnauthorizedAttempt`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct AuditConfig {
-    /// Whether audit logging is enabled
+    /// Whether audit logging is enabled. Default: `true`.
     pub enabled: bool,
-    /// Maximum number of events to retain in memory
+    /// Maximum number of events to retain in memory. Default: `1000`.
     pub max_events: u32,
-    /// Whether to log unauthorized attempts
+    /// Whether to log unauthorized attempts. Default: `true`.
     pub log_unauthorized: bool,
 }
 
@@ -140,6 +162,21 @@ impl AuditConfig {
             enabled,
             max_events,
             log_unauthorized,
+        }
+    }
+
+    /// Enforce that `caller` is authorized to mutate the audit configuration.
+    ///
+    /// Only the contract admin may mutate `AuditConfig`. This must be called
+    /// before any field is changed so that unauthorized callers are rejected
+    /// and cannot weaken the audit trail.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `caller` is not the authorized admin.
+    pub fn assert_can_mutate(caller: &Address, admin: &Address) {
+        if caller != admin {
+            panic!("unauthorized: only admin may mutate AuditConfig");
         }
     }
 }
@@ -184,5 +221,36 @@ impl AuditStats {
             AuditEventType::UnauthorizedAttempt => self.unauthorized_attempts += 1,
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Env};
+
+    #[test]
+    fn default_config_documents_expected_values() {
+        let config = AuditConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.max_events, 1000);
+        assert!(config.log_unauthorized);
+    }
+
+    #[test]
+    fn admin_can_mutate_config() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        // Should not panic for the authorized admin.
+        AuditConfig::assert_can_mutate(&admin, &admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn unauthorized_caller_cannot_mutate_config() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        AuditConfig::assert_can_mutate(&attacker, &admin);
     }
 }

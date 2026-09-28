@@ -32,8 +32,8 @@
 //! network tag is exactly the sort of field that gets copy-pasted from a
 //! testnet runbook into a mainnet deploy.
 //!
-//! `initialize` records the network id it saw. Every later read compares the
-//! live network against that record — see
+//! `initialize` records the network id it saw. Every later guarded call compares
+//! the live network against that record — see
 //! [`require_matching_network`][crate::storage::require_matching_network] — so
 //! state restored onto a different network fails closed instead of silently
 //! serving records that were never meant for it.
@@ -88,3 +88,14 @@ impl EventDomain {
         }
     }
 }
+
+/// Topic symbol used to tag emergency lifecycle events with their domain.
+///
+/// Emergency pause/unpause events are emitted from paths that do not go
+/// through the regular registration/upgrade emitters, so they previously
+/// carried ad-hoc topics with no [`EventDomain`]. Indexers that filter by
+/// domain therefore dropped them. This constant names the shared topic so
+/// `events.rs` can reuse it instead of spelling the symbol out at each call
+/// site, keeping the emergency emitters consistent with the rest of the
+/// contract.
+pub const EMERGENCY_DOMAIN_TOPIC: &str = "emergency_domain";

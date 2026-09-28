@@ -60,10 +60,10 @@ pub use oracle_proof::{
 };
 pub use staged_wasm::StagedWasm;
 pub use storage::{
-    ChallengeRecord, ContributorRecord, ExportAttestation, ExportPage, HealthSnapshot, PauseReason,
-    PendingBatchRemove, PendingRoleGrant, PendingRotation, RecordProof, RepairReport, Role,
-    RoleHolder, Stats, VerificationConfig, VerifierAllowEntry, WasmAttestation, WasmProvenance,
-    MAX_VERIFIERS,
+    ChallengeRecord, ContributorRecord, ExportAttestation, ExportPage, ExportRecord, HealthSnapshot,
+    PauseReason, PendingBatchRemove, PendingRoleGrant, PendingRotation, RecordProof, RepairReport,
+    Role, RoleHolder, Stats, VerificationConfig, VerifierAllowEntry, WasmAttestation,
+    WasmProvenance, EXPORT_PAGE_LAYOUT_VERSION, MAX_VERIFIERS,
 };
 pub use version::Version;
 
@@ -92,12 +92,13 @@ use crate::storage::{
     remove_from_index, remove_guardian as storage_remove_guardian, remove_pending_role,
     remove_pending_rotation, remove_record, remove_role as storage_remove_role,
     remove_verifier as storage_remove_verifier, remove_wasm_attestation, require_initialized,
-    require_not_paused, run_migration_steps, set_challenge, set_cooldown as storage_set_cooldown,
-    set_count, set_ever_verified_count, set_last_action, set_last_event_ledger, set_last_upgrade,
-    set_paused as set_paused_state, set_pending_reverify, set_pending_role, set_pending_rotation,
-    set_record, set_role as storage_set_role, set_role_delay as storage_set_role_delay,
-    set_rotation_delay as storage_set_rotation_delay, set_verified_count, set_version,
-    set_wasm_attestation, set_wasm_provenance, verifier_allowlist_active, verifier_slots_remaining,
+    require_not_paused, require_role_not_expired, run_migration_steps, set_challenge,
+    set_cooldown as storage_set_cooldown, set_count, set_ever_verified_count, set_last_action,
+    set_last_event_ledger, set_last_upgrade, set_paused as set_paused_state, set_pending_reverify,
+    set_pending_role, set_pending_rotation, set_record, set_role as storage_set_role,
+    set_role_delay as storage_set_role_delay, set_rotation_delay as storage_set_rotation_delay,
+    set_verified_count, set_version, set_wasm_attestation, set_wasm_provenance,
+    verifier_allowlist_active, verifier_slots_remaining,
     PendingRoleGrant as PendingRoleGrantRecord, ADMIN_KEY, DEFAULT_CHALLENGE_DELAY_SECS,
 };
 
@@ -180,6 +181,9 @@ impl TrustBridgeContract {
     ///
     /// Returns [`ContractError::AlreadyInitialized`] if `initialize` has already been called.
     pub fn initialize(env: Env, admin: Address) -> Result<(), ContractError> {
+        // A restored instance from another network must fail closed even when
+        // the admin key is already present. Fresh instances have no tag yet.
+        crate::storage::require_matching_network(&env)?;
         if env.storage().instance().has(&ADMIN_KEY) {
             return Err(ContractError::AlreadyInitialized);
         }
@@ -1430,6 +1434,9 @@ impl TrustBridgeContract {
         caller.require_auth();
 
         let admin = get_admin(&env)?;
+        if caller != admin {
+            require_role_not_expired(&env, &caller)?;
+        }
         let role = storage_get_role(&env, &caller);
         let is_upgrader = matches!(role, Some(crate::storage::Role::Upgrader));
         if caller != admin && !is_upgrader {
@@ -1564,6 +1571,9 @@ impl TrustBridgeContract {
         caller.require_auth();
 
         let admin = get_admin(&env)?;
+        if caller != admin {
+            require_role_not_expired(&env, &caller)?;
+        }
         let role = storage_get_role(&env, &caller);
         let is_upgrader = matches!(role, Some(crate::storage::Role::Upgrader));
         if caller != admin && !is_upgrader {
@@ -1613,6 +1623,9 @@ impl TrustBridgeContract {
         caller.require_auth();
 
         let admin = get_admin(&env)?;
+        if caller != admin {
+            require_role_not_expired(&env, &caller)?;
+        }
         let role = storage_get_role(&env, &caller);
         let is_upgrader = matches!(role, Some(crate::storage::Role::Upgrader));
         if caller != admin && !is_upgrader {
@@ -1661,6 +1674,9 @@ impl TrustBridgeContract {
         caller.require_auth();
 
         let admin = get_admin(&env)?;
+        if caller != admin {
+            require_role_not_expired(&env, &caller)?;
+        }
         let role = storage_get_role(&env, &caller);
         let is_upgrader = matches!(role, Some(crate::storage::Role::Upgrader));
         if caller != admin && !is_upgrader {
@@ -2520,6 +2536,10 @@ impl TrustBridgeContract {
         require_not_paused(&env)?;
 
         caller.require_auth();
+        let admin = get_admin(&env)?;
+        if caller != admin {
+            require_role_not_expired(&env, &caller)?;
+        }
 
         let proposal = crate::storage::get_pending_batch_remove(&env)
             .ok_or(ContractError::NoPendingBatchRemove)?;
@@ -2529,13 +2549,11 @@ impl TrustBridgeContract {
             return Err(ContractError::NoPendingBatchRemove);
         }
 
-        let admin = get_admin(&env)?;
         let is_admin_equivalent =
             caller == admin || storage_get_role(&env, &caller) == Some(Role::Admin);
         if !is_admin_equivalent || caller == proposal.proposed_by {
             return Err(ContractError::NotAuthorized);
         }
-
         crate::storage::clear_pending_batch_remove(&env);
 
         let count = proposal.usernames.len();
@@ -3180,6 +3198,9 @@ impl TrustBridgeContract {
         // separated so a compromised Revoker cannot mark new accounts as
         // verified (Issue #212).
         let is_admin = is_admin_caller(&env, &caller);
+        if !is_admin {
+            require_role_not_expired(&env, &caller)?;
+        }
         // Verifier authorization (Issue #293): once the campaign allowlist has
         // been populated, a non-admin caller must be an *active* (non-expired)
         // allowlist member — a bare `set_role(Verifier)` grant no longer
@@ -3195,7 +3216,6 @@ impl TrustBridgeContract {
         if !is_admin && !is_verifier {
             return Err(ContractError::NotAuthorized);
         }
-
         // Per-verifier, per-ledger anti-grief cap (Issue #292). Charged before
         // any state read so a spammer calling `verify` on junk usernames still
         // pays into the limit. The admin is exempt.
@@ -3314,11 +3334,13 @@ impl TrustBridgeContract {
         // Verifier role is intentionally excluded: a compromised Verifier key
         // should not be able to undo payout eligibility for existing users.
         let is_admin = is_admin_caller(&env, &caller);
+        if !is_admin {
+            require_role_not_expired(&env, &caller)?;
+        }
         let is_revoker = storage_get_role(&env, &caller) == Some(Role::Revoker);
         if !is_admin && !is_revoker {
             return Err(ContractError::NotAuthorized);
         }
-
         // Revoke shares the per-actor, per-ledger cap with verify (Issue #292):
         // a compromised Revoker key can bloat events just as fast by revoking.
         // Admin is exempt.
@@ -11614,7 +11636,108 @@ mod test {
                 verifier.clone(),
                 username(&env, "octocat"),
             );
-            assert_eq!(res, Err(ContractError::NotAuthorized));
+            assert_eq!(res, Err(ContractError::RoleExpired));
+            let batch_res = TrustBridgeContract::batch_verify(
+                env.clone(),
+                verifier.clone(),
+                soroban_sdk::vec![&env, username(&env, "octocat")],
+            );
+            assert_eq!(batch_res, Err(ContractError::RoleExpired));
+        });
+    }
+
+    #[test]
+    fn test_expired_revoker_cannot_revoke() {
+        let env = Env::default();
+        let (admin, user, revoker, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role_with_expiry(
+                env.clone(),
+                revoker.clone(),
+                Role::Revoker,
+                Some(2_000),
+            )
+            .unwrap();
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
+        });
+
+        env.ledger().set_timestamp(2_000);
+        env.as_contract(&contract_id, || {
+            let result = TrustBridgeContract::revoke_verification(
+                env.clone(),
+                revoker.clone(),
+                username(&env, "octocat"),
+                1,
+            );
+            assert_eq!(result, Err(ContractError::RoleExpired));
+        });
+    }
+
+    #[test]
+    fn test_expired_upgrader_is_rejected_by_all_upgrade_entrypoints() {
+        let env = Env::default();
+        let (admin, _user, upgrader, contract_id) = setup(&env);
+        let wasm_hash = BytesN::from_array(&env, &[7; 32]);
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        let proposal_id = env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role_with_expiry(
+                env.clone(),
+                upgrader.clone(),
+                Role::Upgrader,
+                Some(2_000),
+            )
+            .unwrap();
+            TrustBridgeContract::stage_wasm(env.clone(), upgrader.clone(), wasm_hash.clone())
+                .unwrap();
+            TrustBridgeContract::propose_multisig_upgrade(
+                env.clone(),
+                admin.clone(),
+                wasm_hash.clone(),
+                0,
+            )
+            .unwrap();
+            let proposal_id = TrustBridgeContract::get_upgrade_proposal(env.clone())
+                .unwrap()
+                .id;
+            TrustBridgeContract::approve_upgrade(env.clone(), upgrader.clone(), proposal_id)
+                .unwrap();
+            proposal_id
+        });
+
+        env.ledger().set_timestamp(2_000);
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::stage_wasm(env.clone(), upgrader.clone(), wasm_hash.clone()),
+                Err(ContractError::RoleExpired)
+            );
+            assert_eq!(
+                TrustBridgeContract::propose_multisig_upgrade(
+                    env.clone(),
+                    upgrader.clone(),
+                    wasm_hash.clone(),
+                    0,
+                ),
+                Err(ContractError::RoleExpired)
+            );
+            assert_eq!(
+                TrustBridgeContract::approve_upgrade(env.clone(), upgrader.clone(), proposal_id),
+                Err(ContractError::RoleExpired)
+            );
+            assert_eq!(
+                TrustBridgeContract::execute_upgrade(env.clone(), upgrader.clone(), proposal_id),
+                Err(ContractError::RoleExpired)
+            );
         });
     }
 
@@ -12076,6 +12199,36 @@ mod test {
                 .unwrap();
             let res = TrustBridgeContract::execute_batch_remove(env.clone(), bystander.clone());
             assert_eq!(res, Err(ContractError::NotAuthorized));
+        });
+    }
+
+    #[test]
+    fn test_expired_admin_role_cannot_execute_batch_remove() {
+        let env = Env::default();
+        let (admin, _user, second_admin, contract_id) = setup(&env);
+        env.mock_all_auths();
+        env.ledger().set_timestamp(1_000);
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::set_role_with_expiry(
+                env.clone(),
+                second_admin.clone(),
+                Role::Admin,
+                Some(2_000),
+            )
+            .unwrap();
+            TrustBridgeContract::propose_batch_remove(
+                env.clone(),
+                admin.clone(),
+                soroban_sdk::vec![&env, username(&env, "octocat")],
+            )
+            .unwrap();
+        });
+
+        env.ledger().set_timestamp(2_000);
+        env.as_contract(&contract_id, || {
+            let result =
+                TrustBridgeContract::execute_batch_remove(env.clone(), second_admin.clone());
+            assert_eq!(result, Err(ContractError::RoleExpired));
         });
     }
 
@@ -12554,6 +12707,79 @@ mod test {
                 crate::storage::require_initialized(&env),
                 Err(ContractError::NetworkMismatch)
             );
+        });
+    }
+
+    #[test]
+    fn mutating_entry_points_reject_foreign_network_before_writing() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, user, _, contract_id) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            let foreign = BytesN::from_array(&env, &[0xAB; 32]);
+            crate::storage::set_network_id(&env, &foreign);
+
+            // Initialization, ordinary writes, delegated batch writes, and
+            // permissionless maintenance all reject the restored state.
+            assert_eq!(
+                TrustBridgeContract::initialize(env.clone(), admin.clone()),
+                Err(ContractError::NetworkMismatch)
+            );
+            assert_eq!(
+                TrustBridgeContract::register(
+                    env.clone(),
+                    username(&env, "alice"),
+                    user,
+                    Vec::new(&env),
+                ),
+                Err(ContractError::NetworkMismatch)
+            );
+            assert_eq!(
+                TrustBridgeContract::batch_verify(env.clone(), admin.clone(), Vec::new(&env)),
+                Err(ContractError::NetworkMismatch)
+            );
+            assert_eq!(
+                TrustBridgeContract::prune_expired_verifiers(env.clone()),
+                Err(ContractError::NetworkMismatch)
+            );
+            assert_eq!(
+                TrustBridgeContract::pause(env.clone(), PauseReason::Maintenance as u32),
+                Err(ContractError::NetworkMismatch)
+            );
+            assert_eq!(
+                TrustBridgeContract::compact_index(env.clone()),
+                Err(ContractError::NetworkMismatch)
+            );
+            assert_eq!(
+                TrustBridgeContract::adopt_network_tag(env.clone()),
+                Err(ContractError::NetworkMismatch)
+            );
+
+            assert_eq!(crate::storage::get_network_id(&env), Some(foreign));
+            assert_eq!(crate::storage::get_count(&env), 0);
+            assert!(!crate::storage::is_paused(&env));
+        });
+    }
+
+    #[test]
+    fn matching_and_legacy_untagged_state_keep_mutation_behavior() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (admin, _, _, contract_id) = setup(&env);
+
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::initialize(env.clone(), admin.clone()),
+                Err(ContractError::AlreadyInitialized)
+            );
+
+            // Pre-network-tagging deployments have no recorded id and remain
+            // usable until an admin explicitly adopts the current network.
+            env.storage().instance().remove(&crate::storage::NETWORK_KEY);
+            assert_eq!(TrustBridgeContract::set_cooldown(env.clone(), 42), Ok(()));
+            assert_eq!(crate::storage::get_cooldown(&env), 42);
+            assert_eq!(crate::storage::get_network_id(&env), None);
         });
     }
 

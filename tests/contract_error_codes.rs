@@ -46,6 +46,7 @@ fn variant_for_name(name: &str) -> ContractError {
         "VerifierExpiryInPast" => ContractError::VerifierExpiryInPast,
         "NoPendingRoleGrant" => ContractError::NoPendingRoleGrant,
         "RoleGrantNotReady" => ContractError::RoleGrantNotReady,
+        "RoleExpired" => ContractError::RoleExpired,
         "ProvenanceMissing" => ContractError::ProvenanceMissing,
         "ProvenanceMismatch" => ContractError::ProvenanceMismatch,
         _ => panic!(

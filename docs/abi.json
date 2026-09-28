@@ -266,6 +266,11 @@
       "code": 21,
       "name": "NetworkMismatch",
       "description": "Instance state was initialized on a different network than the one executing (Issue #231)"
+    },
+    {
+      "code": 57,
+      "name": "RoleExpired",
+      "description": "A role-gated privileged invocation was made at or after the role's expiry timestamp"
     }
   ],
   "events": [

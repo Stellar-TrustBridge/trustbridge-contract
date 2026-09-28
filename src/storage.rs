@@ -430,6 +430,13 @@ pub struct Stats {
     pub ever_verified: u32,
 }
 
+/// Documented layout version for [`ExportPage`] and its records.
+/// Breaking changes to the struct layout or field ordering bump this version.
+pub const EXPORT_PAGE_LAYOUT_VERSION: u32 = 2;
+
+/// A single exported record tuple: `(github_username, ContributorRecord)`.
+pub type ExportRecord = (String, ContributorRecord);
+
 /// A single page of registry records returned by paginated export functions.
 ///
 /// `next_cursor` is `None` when this is the last page. Pass it as `cursor` to
@@ -1507,6 +1514,20 @@ pub fn is_role_expired(env: &Env, address: &Address) -> bool {
         Some(expires_at) => env.ledger().timestamp() >= expires_at,
         None => false,
     }
+}
+
+/// Fails with [`ContractError::RoleExpired`] when `address` holds a role grant
+/// that has an expiry timestamp and that timestamp has been reached or passed
+/// (Issue #428).
+///
+/// Call this before a privileged invoke checks the caller's active role,
+/// because [`get_role`] intentionally hides expired grants. Addresses with no
+/// stored role grant pass; grants with no expiry always pass.
+pub fn require_role_not_expired(env: &Env, address: &Address) -> Result<(), ContractError> {
+    if role_key_exists(env, address) && is_role_expired(env, address) {
+        return Err(ContractError::RoleExpired);
+    }
+    Ok(())
 }
 
 /// Returns `address`'s currently active role, or `None` if it holds no role
