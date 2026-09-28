@@ -35,8 +35,14 @@ jobs:
       - name: Test
         run: make test
 
+      - name: Homoglyph corpus
+        run: cargo test --test homoglyph_corpus
+
       - name: Rustdoc
         run: make docs-check
+
+      - name: ABI JSON freshness
+        run: make abi-check
 
   build:
     name: Contract build + WASM hash gate
