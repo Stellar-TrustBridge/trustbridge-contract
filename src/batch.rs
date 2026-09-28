@@ -65,11 +65,7 @@ impl BatchSummary {
     #[must_use]
     pub fn new(total: u32, successful: u32) -> Self {
         let failed = total.saturating_sub(successful);
-        let success_rate = if total > 0 {
-            ((successful as u64 * 100) / (total as u64)) as u32
-        } else {
-            0
-        };
+        let success_rate = crate::utils::calculate_verification_percentage(successful, total);
 
         BatchSummary {
             total,
@@ -284,7 +280,7 @@ mod tests {
         assert_eq!(summary.total, 3);
         assert_eq!(summary.successful, 2);
         assert_eq!(summary.failed, 1);
-        assert_eq!(summary.success_rate, 66);
+        assert_eq!(summary.success_rate, 67);
     }
 
     #[test]

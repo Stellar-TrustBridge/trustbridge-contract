@@ -11,11 +11,12 @@
 //! GitHub OAuth / API check) and `verify_with_proof` checks that signature,
 //! the signer's allowlist membership, and the proof's expiry, on-chain.
 //!
+//! `verify_with_oracle_proof` wires that primitive into the product flow: it
+//! runs the same allowlist + signature + expiry checks and then marks the
+//! record verified, so callers no longer have to trust the admin's word.
+//!
 //! Explicitly out of scope here (see `docs/SECURITY.md`):
 //! - Running a production GitHub oracle service.
-//! - Wiring a valid proof into `verify()`/`batch_verify()` as an alternative
-//!   auth path — this module ships the primitive and its tests, not the
-//!   integration.
 //! - This is **not** the attestation-hash flow (`attest_upgrade`/`upgrade`),
 //!   which binds a WASM hash for upgrades. This binds an oracle signature to
 //!   an arbitrary message for identity/ownership proofs.
@@ -210,6 +211,85 @@ mod tests {
                 expires_at: 0,
             };
             assert!(verify_with_proof(&env, &proof).is_ok());
+        });
+    }
+
+    #[test]
+    fn verify_with_oracle_proof_marks_verified() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+        let subject = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+
+            let proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
+                message: Bytes::from_array(&env, &MESSAGE),
+                signature: BytesN::from_array(&env, &VALID_SIG),
+                expires_at: 0,
+            };
+            assert!(verify_with_oracle_proof(&env, &subject, &proof).is_ok());
+            assert!(crate::storage::is_verified(&env, &subject));
+        });
+    }
+
+    #[test]
+    fn verify_with_oracle_proof_rejects_non_allowlisted_key() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+        let subject = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+
+            let proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ATTACKER_PUBKEY),
+                message: Bytes::from_array(&env, &MESSAGE),
+                signature: BytesN::from_array(&env, &ATTACKER_SIG),
+                expires_at: 0,
+            };
+            assert_eq!(
+                verify_with_oracle_proof(&env, &subject, &proof),
+                Err(ContractError::NotAuthorized)
+            );
+            assert!(!crate::storage::is_verified(&env, &subject));
+        });
+    }
+
+    #[test]
+    fn verify_with_oracle_proof_rejects_expired_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+        let subject = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+
+            env.ledger().set_timestamp(1_000);
+            let proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
+                message: Bytes::from_array(&env, &MESSAGE),
+                signature: BytesN::from_array(&env, &VALID_SIG),
+                expires_at: 500,
+            };
+            assert_eq!(
+                verify_with_oracle_proof(&env, &subject, &proof),
+                Err(ContractError::NotAuthorized)
+            );
+            assert!(!crate::storage::is_verified(&env, &subject));
         });
     }
 

@@ -48,12 +48,15 @@ This runs the same checks as the two jobs in `.github/workflows/ci.yml`:
 ### Codespaces / devcontainer setup
 
 The repository devcontainer installs the same pinned CLI and WASM target used
-by the documented build flow: Stellar CLI `26.1.0` and `wasm32v1-none`.
-After the container is created, verify the setup with:
+by the documented build flow: Stellar CLI `26.1.0` and `wasm32v1-none` —
+plus the `make test` / `make fuzz` prerequisites (Python 3, `jq`, Node LTS).
+No secrets are baked into the container config. After the container is
+created, smoke-verify the setup with:
 
 ```bash
 stellar --version
 rustup target list --installed | grep wasm32v1-none
+make test          # smoke-verify a fresh container
 make build
 ```
 
@@ -114,7 +117,6 @@ CI compares `docs/ABI.md` with the pull request base revision. Changes to
 public function signature headings require a new versioned `CHANGELOG.md`
 heading, for example `## [1.2.0] - 2026-08-28`, with a description of the
 change. Typo fixes and prose-only ABI edits do not require a changelog entry.
-
 The check is intentionally a heuristic: it watches function signature
 headings rather than trying to understand the complete ABI. If a legitimate
 prose edit is reported as an ABI change, add a reason in the changed changelog
@@ -130,6 +132,22 @@ new version instead. Run the same check locally with the base commit:
 ```bash
 bash scripts/check_changelog_abi.sh main
 ```
+
+### ABI JSON regeneration
+
+`docs/abi.json` is generated from `docs/ABI.md` by
+`scripts/generate_abi_json.py` — never hand-edit it. Regenerate it whenever
+you touch a function signature heading, the `ContractError` table, or an
+event topic/data block in `docs/ABI.md`:
+
+```bash
+make abi        # regenerate docs/abi.json
+make abi-check  # fail with a diff if docs/abi.json is stale (writes nothing)
+```
+
+`make abi-check` runs in `make check` and in the CI `quality` job, so a
+release that skips regeneration fails the gate. Commit the regenerated
+`docs/abi.json` alongside the `docs/ABI.md` change.
 
 ### Rustdoc
 
@@ -244,6 +262,21 @@ Test helpers and `#[cfg(test)]` modules are excluded in `mutants.toml`.
 Mutating test code produces meaningless results (a mutation that breaks a test
 is a bug in the test, not a gap in coverage).
 
+### Why `src/error.rs` is excluded (Issue #434)
+
+`src/error.rs` is an exhaustive discriminant table (`code()` /
+`from_code()`), a total retry-classification match (`category()` /
+`is_retryable()`), and derived impls — there is no branching logic for a
+mutant to weaken. Mutating it yields brittle noise: discriminant swaps and
+reordered `from_code` arms either fail to compile or are semantically
+identical, and a `category()` re-label is already pinned by
+`tests/contract_error_codes.rs` plus the `scripts/check_error_codes.sh`
+golden gate (enum ↔ `from_code` ↔ `abi/contract_error_codes.golden` ↔
+`docs/ABI.md`). `mutants.toml` therefore excludes `error.rs` boilerplate
+(`src/error.rs`, `fn code`, `fn from_code`, `fn category`, `fn is_retryable`)
+so mutation runs keep covering validation, storage, and business logic
+instead of re-proving a mapping that the error-code gate already freezes.
+
 ---
 
 ## Coverage (Issue #248)
@@ -334,6 +367,30 @@ Run tests:
 ```bash
 cargo test
 ```
+
+### Homoglyph corpus
+
+The homoglyph corpus in `tests/homoglyph_corpus.rs` is a security regression
+suite for lookalike Unicode characters, invisible formatting characters,
+bidirectional controls, and any entry point that must reject them. Extend it
+whenever a new confusable or spoofing vector is reported, discovered during
+review, or introduced by a change to username handling. Keep the ASCII-only
+acceptance cases as positive controls.
+
+Add each attack string to the relevant corpus category with a brief description
+and code point, and add an entry-point regression test when the vector could
+expose a validation bypass. Update the documented corpus scope and expected
+minimum in `test_homoglyph_corpus_coverage_complete` as needed. Do not normalize
+or permit a new character as a local exception; changes to the ASCII-only
+policy require an explicit security review.
+
+Run the dedicated test before submitting changes:
+
+```bash
+cargo test --test homoglyph_corpus
+```
+
+CI runs this target as a blocking step on every pull request.
 
 ### WASM Integration Tests
 
