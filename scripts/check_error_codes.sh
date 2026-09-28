@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Error-code consistency check (Issue #402).
+set -euo pipefail
 #
 # Four places describe the ContractError discriminants, and before this check
 # they had drifted apart:

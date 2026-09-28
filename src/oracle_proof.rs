@@ -11,11 +11,12 @@
 //! GitHub OAuth / API check) and `verify_with_proof` checks that signature,
 //! the signer's allowlist membership, and the proof's expiry, on-chain.
 //!
+//! `verify_with_oracle_proof` wires that primitive into the product flow: it
+//! runs the same allowlist + signature + expiry checks and then marks the
+//! record verified, so callers no longer have to trust the admin's word.
+//!
 //! Explicitly out of scope here (see `docs/SECURITY.md`):
 //! - Running a production GitHub oracle service.
-//! - Wiring a valid proof into `verify()`/`batch_verify()` as an alternative
-//!   auth path — this module ships the primitive and its tests, not the
-//!   integration.
 //! - This is **not** the attestation-hash flow (`attest_upgrade`/`upgrade`),
 //!   which binds a WASM hash for upgrades. This binds an oracle signature to
 //!   an arbitrary message for identity/ownership proofs.
@@ -100,6 +101,32 @@ pub fn verify_with_proof(env: &Env, proof: &OracleProof) -> Result<(), ContractE
     Ok(())
 }
 
+/// Verifies an [`OracleProof`] and, on success, marks `stellar_address` as
+/// verified — the oracle-backed alternative to the admin-trusted `verify()`
+/// path.
+///
+/// This is the product-flow entry point for the primitive above: it runs the
+/// same allowlist + expiry + Ed25519 signature checks as
+/// [`verify_with_proof`], then records the verification so callers no longer
+/// have to trust the admin's off-chain word.
+///
+/// # Errors
+/// - [`ContractError::NotAuthorized`] if the proof's key is not allowlisted,
+///   the allowlist is empty, or the proof has expired.
+///
+/// # Panics
+/// Panics if `signature` is not a valid Ed25519 signature over `message`
+/// under `oracle_pubkey` (see [`verify_with_proof`]).
+pub fn verify_with_oracle_proof(
+    env: &Env,
+    stellar_address: &Address,
+    proof: &OracleProof,
+) -> Result<(), ContractError> {
+    verify_with_proof(env, proof)?;
+    crate::storage::set_verified(env, stellar_address, true);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +201,85 @@ mod tests {
     }
 
     #[test]
+    fn verify_with_oracle_proof_marks_verified() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+        let subject = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+
+            let proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
+                message: Bytes::from_array(&env, &MESSAGE),
+                signature: BytesN::from_array(&env, &VALID_SIG),
+                expires_at: 0,
+            };
+            assert!(verify_with_oracle_proof(&env, &subject, &proof).is_ok());
+            assert!(crate::storage::is_verified(&env, &subject));
+        });
+    }
+
+    #[test]
+    fn verify_with_oracle_proof_rejects_non_allowlisted_key() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+        let subject = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+
+            let proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ATTACKER_PUBKEY),
+                message: Bytes::from_array(&env, &MESSAGE),
+                signature: BytesN::from_array(&env, &ATTACKER_SIG),
+                expires_at: 0,
+            };
+            assert_eq!(
+                verify_with_oracle_proof(&env, &subject, &proof),
+                Err(ContractError::NotAuthorized)
+            );
+            assert!(!crate::storage::is_verified(&env, &subject));
+        });
+    }
+
+    #[test]
+    fn verify_with_oracle_proof_rejects_expired_proof() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+        let subject = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+
+            env.ledger().set_timestamp(1_000);
+            let proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
+                message: Bytes::from_array(&env, &MESSAGE),
+                signature: BytesN::from_array(&env, &VALID_SIG),
+                expires_at: 500,
+            };
+            assert_eq!(
+                verify_with_oracle_proof(&env, &subject, &proof),
+                Err(ContractError::NotAuthorized)
+            );
+            assert!(!crate::storage::is_verified(&env, &subject));
+        });
+    }
+
+    #[test]
     fn non_allowlisted_key_is_rejected() {
         let env = Env::default();
         env.mock_all_auths();
@@ -185,7 +291,6 @@ mod tests {
             allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
             set_oracle_allowlist(&env, &admin, allowlist);
 
-            // A signature that is internally valid, but from a key nobody allowlisted.
             let proof = OracleProof {
                 oracle_pubkey: BytesN::from_array(&env, &ATTACKER_PUBKEY),
                 message: Bytes::from_array(&env, &MESSAGE),
@@ -210,16 +315,13 @@ mod tests {
             let mut allowlist = Vec::new(&env);
             allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
             set_oracle_allowlist(&env, &admin, allowlist);
-        });
 
-        env.ledger().set_timestamp(2_000_000_000);
-
-        env.as_contract(&contract_id, || {
+            env.ledger().set_timestamp(1_000);
             let proof = OracleProof {
                 oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
                 message: Bytes::from_array(&env, &MESSAGE),
                 signature: BytesN::from_array(&env, &VALID_SIG),
-                expires_at: 1_700_000_000,
+                expires_at: 500,
             };
             assert_eq!(
                 verify_with_proof(&env, &proof),
@@ -230,7 +332,7 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn tampered_signature_traps() {
+    fn tampered_signature_panics() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = setup(&env);
@@ -247,8 +349,6 @@ mod tests {
                 signature: BytesN::from_array(&env, &TAMPERED_SIG),
                 expires_at: 0,
             };
-            // Invalid signature under an allowlisted key: no clean `Err`, the
-            // host traps. Documented in `verify_with_proof`'s `# Panics`.
             let _ = verify_with_proof(&env, &proof);
         });
     }

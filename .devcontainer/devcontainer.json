@@ -2,9 +2,15 @@
   "name": "TrustBridge Stellar Contract",
   "image": "mcr.microsoft.com/devcontainers/rust:1-bullseye",
   "features": {
-    "ghcr.io/devcontainers/features/common-utils:2": {}
+    "ghcr.io/devcontainers/features/common-utils:2": {},
+    "ghcr.io/devcontainers/features/node:1": { "version": "lts" }
   },
-  "onCreateCommand": "sudo apt-get update && sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config && rustup target add wasm32v1-none && cargo install --locked stellar-cli@26.1.0",
+  // No secrets are baked into this config: signing identities stay in
+  // `stellar keys` / runtime environment variables, never in the image.
+  // Prerequisites for the Makefile test targets (`make test`, `make fuzz`,
+  // `make abi-check`, `make diff-test`): Stellar CLI, both wasm targets,
+  // Python 3, jq (shell export scripts), and Node LTS (differential tests).
+  "onCreateCommand": "sudo apt-get update && sudo apt-get install -y build-essential pkg-config libdbus-1-dev libudev-dev python3 jq && rustup target add wasm32v1-none wasm32-unknown-unknown && cargo install --locked stellar-cli@26.1.0",
   "customizations": {
     "vscode": {
       "extensions": [
@@ -14,5 +20,5 @@
       ]
     }
   },
-  "postAttachCommand": "stellar --version"
+  "postAttachCommand": "stellar --version && rustup target list --installed | grep wasm32v1-none && python3 --version"
 }

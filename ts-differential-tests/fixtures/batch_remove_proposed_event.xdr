@@ -1,0 +1,3 @@
+# Placeholder: Run `cargo test generate_xdr_fixtures -- --ignored --nocapture`
+# and paste the '--- batch_remove_proposed_event.xdr ---' block here.
+# Or run: make xdr-fixtures
