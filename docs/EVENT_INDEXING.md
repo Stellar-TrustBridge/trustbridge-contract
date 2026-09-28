@@ -1,380 +1,346 @@
-# Event Indexing Guide
+# Event Indexing
 
-This document describes how to reliably consume TrustBridge contract events for dashboards, indexers, and analytics pipelines. It covers event structure, domain separation, idempotency, replay handling, and operational patterns.
+Reference guide for tailing TrustBridge contract events into a local store.
 
----
-
-## Event Reference
-
-All contract events are defined in [`src/events.rs`](../src/events.rs) with `#[contractevent]` attributes. Each event includes:
-
-- A **topic** (the first field marked `#[topic]`) for filtering via RPC `getEvents`
-- Event-specific **data fields**
-- An **`EventDomain`** envelope (most events) for deployment identification
-
-### Events Emitted by the Contract
-
-| Event | Topic Symbol | Key Data Fields | Domain? |
-|---|---|---|---|
-| `RegisteredEvent` | `registered_event` | `github_username`, `stellar_address`, `timestamp`, `sponsor` | ❌ |
-| `RemovedEvent` | `removed_event` | `github_username`, `stellar_address`, `timestamp` | ✅ |
-| `VerifiedEvent` | `verified_event` | `github_username`, `stellar_address`, `timestamp` | ✅ |
-| `VerificationRevokedEvent` | `verification_revoked_event` | `github_username`, `stellar_address`, `timestamp`, `reason_code` | ✅ |
-| `UpgradedEvent` | `upgraded_event` | `new_wasm_hash`, `version`, `timestamp` | ✅ |
-| `PausedEvent` | `paused_event` | `admin`, `timestamp`, `reason_code` | ✅ |
-| `UnpausedEvent` | `unpaused_event` | `admin`, `timestamp`, `reason_code` | ✅ |
-| `RoleGrantedEvent` | `role_granted_event` | `address`, `role`, `admin`, `timestamp` | ✅ |
-| `RoleRevokedEvent` | `role_revoked_event` | `address`, `admin`, `timestamp` | ✅ |
-| `BatchRemoveProposedEvent` | `batch_remove_proposed_event` | `proposed_by`, `count`, `timestamp` | ✅ |
-| `BatchRemoveExecutedEvent` | `batch_remove_executed_event` | `executed_by`, `proposed_by`, `count`, `successful`, `timestamp` | ✅ |
-| `BatchRemoveCancelledEvent` | `batch_remove_cancelled_event` | `cancelled_by`, `proposed_by`, `timestamp` | ✅ |
-| `ChallengeStartedEvent` | `challenge_started_event` | `github_username`, `challenged_by`, `resolve_after`, `timestamp` | ✅ |
-| `ChallengeCancelledEvent` | `challenge_cancelled_event` | `github_username`, `cancelled_by`, `timestamp` | ✅ |
-| `ChallengeCompletedEvent` | `challenge_completed_event` | `github_username`, `completed_by`, `timestamp` | ✅ |
-| `EmergencyPausedEvent` | `emergency_paused_event` | `triggered_by`, `timestamp` | ❌ |
-| `EmergencyClearedEvent` | `emergency_cleared_event` | `admin`, `timestamp` | ❌ |
-| `UpgradeAttestedEvent` | `upgrade_attested_event` | `wasm_hash`, `expires_at`, `timestamp` | ❌ |
-| `AttestationClearedEvent` | `attestation_cleared_event` | `wasm_hash`, `expires_at`, `timestamp` | ❌ |
-| `RotationRequestedEvent` | `rotation_requested_event` | `github_username`, `current_address`, `new_address`, `executable_at`, `timestamp` | ❌ |
-| `RotationExecutedEvent` | `rotation_executed_event` | `github_username`, `old_address`, `new_address`, `timestamp` | ❌ |
-| `RotationCancelledEvent` | `rotation_cancelled_event` | `github_username`, `cancelled_by`, `timestamp` | ❌ |
-| `VerificationConfiguredEvent` | `verification_configured_event` | `admin`, `attestation`, `expires_in`, `threshold`, `timestamp` | ❌ |
-| `RenamedEvent` | `renamed_event` | `old_username`, `new_username`, `stellar_address`, `verification_cleared`, `timestamp` | ❌ |
-| `RoleGrantPendingEvent` | `role_grant_pending_event` | `address`, `role`, `admin`, `activate_at`, `timestamp` | ❌ |
-| `RoleGrantCancelledEvent` | `role_grant_cancelled_event` | `address`, `admin`, `timestamp` | ❌ |
-| `GuardianChangedEvent` | `guardian_changed_event` | `guardian`, `admin`, `timestamp` | ❌ |
-
-> **Note:** `RoleRevokedEvent` does **not** include the `role` field in its data payload. If your indexer needs to know which role was revoked, correlate the revocation with the most recent `RoleGrantedEvent` for that address.
+Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) ·
+[DASHBOARD_SYNC](DASHBOARD_SYNC.md) · [SECURITY](SECURITY.md) ·
+[ADMIN_RUNBOOK](ADMIN_RUNBOOK.md)
 
 ---
 
-## Event Domain Separation (Issue #226)
+## Overview
 
-Every event that carries an `EventDomain` includes this struct:
+TrustBridge contract state is best consumed through its event stream rather than
+repeated full-registry exports. Events are cheaper to read, capture every mutation
+atomically, and include enough context (topic symbol, ledger sequence, tx hash) for
+idempotent processing.
 
-```rust
-pub struct EventDomain {
-    pub contract_id: Address,      // Contract instance address (C...)
-    pub network_id: BytesN<32>,    // SHA-256 of network passphrase
-    pub contract_version: (u32, u32, u32),  // Semantic version at emit time
-    pub domain_version: u32,       // Envelope schema version (currently 1)
-}
-```
-
-### Why Domain Separation Matters
-
-1. **Redeploy collisions**: Without `contract_id`, an indexer cannot distinguish events from a fresh deployment vs. a re-read of historical events from the same contract address on a different network.
-
-2. **Cross-network mixing**: The same Stellar keypair works on testnet, futurenet, and public network. The `network_id` (SHA-256 of the passphrase) disambiguates which network an event belongs to.
-
-3. **Upgrade attribution**: `contract_version` lets consumers know which contract logic produced the event — important if an upgrade changes event semantics.
-
-### Indexer Deduplication Key
-
-The **primary deduplication key** for any TrustBridge event should be:
-
-```
-(contract_id, network_id, ledger_sequence, tx_hash, event_index)
-```
-
-Where:
-- `contract_id` + `network_id` = `EventDomain` identity
-- `ledger_sequence` + `tx_hash` = transaction that emitted the event (from RPC envelope)
-- `event_index` = zero-based position within that transaction's event list (required because `batch_verify`/`batch_remove` emit multiple same-topic events in one transaction)
-
-This composite key is stable across:
-- Redeploys (different `contract_id`)
-- Network migrations (different `network_id`)
-- Contract upgrades (different `contract_version`)
-- RPC replays and catch-up reads (same `tx_hash` + `event_index`)
-
-### Network ID Reference
-
-| Network | Passphrase | SHA-256 (hex) |
-|---|---|---|
-| Public Network | `Public Global Stellar Network ; September 2015` | `7ac33997...` |
-| Testnet | `Test SDF Network ; September 2015` | `7e10462a...` |
-| Futurenet | `Test SDF Future Network ; October 2022` | `6c07a43f...` |
-
-> The contract computes `network_id` via `env.ledger().network_id()` at `initialize` and on every event emission — no operator configuration required.
+`scripts/event_indexer.sh` is the reference implementation: a dependency-light bash
+poller that tails the Stellar RPC `getEvents` endpoint, writes one JSON object per
+event to an append-only JSONL file, persists a cursor between runs, and deduplicates
+on the RPC event `id`. It is designed for local dev, Futurenet, and testnet — not a
+production hosted service. No cloud account, database, or secret is required; all
+state is a small set of files on disk.
 
 ---
 
-## Consuming Events via RPC
-
-### Recommended: `stellar rpc getEvents`
-
-Filter by contract ID and optionally by topic:
+## Quick Start
 
 ```bash
-# All events for a contract
-curl -X POST https://soroban-testnet.stellar.org \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jsonrpc": "2.0", "id": 1, "method": "getEvents",
-    "params": {
-      "filters": [{ "type": "contract", "contractIds": ["C..."], "topics": [] }],
-      "pagination": { "limit": 100 }
-    }
-  }'
-
-# Only verification events
-curl -X POST https://soroban-testnet.stellar.org \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jsonrpc": "2.0", "id": 1, "method": "getEvents",
-    "params": {
-      "filters": [{ "type": "contract", "contractIds": ["C..."], "topics": [["verified_event"]] }],
-      "pagination": { "limit": 100 }
-    }
-  }'
-```
-
-### Response Shape
-
-Each event in the RPC response contains:
-
-```json
-{
-  "id": "0001000042-0000000001",
-  "ledger": 1000042,
-  "ledgerClosedAt": "2026-01-15T12:00:05Z",
-  "contractId": "CAAA...",
-  "txHash": "a1b2c3...",
-  "type": "contract",
-  "topic": ["d213...", "..."],  // base64 XDR of topic symbols
-  "value": "AQAA...",           // base64 XDR of event data
-  "inSuccessfulContractCall": true
-}
-```
-
-### Decoding Topic & Value
-
-The `topic` and `value` fields are base64-encoded XDR. Decode with:
-
-```bash
-# Decode topic (symbol array)
-stellar xdr decode --type scVec <base64_topic>
-
-# Decode value (event struct)
-stellar xdr decode --type <EventType> <base64_value>
-```
-
-Or use the Soroban SDK in your language of choice — the `contractevent` macro generates XDR definitions.
-
----
-
-## Reference Indexer Implementation
-
-The repo includes a production-ready reference indexer at [`scripts/event_indexer.sh`](../scripts/event_indexer.sh). It:
-
-1. Polls `getEvents` on a loop (configurable interval)
-2. Appends events as JSONL to `.indexer/events-<network>.jsonl`
-3. Persists the RPC cursor to `.indexer/cursor-<network>.json` after every batch
-4. Deduplicates on RPC event `id` using `.indexer/seen-<network>.txt`
-5. Handles empty windows, RPC errors (linear backoff), and pruned cursors (cold re-scan fallback)
-
-### Running the Indexer
-
-```bash
-# Follow testnet from ~1 day back, forever
+# Follow the event stream on testnet:
 CONTRACT_ID=C... ./scripts/event_indexer.sh
 
-# Drain to head once and exit (cron / CI)
+# One-shot drain to head (useful in CI or cron):
 CONTRACT_ID=C... ONESHOT=1 ./scripts/event_indexer.sh
 
-# Local / futurenet RPC, explicit start ledger
+# Local / Futurenet RPC, start from a known ledger:
 CONTRACT_ID=C... RPC_URL=http://localhost:8000/soroban/rpc \
-  START_LEDGER=1 ONESHOT=1 ./scripts/event_indexer.sh
+  START_LEDGER=1000 ONESHOT=1 ./scripts/event_indexer.sh
 
-# Offline: replay a canned RPC response
+# Offline demo using a canned RPC response (no network required):
 MOCK_RESPONSE=./scripts/testdata/getEvents.sample.json \
   CONTRACT_ID=C_MOCK ONESHOT=1 ./scripts/event_indexer.sh
 ```
 
-### Output Format
+---
 
-Each line of `events-<network>.jsonl`:
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONTRACT_ID` | _(required)_ | Deployed contract ID to filter events for. Not required when `MOCK_RESPONSE` is set. |
+| `RPC_URL` | `https://soroban-testnet.stellar.org` | Stellar RPC endpoint. Futurenet: `https://rpc-futurenet.stellar.org` |
+| `NETWORK` | `testnet` | Informational tag written into state file names and the cursor JSON. |
+| `DATA_DIR` | `./.indexer` | Directory for all indexer state and output files. |
+| `START_LEDGER` | _(latest − LOOKBACK)_ | Ledger to start from on a **cold start** (no cursor on disk). Ignored once a cursor exists. |
+| `LOOKBACK` | `17280` | Ledgers to rewind from "latest" on a cold start (~1 day at 5 s per ledger). Ignored once a cursor exists. |
+| `POLL_SECONDS` | `5` | Seconds to sleep between polls when following the live stream. |
+| `PAGE_LIMIT` | `100` | Events requested per RPC page (RPC max is 10 000). |
+| `ONESHOT` | _(unset)_ | Set to `1` to do a single drain to head then exit 0. Useful for CI and cron. |
+| `MOCK_RESPONSE` | _(unset)_ | Path to a canned `getEvents` JSON-RPC response. When set, no network call is made and the loop runs exactly once. |
+| `MAX_RETRIES` | `5` | Consecutive RPC failures tolerated before giving up. |
+
+---
+
+## Files Written Under `DATA_DIR`
+
+All three files are safe to delete:
+
+| File | Purpose |
+|------|---------|
+| `events-<network>.jsonl` | Append-only event log. One JSON object per line. |
+| `cursor-<network>.json` | Pagination cursor and progress counters. Removing this forces a cold re-scan. |
+| `seen-<network>.txt` | Recent event ids for dedup across restarts. Bounded at `SEEN_MAX_LINES` (50 000). Removing it only weakens dedup for the overlap window. |
+
+### Cursor file schema
 
 ```json
 {
-  "id": "0001000042-0000000001",
-  "ledger_sequence": 1000042,
-  "ledger_closed_at": "2026-01-15T12:00:05Z",
-  "contract_id": "CAAA...",
-  "tx_hash": "a1b2c3...",
-  "type": "contract",
-  "topic": ["<base64 xdr>", "..."],
-  "value": "<base64 xdr>",
-  "in_successful_contract_call": true,
-  "indexed_at": "2026-08-29T00:00:00Z"
+  "network": "testnet",
+  "cursor": "<opaque RPC cursor string or null>",
+  "last_ledger": 12345678,
+  "last_id": "<most recent event id or null>",
+  "updated_at": "2026-09-29T12:00:00Z",
+  "event_count": 42
 }
 ```
 
-The script is deliberately **decode-agnostic** — it stores raw XDR so consumers can decode with their preferred tooling.
+### Event log record shape
+
+Each line of `events-<network>.jsonl` is a normalized JSON object:
+
+```json
+{
+  "id": "<rpc event id>",
+  "ledger_sequence": 12345678,
+  "ledger_closed_at": "2026-09-29T12:00:00Z",
+  "contract_id": "C...",
+  "tx_hash": "<transaction hash or null>",
+  "type": "contract",
+  "topic": ["<base64 ScVal>", "..."],
+  "topic_symbol": "registered_event",
+  "event_kind": "registered",
+  "category": "registry",
+  "value": "<base64 ScVal>",
+  "in_successful_contract_call": true,
+  "indexed_at": "2026-09-29T12:00:00Z"
+}
+```
+
+The `topic_symbol`, `event_kind`, and `category` fields are decoded from `topic[0]`
+by the indexer so a dashboard can filter by event kind without decoding XDR itself.
+See [Topic Classification](#topic-classification) below.
 
 ---
 
-## Idempotency & Replay Handling
+## Cold Start vs. Cursor Resume
 
-Horizon/RPC replays and worker retries are **normal operating conditions**, not failure modes. An indexer that treats every delivery as new will double-count registrations or resurrect a contributor after they were removed.
+### Cold start (no cursor on disk)
 
-### Idempotency Key
+1. The indexer calls `getLatestLedger` to find the current chain head.
+2. It subtracts `LOOKBACK` (default 17 280 ≈ 24 h) to compute `start_ledger`, clamped to 1.
+3. If `START_LEDGER` is explicitly set, that value overrides the computed start.
+4. The first `getEvents` call includes `startLedger: <start_ledger>` and no cursor.
 
-Key every stored event on:
+### Cursor resume (cursor file exists)
 
-```
-(github_username, event_type, ledger_sequence, tx_hash)
-```
+1. The stored cursor is read from `cursor-<network>.json`.
+2. All subsequent `getEvents` calls pass `pagination.cursor: <cursor>` and omit
+   `startLedger` — the cursor already encodes the position.
+3. If the RPC rejects the cursor (e.g. it has been pruned from the node's history),
+   the indexer falls back to a cold start and logs the event.
 
-- `event_type` — the event's topic symbol (`registered_event`, `verified_event`, etc.)
-- `ledger_sequence` — the ledger the event was emitted in (ordering key)
-- `tx_hash` — the transaction hash that emitted it (distinguishes same-type events in same ledger)
+### Idempotent restart
 
-`(ledger_sequence, tx_hash)` alone is sufficient to deduplicate a single delivery; `github_username` and `event_type` are included so a lookup by contributor doesn't require a join.
+Restarting the indexer mid-batch is always safe:
 
-### Event → Action → Duplicate Handling
-
-| Event | Expected Indexer Action | Duplicate Delivery |
-|-------|------------------------|---------------------|
-| `RegisteredEvent` | Upsert `(github_username → stellar_address)`; reset local `verified` to `false` | No-op — same key already applied |
-| `VerifiedEvent` | Set local `verified = true` for `github_username` | No-op if key already applied |
-| `VerificationRevokedEvent` | Set local `verified = false` for `github_username` | Same — idempotent overwrite |
-| `RemovedEvent` | Delete (or tombstone) the local record for `github_username` | No-op if already deleted |
-
-**Critical**: Never implement indexer-side counters (e.g. "times verified") by counting event occurrences. Use `get_stats()` / `get_public_paginated` reads against the contract as the source of truth for aggregate counts.
-
-### Out-of-Order Handling
-
-Horizon delivery order is not guaranteed to match ledger order under replay or catch-up conditions. Two rules keep out-of-order delivery from producing the wrong final state:
-
-1. **Order by `(ledger_sequence, tx_hash-relative-order)` before applying**, not by delivery order. If a `RemovedEvent` and a later `RegisteredEvent` for the same username arrive out of order, applying them in delivery order instead of ledger order can leave the record deleted when it should exist (or vice versa).
-
-2. **Track the last-applied `ledger_sequence` per `github_username`.** Before applying an event, compare its `ledger_sequence` to the last one recorded for that username. If the incoming event is older, it is a gap-fill or a late replay of something already superseded — record it for audit purposes but do not let it overwrite newer state.
-
-For gaps (a missing ledger range in the delivery stream), reconcile against on-chain state directly rather than waiting for the missing event: call `get_public_paginated` (or `get_address` for a single username) and treat its result as authoritative. The event stream is a change-notification optimization; the contract's own storage is always the ground truth.
-
-### Stable Event ID (Issue #283)
-
-For consumers that want a single opaque id per event, derive it deterministically from the delivery envelope:
-
-```
-event_id = "{network_id}:{contract_id}:{ledger_sequence}:{tx_hash}:{event_index}"
-```
-
-- `network_id` — lower-hex SHA-256 of the network passphrase (same value as `domain.network_id`)
-- `contract_id` — the emitting contract's `C...` address (`domain.contract_id`)
-- `ledger_sequence` — ledger the event was emitted in
-- `tx_hash` — hex transaction hash that emitted it
-- `event_index` — zero-based position of this event within that transaction's event list
-
-**Algorithm for a consumer:**
-1. On each delivery, compute `event_id`.
-2. If `event_id` is already in the applied-set, drop the delivery — it is a reconnect replay, a catch-up re-read, or a worker retry. Do nothing else.
-3. Otherwise apply the event (last-write-wins field/record update, never an increment), then record `event_id` in the applied-set.
-4. A full re-sync of the entire stream is therefore a no-op once every id has been seen.
-
-**Uniqueness scope**: one contract instance on one network. `network_id` and `contract_id` are baked into the id, so it never collides across a redeploy or another network.
+- Any event whose `id` already appears in `seen-<network>.txt` is skipped.
+- The cursor is written atomically after each page (via a `mktemp` + `mv` rename),
+  so a crash mid-write cannot corrupt it.
+- Removing the cursor forces a full re-scan; removing `seen-*.txt` only widens the
+  dedup window slightly at the overlap.
 
 ---
 
-## Lag Detection (Issue #282)
+## Topic Classification
 
-The contract exposes `get_last_event_ledger() -> u32` returning the ledger sequence containing the most recently emitted contract event (`0` = no events yet). The value is stored in instance storage and updated atomically with every event emission.
+Every `#[contractevent]` struct in `src/events.rs` derives its first topic as the
+struct name in `snake_case` (e.g. `RegisteredEvent` → `"registered_event"`). The
+indexer maps these symbols to a stable `event_kind` and a coarse `category` so
+consumers can filter by category without parsing XDR.
 
-### Indexer Lag Detection Loop
+The full table lives in `scripts/event_indexer.sh` (`TOPIC_TABLE`).
+`scripts/check_event_topics.sh` fails CI if the table falls out of step with
+`src/events.rs`.
 
-```python
-watermark = highest ledger fully applied in the indexer's database
+| Topic symbol | `event_kind` | `category` |
+|---|---|---|
+| `registered_event` | `registered` | `registry` |
+| `removed_event` | `removed` | `registry` |
+| `renamed_event` | `renamed` | `registry` |
+| `verified_event` | `verified` | `attest` |
+| `verification_revoked_event` | `verification_revoked` | `attest` |
+| `verification_configured_event` | `verification_configured` | `attest` |
+| `challenge_started_event` | `challenge_started` | `challenge` |
+| `challenge_cancelled_event` | `challenge_cancelled` | `challenge` |
+| `challenge_completed_event` | `challenge_completed` | `challenge` |
+| `role_granted_event` | `role_granted` | `role` |
+| `role_revoked_event` | `role_revoked` | `role` |
+| `role_grant_pending_event` | `role_grant_pending` | `role` |
+| `role_grant_cancelled_event` | `role_grant_cancelled` | `role` |
+| `paused_event` | `paused` | `admin` |
+| `unpaused_event` | `unpaused` | `admin` |
+| `emergency_paused_event` | `emergency_paused` | `admin` |
+| `emergency_cleared_event` | `emergency_cleared` | `admin` |
+| `guardian_changed_event` | `guardian_changed` | `admin` |
+| `rotation_requested_event` | `rotation_requested` | `admin` |
+| `rotation_executed_event` | `rotation_executed` | `admin` |
+| `rotation_cancelled_event` | `rotation_cancelled` | `admin` |
+| `upgraded_event` | `upgraded` | `upgrade` |
+| `upgrade_attested_event` | `upgrade_attested` | `upgrade` |
+| `attestation_cleared_event` | `attestation_cleared` | `upgrade` |
+| `batch_remove_proposed_event` | `batch_remove_proposed` | `batch` |
+| `batch_remove_executed_event` | `batch_remove_executed` | `batch` |
+| `batch_remove_cancelled_event` | `batch_remove_cancelled` | `batch` |
 
-while True:
-    last = contract.get_last_event_ledger()  # one cheap instance-storage read
-    if watermark < last:
-        events = rpc.getEvents(startLedger=watermark+1, endLedger=last, filters=[...])
-        apply_events_in_order(events)
-        watermark = last
-        commit_database_transaction()
-    else:
-        # no known lag; indexer is current
-        sleep(poll_interval)
-```
+An event whose `topic[0]` does not match any row is written with
+`event_kind: "unknown"` and `category: "unclassified"`. This is intentional: an
+indexer pointed at a newer contract version must keep recording events it does not
+recognise — losing the stream entirely at the moment an unknown event appears would
+be worse than a gap in classification.
 
-**Rules:**
-1. Advance `watermark` only **after** the database transaction commits. A crash between fetching and committing is safe to replay because applying an already-applied event is idempotent.
-2. If `watermark >= last_event_ledger`, the indexer has no known contract lag. Network-level latest-ledger is a separate Horizon/RPC concept; this signal is contract-local only.
-3. The signal is readable **while paused**, so a paused registry can still be reconciled without first unpausing.
+### Adding a new event kind
 
-**Constraints:**
-- The value is a ledger **sequence**, not a timestamp. Compare it against the `ledgerSeq` field in Horizon event envelopes, not the `timestamp` in event payloads.
-- The contract cannot read its own Horizon latest-ledger. A gap of `latest_horizon_ledger - last_event_ledger` ledgers means no contract event was emitted in that range — not necessarily that the indexer is current with the chain tip.
-- For high-throughput periods, one Horizon `getEvents` call may not return all events between `watermark` and `last`; paginate using the Horizon cursor as usual.
+1. Add the `#[contractevent]` struct to `src/events.rs`.
+2. Add a row to the `TOPIC_TABLE` in `scripts/event_indexer.sh`:
+   `<topic_symbol>|<event_kind>|<category>`
+3. `scripts/check_event_topics.sh` will fail CI until both sides agree.
 
 ---
 
-## Public Pagination for Dashboards (Issue #1, #3, #294)
+## Mock Mode (Offline Testing)
 
-For dashboard/indexer reads that don't need admin auth, use `get_public_paginated`:
-
-- **Unauthenticated** — no auth required
-- **Available while paused** — the pause circuit breaker stops state mutations only
-- **Bounded limits** — `MAX_PAGE_LIMIT = 100`, `DEFAULT_PAGE_LIMIT = 20`
-- **Chunk-backed** — reads from persistent chunked index, not the flat instance-storage index, so cost is O(page_size) not O(registry_size)
-- **Opaque cursors** — same encoding as admin `get_registered_paginated`; cursors embed index generation for invalidation on removal (Issue #215)
+Set `MOCK_RESPONSE` to a path containing a canned JSON-RPC `getEvents` response.
+The indexer will process it exactly once and exit, with no network calls and no
+`CONTRACT_ID` requirement.
 
 ```bash
-# Page 1
-stellar contract invoke --id $CONTRACT_ID -- get_public_paginated --limit 50
-
-# Page 2 (use cursor from previous response)
-stellar contract invoke --id $CONTRACT_ID -- get_public_paginated --cursor <cursor> --limit 50
+MOCK_RESPONSE=./scripts/testdata/getEvents.sample.json \
+  CONTRACT_ID=C_MOCK ONESHOT=1 ./scripts/event_indexer.sh
 ```
 
-See [DASHBOARD_SYNC.md](DASHBOARD_SYNC.md#paginated-registry-reads-wave-41--issue-143) for details.
+The sample fixture in `scripts/testdata/getEvents.sample.json` contains a small set
+of representative events for local smoke-testing. It is the same fixture referenced
+by the offline example in `docs/DASHBOARD_SYNC.md`.
 
 ---
 
-## Pending Re-verification (Issue #208)
+## Retry and Backoff
 
-When a verified contributor re-registers to a **different** Stellar address:
-1. The contract clears their `verified` flag and decrements the verified count
-2. Sets a `pending_reverify` flag for that username
+The indexer retries on transient RPC failures up to `MAX_RETRIES` (default 5)
+consecutive failures before giving up with exit code 1:
 
-### Reading Pending Re-verification State
+- Each retry sleeps for `POLL_SECONDS × retry_count` seconds (linear backoff).
+- A pruned cursor triggers a one-time cold-start fallback rather than counting as a
+  failure.
+- Success on any page resets the consecutive-failure counter.
 
-| Endpoint | Use |
-|---|---|
-| `get_pending_reverify(github_username)` | Check a single username — returns `bool` |
-| `get_pending_reverify_page(offset, limit)` | Paginated scan — returns `Vec<String>` of usernames with the flag set |
-
-### Dashboard Sync Workflow
-
-1. **On `RegisteredEvent`** where old and new `stellar_address` differ, call `get_pending_reverify(username)` to confirm the flag was set. Queue the contributor for a re-verification workflow.
-2. **On `VerifiedEvent`**, the flag is cleared automatically — no additional call needed.
-3. **Periodic reconciliation**: Call `get_pending_reverify_page(0, 100)` to build the full list of contributors awaiting re-check.
+Operators running the indexer as a cron job or systemd service should treat exit
+code 1 as an alert and check `RPC_URL` availability.
 
 ---
 
-## Health & Monitoring Endpoints
+## Relation to `get_last_event_ledger`
 
-| Endpoint | Auth | Paused? | Purpose |
+`TrustBridgeContract::get_last_event_ledger()` returns the ledger sequence of the
+most recently emitted event. An indexer can compare its own ingestion watermark
+(the `last_ledger` field in the cursor file) against this value to detect lag
+without an additional RPC call. A watermark equal to the contract's value means the
+indexer is caught up; a lower value means there are unprocessed events.
+
+This is documented in the ABI as a monitoring primitive — see
+[ABI.md](ABI.md) and the `get_last_event_ledger` entry point in `src/lib.rs`.
+
+---
+
+## Relation to Full Registry Exports
+
+For bulk registry reads, prefer `get_public_paginated` (no auth, pause-exempt) over
+`get_all_registered` (admin-only, linear scan). For ongoing sync, the event stream
+is cheaper and more precise than repeated full exports:
+
+| Approach | Auth | Works while paused | Cost |
 |---|---|---|---|
-| `get_last_event_ledger()` | None | ✅ | Lag detection watermark |
-| `get_health()` | None | ✅ | Aggregate health snapshot (paused, version, counts, cooldown, attestation) |
-| `get_stats()` | None | ✅ | `{ total, verified, ever_verified }` |
-| `get_public_paginated()` | None | ✅ | Chunk-backed paginated registry read |
-| `has_record(username)` | None | ✅ | O(1) existence check without deserialization |
-| `get_pending_reverify(username)` | None | ✅ | Single re-verification flag check |
+| `get_all_registered` | Admin required | Yes (admin-gated) | O(n) per call |
+| `get_public_paginated` | None | Yes (Issue #294) | O(page) per call |
+| Event stream (`getEvents`) | None | Events are permanent on-chain | O(new events only) |
 
-All are read-only, require no auth, and work while the contract is paused.
+The event stream does not replace paginated reads for an initial cold sync of a
+large registry — use `get_public_paginated` to bootstrap, then switch to the event
+stream to stay current.
 
 ---
 
-## Related Documentation
+## Dashboard Integration
 
-- [DASHBOARD_SYNC.md](DASHBOARD_SYNC.md) — Dashboard & indexer sync patterns, idempotency tables, dual-index audit
-- [ABI.md](ABI.md) — Complete function, event, and error reference
-- [ARCHITECTURE.md](ARCHITECTURE.md) — Storage layout, auth model, event design
-- [STORAGE_RENT.md](STORAGE_RENT.md) — TTL economics, keeper checklist
-- [scripts/event_indexer.sh](../scripts/event_indexer.sh) — Reference indexer implementation
-- [tests/event_replay.rs](../tests/event_replay.rs) — Replay test fixture and assertions
-- [tests/testdata/event_replay_fixture.json](../tests/testdata/event_replay_fixture.json) — Language-neutral replay fixture
+The `DASHBOARD_SYNC.md` document describes how a dashboard should combine the event
+stream with paginated exports to maintain a consistent local mirror. Key points:
+
+- Idempotency key for upserts: `(ledger_sequence, tx_hash)` — this pair is stable
+  across restarts and re-reads.
+- Dedup on `event.id` (the RPC field), not on `(ledger_sequence, tx_hash)` alone —
+  one transaction can emit multiple events of the same type.
+- Use `topic_symbol` from the normalized record (already decoded by the indexer) to
+  route events to the correct handler without re-decoding `topic[0]`.
+- `category: "batch"` events (`batch_remove_proposed`, `batch_remove_executed`,
+  `batch_remove_cancelled`) indicate bulk removals; reconcile `removed_event` records
+  emitted in the same transaction to update the local mirror atomically.
+
+---
+
+## Security Considerations
+
+- The indexer reads events but never submits transactions. It holds no signing key.
+- `RPC_URL` should be an HTTPS endpoint; plain `http://` is acceptable only for
+  local dev.
+- `events-<network>.jsonl` contains public on-chain data. Treat it as untrusted
+  input when feeding it into downstream systems.
+- A high-volume `registered_event` or `verified_event` burst does not indicate an
+  attack at the indexer layer — it may indicate a wave or a compromised Verifier key.
+  Cross-reference with the `category: "role"` stream to correlate role changes.
+- See [SECURITY.md](SECURITY.md) for the full threat model, including the
+  Verifier rate-limiting control (Issue #292) that caps burst writes per ledger.
+
+---
+
+## Operational Runbook
+
+### Starting the indexer
+
+```bash
+# Copy and fill in env vars:
+cp .env.example .env
+source .env
+
+# Follow forever (background):
+CONTRACT_ID=$CONTRACT_ID nohup ./scripts/event_indexer.sh \
+  >> .indexer/indexer.log 2>&1 &
+echo $! > .indexer/indexer.pid
+
+# Or as a systemd service — see docs/DEPLOYMENT.md.
+```
+
+### Checking indexer lag
+
+```bash
+# Current chain head vs. indexer watermark:
+LAST_LEDGER=$(jq '.last_ledger' .indexer/cursor-testnet.json)
+CHAIN_HEAD=$(curl -s "$RPC_URL" -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"getLatestLedger"}' \
+  | jq '.result.sequence')
+echo "Lag: $((CHAIN_HEAD - LAST_LEDGER)) ledgers"
+```
+
+### Resetting to re-index from scratch
+
+```bash
+# Remove cursor to force cold start (events file is preserved):
+rm .indexer/cursor-testnet.json .indexer/seen-testnet.txt
+
+# Remove everything including the event log:
+rm -rf .indexer/
+```
+
+### Recovering from a pruned cursor
+
+The indexer detects a pruned cursor automatically and falls back to a cold start,
+logging:
+
+```
+[...] stored cursor rejected by RPC — falling back to cold start
+```
+
+No operator action is required unless you need the gap filled. In that case, archive
+the current `events-<network>.jsonl`, remove the cursor, and re-run from a
+`START_LEDGER` that predates the gap.

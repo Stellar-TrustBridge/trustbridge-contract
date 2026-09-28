@@ -219,16 +219,24 @@ pub fn canonicalize_username(env: &Env, s: &String) -> String {
     }
 }
 
-/// Calculate the percentage of verified contributors out of total.
+/// Calculate the percentage of verified contributors out of total using standard
+/// half-up rounding: `(verified * 100 + total / 2) / total`.
 ///
-/// Staged: not yet wired into a call site — intended for the dashboard
-/// stats endpoint once a percentage field is added to `Stats`.
-#[allow(dead_code)] // Issue #248: covered by tests; staged for Stats percentage field.
+/// - Returns 0 if `total == 0` or `verified == 0`.
+/// - Returns 100 if `verified >= total` (clamped).
+/// - Rounds fractional ratios to the nearest whole percentage with round-half-up
+///   semantics (e.g. 1/3 = 33%, 2/3 = 67%, 1/6 = 17%, 5/6 = 83%).
+#[allow(dead_code)] // Issue #248: covered by tests; used by BatchSummary and staged for Stats percentage.
 pub fn calculate_verification_percentage(verified: u32, total: u32) -> u32 {
-    if total == 0 {
+    if total == 0 || verified == 0 {
         return 0;
     }
-    ((verified as u64 * 100) / (total as u64)) as u32
+    if verified >= total {
+        return 100;
+    }
+    let verified = verified as u64;
+    let total = total as u64;
+    ((verified * 100 + (total / 2)) / total) as u32
 }
 
 /// Generate a timestamped event ID for audit trails.
@@ -636,17 +644,44 @@ mod tests {
     // ── Percentage helper ─────────────────────────────────────────────────────
 
     #[test]
-    fn test_calculate_verification_percentage() {
+    fn test_calculate_verification_percentage_boundaries() {
+        // Zero cases
+        assert_eq!(calculate_verification_percentage(0, 0), 0);
+        assert_eq!(calculate_verification_percentage(0, 1), 0);
         assert_eq!(calculate_verification_percentage(0, 100), 0);
-        assert_eq!(calculate_verification_percentage(50, 100), 50);
-        assert_eq!(calculate_verification_percentage(100, 100), 100);
-        assert_eq!(calculate_verification_percentage(1, 3), 33);
         assert_eq!(calculate_verification_percentage(10, 0), 0);
+
+        // 100% boundary & clamping
+        assert_eq!(calculate_verification_percentage(1, 1), 100);
+        assert_eq!(calculate_verification_percentage(50, 50), 100);
+        assert_eq!(calculate_verification_percentage(100, 100), 100);
+        assert_eq!(calculate_verification_percentage(150, 100), 100);
+    }
+
+    #[test]
+    fn test_calculate_verification_percentage_fractional_rounding() {
+        // Half cases
+        assert_eq!(calculate_verification_percentage(1, 2), 50);
+
+        // Thirds (1/3 = 33.333% -> 33, 2/3 = 66.666% -> 67)
+        assert_eq!(calculate_verification_percentage(1, 3), 33);
+        assert_eq!(calculate_verification_percentage(2, 3), 67);
+
+        // Sixths (1/6 = 16.666% -> 17, 5/6 = 83.333% -> 83)
+        assert_eq!(calculate_verification_percentage(1, 6), 17);
+        assert_eq!(calculate_verification_percentage(5, 6), 83);
+
+        // Eighths (1/8 = 12.5% -> 13, 3/8 = 37.5% -> 38, 5/8 = 62.5% -> 63, 7/8 = 87.5% -> 88)
+        assert_eq!(calculate_verification_percentage(1, 8), 13);
+        assert_eq!(calculate_verification_percentage(3, 8), 38);
+        assert_eq!(calculate_verification_percentage(5, 8), 63);
+        assert_eq!(calculate_verification_percentage(7, 8), 88);
     }
 
     #[test]
     fn test_percentage_does_not_overflow_at_u32_max() {
         assert_eq!(calculate_verification_percentage(u32::MAX, u32::MAX), 100);
+        assert_eq!(calculate_verification_percentage(u32::MAX / 2, u32::MAX), 50);
     }
 
     // ── Event ID helper ───────────────────────────────────────────────────────
