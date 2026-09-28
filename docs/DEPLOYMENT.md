@@ -285,6 +285,14 @@ Audit log lines are emitted to stdout and written to `--audit-log` file:
 | `make invoke-stats` | Read statistics |
 | `make invoke-verify` | Verify a contributor (admin or verifier role) |
 | `make invoke-revoke-verification` | Revoke verification (admin or verifier role) |
+| `make invoke-remove` | Remove a registration |
+| `make invoke-batch-remove` | Directly remove a batch of registrations |
+| `make invoke-set-batch-remove-threshold` | Set dual-control threshold for batch removal |
+| `make invoke-get-batch-remove-threshold` | Read configured dual-control threshold |
+| `make invoke-propose-batch-remove` | Propose dual-control batch removal (admin) |
+| `make invoke-execute-batch-remove` | Execute pending dual-control batch removal (second admin key) |
+| `make invoke-cancel-batch-remove` | Cancel pending dual-control batch removal (admin) |
+| `make invoke-get-pending-batch-remove` | Read pending dual-control proposal |
 | `make bulk-verify-dry-run` | Dry-run bulk verify from `BULK_VERIFY_FILE` |
 | `make bulk-verify` | Bulk verify with pacing and audit log |
 | `make bulk-revoke-dry-run` | Dry-run bulk revoke from `BULK_REVOKE_FILE` |

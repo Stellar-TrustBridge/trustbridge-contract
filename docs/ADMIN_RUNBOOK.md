@@ -293,6 +293,16 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   -- batch_remove --caller "$ADMIN" --usernames '["octocat","alice"]'
 ```
 
+Or via Makefile:
+
+```bash
+make invoke-batch-remove \
+  CONTRACT_ID=$CONTRACT_ID \
+  SOURCE=admin \
+  CALLER=$ADMIN \
+  USERNAMES='["octocat","alice"]'
+```
+
 - **Auth:** strictly admin (unlike single `remove`, registrants cannot use it).
   Capped at 25. Returns a `BatchSummary`. Decrements total and verified counters
   for each removed record.
@@ -901,6 +911,16 @@ stellar contract invoke \
   -- set_batch_remove_threshold --threshold 10
 ```
 
+Or via Makefile:
+
+```bash
+# Set threshold (0 to disable)
+make invoke-set-batch-remove-threshold CONTRACT_ID=$CONTRACT_ID SOURCE=admin-identity THRESHOLD=10
+
+# Inspect configured threshold
+make invoke-get-batch-remove-threshold CONTRACT_ID=$CONTRACT_ID
+```
+
 `0` (the default) disables dual control entirely — every `batch_remove` call
 executes directly regardless of size, identical to pre-#219 behavior. With a
 threshold set, any batch **larger** than it (strictly greater; a batch
@@ -945,6 +965,26 @@ stellar contract invoke \
   -- execute_batch_remove --caller $SECOND_KEY
 ```
 
+Or via Makefile:
+
+```bash
+# Admin proposes
+make invoke-propose-batch-remove \
+  CONTRACT_ID=$CONTRACT_ID \
+  SOURCE=admin-identity \
+  CALLER=$ADMIN \
+  USERNAMES='["squatter1","squatter2"]'
+
+# View pending proposal (read-only)
+make invoke-get-pending-batch-remove CONTRACT_ID=$CONTRACT_ID
+
+# A DIFFERENT Role::Admin holder executes
+make invoke-execute-batch-remove \
+  CONTRACT_ID=$CONTRACT_ID \
+  SOURCE=second-key-identity \
+  CALLER=$SECOND_KEY
+```
+
 `get_pending_batch_remove` shows what is queued (works while paused). A
 proposal not executed within 24 hours (`BATCH_REMOVE_PROPOSAL_TTL_SECS`) is
 treated as gone the next time anyone calls `execute_batch_remove` — propose
@@ -956,6 +996,15 @@ again if you still need it removed.
 stellar contract invoke \
   --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
   -- cancel_batch_remove --caller $ADMIN
+```
+
+Or via Makefile:
+
+```bash
+make invoke-cancel-batch-remove \
+  CONTRACT_ID=$CONTRACT_ID \
+  SOURCE=admin-identity \
+  CALLER=$ADMIN
 ```
 
 Available even while paused, so a stuck or mistaken proposal is never

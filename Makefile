@@ -15,6 +15,8 @@ CONTRACT_ID ?=
 GITHUB_USER ?=
 STELLAR_ADDR ?=
 CALLER      ?=
+THRESHOLD   ?=
+USERNAMES   ?=
 FUZZ_SEEDS  ?=
 BENCH_OUT   ?= bench-results.txt
 NORM_BENCH_OUT ?= bench-username-normalization.txt
@@ -35,6 +37,11 @@ FUTURENET_DRY_RUN ?= false
 .PHONY: help build build-legacy test test-rehearsal fuzz storage-keys-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
+        invoke-verify invoke-revoke-verification invoke-get-all-registered invoke-export-paginated \
+        invoke-public-paginated invoke-remove invoke-set-paused \
+        invoke-batch-remove invoke-set-batch-remove-threshold invoke-get-batch-remove-threshold \
+        invoke-propose-batch-remove invoke-execute-batch-remove invoke-cancel-batch-remove \
+        invoke-get-pending-batch-remove \
         ttl-keeper \
 	export-registry validate-registry dr-test futurenet-smoke assert-build \
 	xdr-fixtures diff-test
@@ -423,6 +430,81 @@ invoke-set-paused: ## Toggle contract pause state (PAUSED, SOURCE=admin, CONTRAC
 		--network $(NETWORK) \
 		--send=yes \
 		-- set_paused --paused $(PAUSED)
+
+invoke-batch-remove: require-contract-id ## Directly remove a batch of registrations (CALLER, USERNAMES='["user1",...]', SOURCE=admin, CONTRACT_ID)
+	@if [ -z "$(CALLER)" ]; then \
+		echo "ERROR: set CALLER=<G...> for this target."; exit 1; \
+	fi
+	@if [ -z "$(USERNAMES)" ]; then \
+		echo "ERROR: set USERNAMES='[\"user1\",\"user2\"]' for this target."; exit 1; \
+	fi
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		--send=yes \
+		-- batch_remove --caller $(CALLER) --usernames '$(USERNAMES)'
+
+invoke-set-batch-remove-threshold: require-contract-id ## Set dual-control threshold for batch_remove (THRESHOLD, SOURCE=admin, CONTRACT_ID)
+	@if [ -z "$(THRESHOLD)" ]; then \
+		echo "ERROR: set THRESHOLD=<count> (0 to disable) for this target."; exit 1; \
+	fi
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		--send=yes \
+		-- set_batch_remove_threshold --threshold $(THRESHOLD)
+
+invoke-get-batch-remove-threshold: require-contract-id ## Read configured dual-control batch_remove threshold (read-only)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		-- get_batch_remove_threshold
+
+invoke-propose-batch-remove: require-contract-id ## Propose a dual-control batch removal (CALLER, USERNAMES='["user1",...]', SOURCE=admin, CONTRACT_ID)
+	@if [ -z "$(CALLER)" ]; then \
+		echo "ERROR: set CALLER=<G...> for this target."; exit 1; \
+	fi
+	@if [ -z "$(USERNAMES)" ]; then \
+		echo "ERROR: set USERNAMES='[\"user1\",\"user2\"]' for this target."; exit 1; \
+	fi
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		--send=yes \
+		-- propose_batch_remove --caller $(CALLER) --usernames '$(USERNAMES)'
+
+invoke-execute-batch-remove: require-contract-id ## Execute pending dual-control batch removal from second key (CALLER, SOURCE=second_key, CONTRACT_ID)
+	@if [ -z "$(CALLER)" ]; then \
+		echo "ERROR: set CALLER=<G...> for this target."; exit 1; \
+	fi
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		--send=yes \
+		-- execute_batch_remove --caller $(CALLER)
+
+invoke-cancel-batch-remove: require-contract-id ## Cancel pending dual-control batch removal (CALLER, SOURCE=admin, CONTRACT_ID)
+	@if [ -z "$(CALLER)" ]; then \
+		echo "ERROR: set CALLER=<G...> for this target."; exit 1; \
+	fi
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		--send=yes \
+		-- cancel_batch_remove --caller $(CALLER)
+
+invoke-get-pending-batch-remove: require-contract-id ## View pending dual-control batch removal proposal (read-only)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		-- get_pending_batch_remove
 
 dr-test: ## Run a non-destructive export/validate round-trip on a disposable instance
 	CONTRACT_ID=$(CONTRACT_ID) SOURCE=$(SOURCE) ADMIN_SOURCE=$(ADMIN_SOURCE) \
