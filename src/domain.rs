@@ -32,8 +32,8 @@
 //! network tag is exactly the sort of field that gets copy-pasted from a
 //! testnet runbook into a mainnet deploy.
 //!
-//! `initialize` records the network id it saw. Every later read compares the
-//! live network against that record — see
+//! `initialize` records the network id it saw. Every later guarded call compares
+//! the live network against that record — see
 //! [`require_matching_network`][crate::storage::require_matching_network] — so
 //! state restored onto a different network fails closed instead of silently
 //! serving records that were never meant for it.

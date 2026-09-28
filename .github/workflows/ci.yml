@@ -35,6 +35,9 @@ jobs:
       - name: Test
         run: make test
 
+      - name: Homoglyph corpus
+        run: cargo test --test homoglyph_corpus
+
       - name: Rustdoc
         run: make docs-check
 

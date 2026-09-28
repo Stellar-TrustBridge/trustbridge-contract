@@ -1,4 +1,4 @@
-# cargo-mutants configuration — Issue #243
+# cargo-mutants configuration — Issue #243, error.rs exclusion rationale #434
 #
 # Scope: src/utils.rs only. Username validation is a security boundary
 # (homoglyph rejection, hyphen rules, consecutive-hyphen guard) that a
@@ -8,6 +8,18 @@
 # Out of scope: src/lib.rs and the rest of the crate are intentionally
 # excluded — they are too large to mutate in bounded CI time and are covered
 # by the property-fuzzing suite instead (see REGISTRY_INVARIANTS.md).
+#
+# Explicitly out of scope: src/error.rs (Issue #434). Its body is an
+# exhaustive numeric-discriminant table (`code()` / `from_code()`), a
+# total retry-classification match (`category()` / `is_retryable()`), and
+# derived impls. Mutants there are brittle noise, not signal:
+# discriminant swaps and reordered `from_code` arms either fail to compile
+# or are semantically identical, while a `category()` re-label that the
+# suite did catch is already pinned by `tests/contract_error_codes.rs` and
+# the `scripts/check_error_codes.sh` golden gate (enum ↔ from_code ↔
+# abi/contract_error_codes.golden ↔ docs/ABI.md). Covering that mapping a
+# second time via mutation slows the mutation job without adding coverage
+# of storage or business logic.
 #
 # Run locally:
 #   cargo install cargo-mutants
@@ -24,7 +36,19 @@
 file_filter = ["src/utils.rs"]
 
 # Exclude the test-only helpers — mutating test code creates false signals.
-exclude_re = [r"#\[cfg\(test\)\]", r"mod tests"]
+# The error.rs patterns below are belt-and-braces: file_filter already keeps
+# src/error.rs out of scope, but if the scope is ever widened these keep the
+# brittle discriminant/category boilerplate excluded while storage and
+# business-logic mutants keep running.
+exclude_re = [
+  r"#\[cfg\(test\)\]",
+  r"mod tests",
+  r"src/error\.rs",
+  r"fn code\b",
+  r"fn from_code\b",
+  r"fn category\b",
+  r"fn is_retryable\b",
+]
 
 # Per-mutant timeout in seconds. The full test suite takes <30 s on GitHub
 # Actions; 120 s gives generous headroom for slow runners.
