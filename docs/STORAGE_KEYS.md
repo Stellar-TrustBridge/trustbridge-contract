@@ -155,7 +155,7 @@ numbers are informational and are not linted.
 | `"adt_log"` | `AUDIT_LOG_KEY` | 117 | Key for audit log entries list. |
 | `"adt_stat"` | `AUDIT_STATS_KEY` | 119 | Key for audit stats. |
 | `"chllng"` | `CHALLENGE_KEY` | 121 | Key prefix for per-username challenge records (Issue #214). |
-| `"p_reason"` | `PAUSE_REASON_KEY` | 127 | Key for the pause reason code (Issue #211). |
+| `"pause_rsn"` | `PAUSE_RSN_KEY` / `PAUSE_REASON_KEY` | 127 | Key for the pause reason code (Issue #211). |
 | `"reserved"` | `RESERVED_KEY` | 130 | Key for the reserved username set (Issue #213). |
 | alias of `VER_KEY` | `VERSION_KEY` | 141 | Key for the version stored at `storage::get_version` / `set_version` |
 | `"adm_xfr"` | `ADMIN_TRANSFER_KEY` | 144 | Key for a pending admin transfer proposal (Issue #195). |

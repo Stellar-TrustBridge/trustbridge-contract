@@ -264,9 +264,64 @@ pub struct ChallengeCompletedEvent {
     pub domain: EventDomain,
 }
 
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagedWasmClearedEvent {
+    #[topic]
+    pub wasm_hash: BytesN<32>,
+    pub cleared_by: Address,
+    pub timestamp: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeProposedEvent {
+    #[topic]
+    pub proposal_id: BytesN<32>,
+    pub proposed_by: Address,
+    pub wasm_hash: BytesN<32>,
+    pub timestamp: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeApprovedEvent {
+    #[topic]
+    pub proposal_id: BytesN<32>,
+    pub approved_by: Address,
+    pub timestamp: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeProposalExecutedEvent {
+    #[topic]
+    pub proposal_id: BytesN<32>,
+    pub executed_by: Address,
+    pub timestamp: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpgradeProposalCancelledEvent {
+    #[topic]
+    pub proposal_id: BytesN<32>,
+    pub cancelled_by: Address,
+    pub timestamp: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerificationConfiguredEvent {
+    #[topic]
+    pub admin: Address,
+    pub attestation: String,
+    pub expires_in: u64,
+    pub threshold: u32,
+    pub timestamp: u64,
+}
+
 #[cfg(test)]
 mod test {
     use crate::{TrustBridgeContract, TrustBridgeContractClient};
-   
-
-/* … truncated 6596 chars — edit only what you need near the top … */
+}

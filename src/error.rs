@@ -190,9 +190,6 @@ pub enum ContractError {
     /// `execute_upgrade` was called before the approval threshold was met
     /// (Issue #301).
     UpgradeProposalInsufficientApprovals = 44,
-    /// Instance state was initialized on a different network than the one
-    /// executing (Issue #231).
-    NetworkMismatch = 45,
     /// `register` was given more fallback addresses than `MAX_FALLBACK_ADDRESSES`.
     FallbackListFull = 46,
     /// `rename` was called with a `new_username` that is already registered.
@@ -228,6 +225,10 @@ pub enum ContractError {
     /// expired (Issue #428). The caller must have their role renewed via
     /// `set_role` or `set_role_with_expiry` before retrying.
     RoleExpired = 57,
+    OracleProofBadLayout = 58,
+    OracleProofNotAllowlisted = 59,
+    OracleProofExpired = 60,
+    OracleProofBadSignature = 61,
 }
 
 impl ContractError {
@@ -286,7 +287,6 @@ impl ContractError {
             42 => Some(ContractError::UpgradeProposalAlreadyApproved),
             43 => Some(ContractError::UpgradeProposalDelayActive),
             44 => Some(ContractError::UpgradeProposalInsufficientApprovals),
-            45 => Some(ContractError::NetworkMismatch),
             46 => Some(ContractError::FallbackListFull),
             47 => Some(ContractError::UsernameTaken),
             48 => Some(ContractError::RotationRequired),
@@ -299,6 +299,10 @@ impl ContractError {
             55 => Some(ContractError::BatchRemoveProposalPending),
             56 => Some(ContractError::NoPendingBatchRemove),
             57 => Some(ContractError::RoleExpired),
+            58 => Some(ContractError::OracleProofBadLayout),
+            59 => Some(ContractError::OracleProofNotAllowlisted),
+            60 => Some(ContractError::OracleProofExpired),
+            61 => Some(ContractError::OracleProofBadSignature),
             _ => None,
         }
     }
@@ -378,14 +382,35 @@ impl ContractError {
             ContractError::NoPendingRoleGrant => ErrorCategory::Fatal,
             ContractError::ProvenanceMissing => ErrorCategory::Fatal,
             ContractError::ProvenanceMismatch => ErrorCategory::Fatal,
-            // Fatal, not Retry: the executing network does not change between
-            // attempts. Someone has to re-deploy or re-tag the instance.
-            ContractError::NetworkMismatch => ErrorCategory::Fatal,
-
-            // A pending grant becomes activatable once its timelock elapses.
-            ContractError::RoleGrantNotReady => ErrorCategory::Retry,
+            ContractError::StagedWasmMismatch => ErrorCategory::Fatal,
+            ContractError::UpgradeProposalAlreadyPending => ErrorCategory::Fatal,
+            ContractError::NoUpgradeProposalPending => ErrorCategory::Fatal,
+            ContractError::UpgradeProposalAlreadyApproved => ErrorCategory::Fatal,
+            ContractError::UpgradeProposalDelayActive => ErrorCategory::Retry,
+            ContractError::UpgradeProposalInsufficientApprovals => ErrorCategory::Fatal,
+            ContractError::FallbackListFull => ErrorCategory::Fatal,
+            ContractError::UsernameTaken => ErrorCategory::Fatal,
+            ContractError::RotationRequired => ErrorCategory::Fatal,
+            ContractError::RotationPending => ErrorCategory::Fatal,
+            ContractError::NoRotationPending => ErrorCategory::Fatal,
+            ContractError::RotationNotReady => ErrorCategory::Retry,
+            ContractError::InvalidCursor => ErrorCategory::Fatal,
+            ContractError::VerifyRateLimited => ErrorCategory::Retry,
+            ContractError::DualControlRequired => ErrorCategory::Fatal,
+            ContractError::BatchRemoveProposalPending => ErrorCategory::Fatal,
+            ContractError::NoPendingBatchRemove => ErrorCategory::Fatal,
             ContractError::RoleExpired => ErrorCategory::Auth,
+            ContractError::OracleProofBadLayout => ErrorCategory::Fatal,
+            ContractError::OracleProofNotAllowlisted => ErrorCategory::Auth,
+            ContractError::OracleProofExpired => ErrorCategory::Retry,
+            ContractError::OracleProofBadSignature => ErrorCategory::Fatal,
         }
+    }
+
+    /// Returns `true` if this error category is [`ErrorCategory::Retry`].
+    #[must_use]
+    pub fn is_retryable(self) -> bool {
+        self.category() == ErrorCategory::Retry
     }
 }
 

@@ -103,13 +103,15 @@ fn test_threshold_zero_disables_dual_control() {
     let names = register_n(&env, &contract_id, 20);
 
     env.as_contract(&contract_id, || {
-        assert_eq!(TrustBridgeContract::get_batch_remove_threshold(env.clone()), 0);
+        assert_eq!(
+            TrustBridgeContract::get_batch_remove_threshold(env.clone()),
+            0
+        );
     });
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let summary =
-            TrustBridgeContract::batch_remove(env.clone(), admin.clone(), names).unwrap();
+        let summary = TrustBridgeContract::batch_remove(env.clone(), admin.clone(), names).unwrap();
         assert_eq!(summary.successful, 20);
         assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 0);
     });
@@ -129,7 +131,10 @@ fn test_threshold_above_forces_the_propose_path() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
-        assert_eq!(TrustBridgeContract::get_batch_remove_threshold(env.clone()), 3);
+        assert_eq!(
+            TrustBridgeContract::get_batch_remove_threshold(env.clone()),
+            3
+        );
 
         // 4 > 3: rejected with DualControlRequired, registry untouched.
         let res = TrustBridgeContract::batch_remove(env.clone(), admin.clone(), over);
@@ -212,7 +217,8 @@ fn test_second_proposal_rejected_while_pending() {
         TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
             .unwrap();
 
-        let res = TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone());
+        let res =
+            TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone());
         assert_eq!(res, Err(ContractError::BatchRemoveProposalPending));
 
         // A Role::Admin holder is not the contract admin and cannot propose at
@@ -255,8 +261,7 @@ fn test_execute_by_same_proposer_rejected() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
-        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names)
-            .unwrap();
+        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names).unwrap();
 
         let res = TrustBridgeContract::execute_batch_remove(env.clone(), admin.clone());
         assert_eq!(res, Err(ContractError::NotAuthorized));
@@ -526,18 +531,8 @@ fn test_verified_count_correct_after_dual_control_execute() {
     // Verify the first two contributors so we can assert the verified counter.
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::verify(
-            env.clone(),
-            admin.clone(),
-            username(&env, "user000"),
-        )
-        .unwrap();
-        TrustBridgeContract::verify(
-            env.clone(),
-            admin.clone(),
-            username(&env, "user001"),
-        )
-        .unwrap();
+        TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "user000")).unwrap();
+        TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "user001")).unwrap();
     });
 
     env.as_contract(&contract_id, || {

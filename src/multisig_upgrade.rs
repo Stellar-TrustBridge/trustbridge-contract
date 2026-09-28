@@ -148,7 +148,9 @@ pub fn get_upgrade_proposal(env: &Env) -> Option<UpgradeProposal> {
 }
 
 pub fn set_upgrade_proposal(env: &Env, proposal: &UpgradeProposal) {
-    env.storage().instance().set(&UPGRADE_PROPOSAL_KEY, proposal);
+    env.storage()
+        .instance()
+        .set(&UPGRADE_PROPOSAL_KEY, proposal);
 }
 
 pub fn clear_upgrade_proposal(env: &Env) {
@@ -204,8 +206,7 @@ pub fn record_approval(
     proposal_id: u32,
     approver: Address,
 ) -> Result<UpgradeProposal, ContractError> {
-    let mut proposal = get_upgrade_proposal(env)
-        .ok_or(ContractError::NoUpgradeProposalPending)?;
+    let mut proposal = get_upgrade_proposal(env).ok_or(ContractError::NoUpgradeProposalPending)?;
 
     if proposal.id != proposal_id {
         return Err(ContractError::NoUpgradeProposalPending);
@@ -248,8 +249,7 @@ pub fn require_proposal_executable(
     env: &Env,
     proposal_id: u32,
 ) -> Result<UpgradeProposal, ContractError> {
-    let proposal = get_upgrade_proposal(env)
-        .ok_or(ContractError::NoUpgradeProposalPending)?;
+    let proposal = get_upgrade_proposal(env).ok_or(ContractError::NoUpgradeProposalPending)?;
 
     if proposal.id != proposal_id {
         return Err(ContractError::NoUpgradeProposalPending);
@@ -388,8 +388,7 @@ mod tests {
         let env = Env::default();
         env.ledger().set_timestamp(1_000);
         let proposer = Address::generate(&env);
-        let proposal =
-            create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 3_600).unwrap();
+        let proposal = create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 3_600).unwrap();
         // Still at timestamp 1_000; executable_at = 4_600.
         assert_eq!(
             require_proposal_executable(&env, proposal.id),
@@ -402,8 +401,7 @@ mod tests {
         let env = Env::default();
         env.ledger().set_timestamp(1_000);
         let proposer = Address::generate(&env);
-        let proposal =
-            create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 3_600).unwrap();
+        let proposal = create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 3_600).unwrap();
         // Advance past the delay.
         env.ledger().set_timestamp(4_601);
         // Default threshold = 1; proposer already counted.
@@ -416,8 +414,7 @@ mod tests {
         env.ledger().set_timestamp(1_000);
         set_upgrade_threshold(&env, 2); // Need 2 approvals.
         let proposer = Address::generate(&env);
-        let proposal =
-            create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 0).unwrap();
+        let proposal = create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 0).unwrap();
         // Only 1 approval (the proposer); threshold = 2.
         assert_eq!(
             require_proposal_executable(&env, proposal.id),

@@ -681,7 +681,10 @@ mod tests {
     #[test]
     fn test_percentage_does_not_overflow_at_u32_max() {
         assert_eq!(calculate_verification_percentage(u32::MAX, u32::MAX), 100);
-        assert_eq!(calculate_verification_percentage(u32::MAX / 2, u32::MAX), 50);
+        assert_eq!(
+            calculate_verification_percentage(u32::MAX / 2, u32::MAX),
+            50
+        );
     }
 
     // ── Event ID helper ───────────────────────────────────────────────────────

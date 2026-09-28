@@ -127,9 +127,15 @@ fn event_replay_is_idempotent() {
         Some("GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H"),
         "final address is the re-registration target"
     );
-    assert!(!once.verified, "revoke is the last verification-affecting event");
+    assert!(
+        !once.verified,
+        "revoke is the last verification-affecting event"
+    );
 
-    assert_eq!(twice.applied, once.applied, "second full pass applies nothing");
+    assert_eq!(
+        twice.applied, once.applied,
+        "second full pass applies nothing"
+    );
     assert_eq!(twice.address, once.address);
     assert_eq!(twice.verified, once.verified);
 }

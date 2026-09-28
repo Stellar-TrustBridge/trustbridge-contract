@@ -40,8 +40,13 @@ fn setup() -> (Env, Address, Address, Address) {
 fn register(env: &Env, contract_id: &Address, user: &Address, name: &str) {
     env.mock_all_auths();
     env.as_contract(contract_id, || {
-        TrustBridgeContract::register(env.clone(), username(env, name), user.clone(), Vec::new(env))
-            .unwrap();
+        TrustBridgeContract::register(
+            env.clone(),
+            username(env, name),
+            user.clone(),
+            Vec::new(env),
+        )
+        .unwrap();
     });
 }
 
@@ -88,11 +93,9 @@ fn test_challenge_happy_path_lifecycle() {
 
     let started = env.ledger().timestamp();
     env.as_contract(&contract_id, || {
-        let challenge: ChallengeRecord = TrustBridgeContract::get_challenge(
-            env.clone(),
-            username(&env, "octocat"),
-        )
-        .expect("challenge must be visible via get_challenge");
+        let challenge: ChallengeRecord =
+            TrustBridgeContract::get_challenge(env.clone(), username(&env, "octocat"))
+                .expect("challenge must be visible via get_challenge");
         assert_eq!(challenge.challenged_by, admin);
         assert_eq!(challenge.started_at, started);
         assert_eq!(
@@ -164,7 +167,9 @@ fn test_challenge_happy_path_lifecycle() {
 
     env.as_contract(&contract_id, || {
         assert!(TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).is_none());
-        assert!(TrustBridgeContract::get_challenge(env.clone(), username(&env, "octocat")).is_none());
+        assert!(
+            TrustBridgeContract::get_challenge(env.clone(), username(&env, "octocat")).is_none()
+        );
         let stats = TrustBridgeContract::get_stats(env.clone());
         assert_eq!(stats.total, 0);
         assert_eq!(stats.verified, 0);
@@ -176,7 +181,11 @@ fn test_challenge_happy_path_lifecycle() {
         &contract_id,
         Symbol::new(&env, "challenge_started_event")
     ));
-    assert!(has_event(&env, &contract_id, Symbol::new(&env, "removed_event")));
+    assert!(has_event(
+        &env,
+        &contract_id,
+        Symbol::new(&env, "removed_event")
+    ));
     assert!(has_event(
         &env,
         &contract_id,
@@ -255,7 +264,9 @@ fn test_cancel_challenge_frees_username() {
     });
 
     env.as_contract(&contract_id, || {
-        assert!(TrustBridgeContract::get_challenge(env.clone(), username(&env, "octocat")).is_none());
+        assert!(
+            TrustBridgeContract::get_challenge(env.clone(), username(&env, "octocat")).is_none()
+        );
         // The record itself is preserved by a cancel.
         assert!(TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).is_some());
         assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 1);
@@ -302,7 +313,9 @@ fn test_registrant_self_remove_clears_challenge() {
     });
 
     env.as_contract(&contract_id, || {
-        assert!(TrustBridgeContract::get_challenge(env.clone(), username(&env, "octocat")).is_none());
+        assert!(
+            TrustBridgeContract::get_challenge(env.clone(), username(&env, "octocat")).is_none()
+        );
         assert!(TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).is_none());
         assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 0);
     });
@@ -384,7 +397,11 @@ fn test_start_challenge_on_unregistered_username_returns_not_registered() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         assert_eq!(
-            TrustBridgeContract::start_challenge(env.clone(), admin.clone(), username(&env, "ghost")),
+            TrustBridgeContract::start_challenge(
+                env.clone(),
+                admin.clone(),
+                username(&env, "ghost")
+            ),
             Err(ContractError::NotRegistered)
         );
     });
@@ -429,14 +446,18 @@ fn test_challenge_ops_are_admin_only() {
 
     // The rejected calls moved nothing.
     env.as_contract(&contract_id, || {
-        assert!(TrustBridgeContract::get_challenge(env.clone(), username(&env, "octocat")).is_none());
+        assert!(
+            TrustBridgeContract::get_challenge(env.clone(), username(&env, "octocat")).is_none()
+        );
         assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 1);
     });
 
     // `get_challenge` is a public read — a non-admin can see the challenge.
     start_challenge(&env, &contract_id, &admin, "octocat");
     env.as_contract(&contract_id, || {
-        assert!(TrustBridgeContract::get_challenge(env.clone(), username(&env, "octocat")).is_some());
+        assert!(
+            TrustBridgeContract::get_challenge(env.clone(), username(&env, "octocat")).is_some()
+        );
     });
 }
 

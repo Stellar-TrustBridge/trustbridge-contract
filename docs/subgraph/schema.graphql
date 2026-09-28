@@ -240,6 +240,24 @@ type RotationCancelledEvent @entity(immutable: true) {
 }
 
 """
+One `BotStatusChangedEvent`: an admin or the registrant updated the bot flag for
+a contributor (Issue #236). Topic: `bot_status_changed_event`. `github_username`
+is the event topic.
+"""
+type BotStatusChangedEvent @entity(immutable: true) {
+  "Stable event id (Issue #283)."
+  id: ID!
+  githubUsername: String!
+  isBot: Boolean!
+  actor: Bytes!
+  timestamp: BigInt!
+  domain: EventDomain!
+  ledgerSequence: BigInt!
+  txHash: Bytes!
+  contributor: Contributor!
+}
+
+"""
 Derived, mutable aggregate: current best-known state of one GitHub username on
 one contract instance. Rebuilt by the mappings from the event stream; the
 contract's own storage remains the source of truth for reconciliation.
@@ -254,10 +272,13 @@ type Contributor @entity {
   verified: Boolean!
   "False until a RemovedEvent with no later RegisteredEvent."
   removed: Boolean!
+  "True if marked as a bot account (Issue #236)."
+  isBot: Boolean!
   firstRegisteredAt: BigInt
   lastEventAt: BigInt!
   lastLedgerSequence: BigInt!
   registrations: [RegisteredEvent!]! @derivedFrom(field: "contributor")
+  botStatusChanges: [BotStatusChangedEvent!]! @derivedFrom(field: "contributor")
   verifications: [VerifiedEvent!]! @derivedFrom(field: "contributor")
   revocations: [VerificationRevokedEvent!]! @derivedFrom(field: "contributor")
   removals: [RemovedEvent!]! @derivedFrom(field: "contributor")

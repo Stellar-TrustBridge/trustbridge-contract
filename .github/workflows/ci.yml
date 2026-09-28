@@ -12,7 +12,7 @@ env:
 
 jobs:
   quality:
-    name: Quality gate (fmt, clippy, test, docs)
+    name: Quality gate (make check)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -22,24 +22,13 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: wasm32v1-none, wasm32-unknown-unknown
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Format
-        run: make fmt
-
-      - name: Clippy
-        run: make lint
-
-      - name: Test
-        run: make test
-
-      - name: Homoglyph corpus
-        run: cargo test --test homoglyph_corpus
-
-      - name: Rustdoc
-        run: make docs-check
+      - name: Run quality gate
+        run: make check
 
   audit:
     name: Audit (cargo audit + cargo deny)
@@ -120,13 +109,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Install Stellar CLI
-        run: |
-          test -f Cargo.toml
-          test -f rust-toolchain.toml
-          test -f src/lib.rs
-          test -f README.md
-          test -f Makefile
+      - name: Build contract WASM
+        run: make build-legacy
 
       - name: Check storage-rent estimator golden
         run: bash scripts/test_storage_rent_estimator.sh

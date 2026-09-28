@@ -38,6 +38,8 @@ pub const INDEX_KEY: Symbol = symbol_short!("idx");
 pub const PAUSED_KEY: Symbol = symbol_short!("pause");
 /// Last `PauseReason` recorded by `pause` / `unpause`.
 pub const PAUSE_RSN_KEY: Symbol = symbol_short!("pause_rsn");
+/// Consolidated alias for [`PAUSE_RSN_KEY`].
+pub const PAUSE_REASON_KEY: Symbol = PAUSE_RSN_KEY;
 pub const COOLDOWN_KEY: Symbol = symbol_short!("cdown");
 /// Seconds a requested address rotation must wait before it can execute
 /// (Issue #234). 0 disables the delay, matching the cooldown convention.
@@ -1446,11 +1448,7 @@ pub fn set_verify_limit(env: &Env, limit: u32) {
 ///
 /// The admin is expected to have been filtered out by the caller before this
 /// runs; nothing here special-cases it.
-pub fn charge_verify_rate(
-    env: &Env,
-    verifier: &Address,
-    units: u32,
-) -> Result<(), ContractError> {
+pub fn charge_verify_rate(env: &Env, verifier: &Address, units: u32) -> Result<(), ContractError> {
     let limit = get_verify_limit(env);
     if limit == 0 {
         return Ok(());
@@ -1695,7 +1693,9 @@ pub fn get_role_holders_internal(env: &Env, offset: u32, limit: u32) -> Vec<Role
 
     let end = offset.saturating_add(capped).min(index.len());
     for i in offset..end {
-        let Some(address) = index.get(i) else { continue };
+        let Some(address) = index.get(i) else {
+            continue;
+        };
         if let Some(role) = get_role(env, &address) {
             page.push_back(RoleHolder { address, role });
         }
@@ -1773,9 +1773,7 @@ pub fn get_verifier_allowlist(env: &Env) -> Vec<VerifierAllowEntry> {
 }
 
 fn set_verifier_allowlist(env: &Env, list: &Vec<VerifierAllowEntry>) {
-    env.storage()
-        .instance()
-        .set(&VERIFIER_ALLOWLIST_KEY, list);
+    env.storage().instance().set(&VERIFIER_ALLOWLIST_KEY, list);
 }
 
 /// `true` when the allowlist has ever been populated. Used to decide whether the
@@ -2081,11 +2079,7 @@ pub const MIGRATION_STEPS: &[MigrationStep] = &[
 ///
 /// Idempotent: calling again with the same `current` / `target` pair
 /// returns 0 because `current >= step.from_version` after the first run.
-pub fn run_migration_steps(
-    env: &Env,
-    current: (u32, u32, u32),
-    target: (u32, u32, u32),
-) -> u32 {
+pub fn run_migration_steps(env: &Env, current: (u32, u32, u32), target: (u32, u32, u32)) -> u32 {
     let mut applied: u32 = 0;
 
     for step in MIGRATION_STEPS {
@@ -2131,6 +2125,7 @@ pub fn get_pause_reason(env: &Env) -> Option<PauseReason> {
     env.storage()
         .instance()
         .get::<Symbol, u32>(&PAUSE_RSN_KEY)
+        .or_else(|| env.storage().instance().get::<Symbol, u32>(&symbol_short!("p_reason")))
         .and_then(PauseReason::from_code)
 }
 

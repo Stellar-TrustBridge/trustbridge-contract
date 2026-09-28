@@ -46,7 +46,10 @@ fn find_event_xdr(env: &Env, contract_id: &Address, symbol_name: &str) -> soroba
     for (source, topics, data) in env.events().all() {
         if source == *contract_id {
             if let Some(first) = topics.get(0) {
-                if Symbol::try_from_val(env, &first).map(|s| s == target).unwrap_or(false) {
+                if Symbol::try_from_val(env, &first)
+                    .map(|s| s == target)
+                    .unwrap_or(false)
+                {
                     // Serialize the event data ScVal to XDR bytes.
                     return data.to_xdr(env);
                 }
@@ -79,8 +82,16 @@ fn base64_encode(input: &[u8]) -> std::string::String {
     let mut i = 0;
     while i < input.len() {
         let b0 = input[i] as u32;
-        let b1 = if i + 1 < input.len() { input[i + 1] as u32 } else { 0 };
-        let b2 = if i + 2 < input.len() { input[i + 2] as u32 } else { 0 };
+        let b1 = if i + 1 < input.len() {
+            input[i + 1] as u32
+        } else {
+            0
+        };
+        let b2 = if i + 2 < input.len() {
+            input[i + 2] as u32
+        } else {
+            0
+        };
         let n = (b0 << 16) | (b1 << 8) | b2;
         out.push(CHARS[((n >> 18) & 0x3F) as usize] as char);
         out.push(CHARS[((n >> 12) & 0x3F) as usize] as char);
@@ -118,13 +129,8 @@ fn generate_xdr_fixtures() {
     let username = s(&env, "octocat");
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(
-            env.clone(),
-            username.clone(),
-            user.clone(),
-            Vec::new(&env),
-        )
-        .unwrap();
+        TrustBridgeContract::register(env.clone(), username.clone(), user.clone(), Vec::new(&env))
+            .unwrap();
     });
 
     env.as_contract(&contract_id, || {
@@ -181,12 +187,8 @@ fn generate_xdr_fixtures() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::propose_batch_remove(
-            env.clone(),
-            admin.clone(),
-            names.clone(),
-        )
-        .unwrap();
+        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
+            .unwrap();
     });
 
     let proposed_event_xdr = find_event_xdr(&env, &contract_id, "batch_remove_proposed_event");
@@ -229,12 +231,8 @@ fn generate_xdr_fixtures() {
             )
             .unwrap();
         }
-        TrustBridgeContract::propose_batch_remove(
-            env.clone(),
-            admin.clone(),
-            names.clone(),
-        )
-        .unwrap();
+        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
+            .unwrap();
     });
 
     // ── Fixture 4: BatchRemoveCancelledEvent ─────────────────────────────────
@@ -244,8 +242,7 @@ fn generate_xdr_fixtures() {
         TrustBridgeContract::cancel_batch_remove(env.clone(), admin.clone()).unwrap();
     });
 
-    let cancelled_event_xdr =
-        find_event_xdr(&env, &contract_id, "batch_remove_cancelled_event");
+    let cancelled_event_xdr = find_event_xdr(&env, &contract_id, "batch_remove_cancelled_event");
     print_fixture(
         "batch_remove_cancelled_event",
         &cancelled_event_xdr,
@@ -255,6 +252,8 @@ fn generate_xdr_fixtures() {
     );
 
     println!();
-    println!("Paste each block above into the corresponding file under ts-differential-tests/fixtures/");
+    println!(
+        "Paste each block above into the corresponding file under ts-differential-tests/fixtures/"
+    );
     println!("Or run: make xdr-fixtures");
 }

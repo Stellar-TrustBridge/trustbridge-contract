@@ -154,7 +154,12 @@ pub fn root_of_records(env: &Env, records: &Vec<(String, ContributorRecord)>) ->
     let mut leaves: Vec<BytesN<32>> = Vec::new(env);
     for i in 0..records.len() {
         let (username, record) = records.get(i).unwrap();
-        leaves.push_back(leaf_hash(env, &username, &record.stellar_address, record.verified));
+        leaves.push_back(leaf_hash(
+            env,
+            &username,
+            &record.stellar_address,
+            record.verified,
+        ));
     }
     root_of(env, &leaves)
 }

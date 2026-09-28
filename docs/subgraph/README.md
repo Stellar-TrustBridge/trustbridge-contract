@@ -7,7 +7,7 @@ for this repo — [`scripts/event_indexer.sh`](../../scripts/event_indexer.sh)
 remains the runnable local reference.
 
 - [`schema.graphql`](schema.graphql) — entities for every contributor-directed
-  contract event (`RegisteredEvent`, `VerifiedEvent`,
+  contract event (`RegisteredEvent`, `BotStatusChangedEvent`, `VerifiedEvent`,
   `VerificationRevokedEvent`, `RemovedEvent`, `RenamedEvent`, the challenge
   lifecycle, and the address-rotation lifecycle), plus a derived `Contributor`
   aggregate.
@@ -48,6 +48,7 @@ the contract does not emit.
 | Contract event | Topic symbol | Payload fields (from `src/events.rs`) | Entity |
 |---|---|---|---|
 | `RegisteredEvent` | `registered_event` | `github_username` (topic), `stellar_address`, `timestamp`, `sponsor: Option<Address>`, `domain` | `RegisteredEvent` |
+| `BotStatusChangedEvent` | `bot_status_changed_event` | `github_username` (topic), `is_bot`, `actor`, `timestamp`, `domain` | `BotStatusChangedEvent` |
 | `VerifiedEvent` | `verified_event` | `github_username` (topic), `stellar_address`, `timestamp`, `domain` | `VerifiedEvent` |
 | `VerificationRevokedEvent` | `verification_revoked_event` | `github_username` (topic), `stellar_address`, `timestamp`, `reason_code`, `domain` | `VerificationRevokedEvent` |
 | `RemovedEvent` | `removed_event` | `github_username` (topic), `stellar_address`, `timestamp`, `domain` | `RemovedEvent` |

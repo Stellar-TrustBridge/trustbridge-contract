@@ -6,14 +6,19 @@ fn declared_export_page_fields(source: &str) -> Vec<String> {
         .expect("ExportPage declaration must exist");
     let struct_body = &source[struct_start..]
         .split_once('}')
-        .expect("ExportPage declaration must be closed").0;
+        .expect("ExportPage declaration must be closed")
+        .0;
 
     struct_body
         .lines()
         .filter_map(|line| {
             let field = line.trim().strip_prefix("pub ")?;
             let (name, field_type) = field.split_once(':')?;
-            Some(format!("{}: {}", name.trim(), field_type.trim_end_matches(',').trim()))
+            Some(format!(
+                "{}: {}",
+                name.trim(),
+                field_type.trim_end_matches(',').trim()
+            ))
         })
         .collect()
 }

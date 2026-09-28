@@ -13,8 +13,8 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Bytes, BytesN, Env, String};
 use soroban_sdk::Vec as SVec;
+use soroban_sdk::{testutils::Address as _, Address, Bytes, BytesN, Env, String};
 
 use trustbridge_contract::TrustBridgeContract;
 
@@ -74,7 +74,10 @@ fn node_hash(env: &Env, left: &BytesN<32>, right: &BytesN<32>) -> BytesN<32> {
 /// had no sibling and was carried up unchanged.
 #[derive(Clone)]
 enum Step {
-    Pair { sibling: BytesN<32>, sibling_is_left: bool },
+    Pair {
+        sibling: BytesN<32>,
+        sibling_is_left: bool,
+    },
     Promoted,
 }
 
@@ -127,7 +130,10 @@ fn verify_proof(env: &Env, leaf: &BytesN<32>, steps: &[Step], root: &BytesN<32>)
     let mut acc = leaf.clone();
     for step in steps {
         acc = match step {
-            Step::Pair { sibling, sibling_is_left } => {
+            Step::Pair {
+                sibling,
+                sibling_is_left,
+            } => {
                 if *sibling_is_left {
                     node_hash(env, sibling, &acc)
                 } else {
@@ -214,8 +220,13 @@ fn test_included_member_proves_inclusion_and_non_member_fails() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         for (name, addr) in names.iter().zip(addrs.iter()) {
-            TrustBridgeContract::register(env.clone(), s(&env, name), addr.clone(), SVec::new(&env))
-                .unwrap();
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, name),
+                addr.clone(),
+                SVec::new(&env),
+            )
+            .unwrap();
         }
         TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "carol")).unwrap();
 
@@ -227,7 +238,12 @@ fn test_included_member_proves_inclusion_and_non_member_fails() {
         let mut leaves: SVec<BytesN<32>> = SVec::new(&env);
         for i in 0..page.records.len() {
             let (username, record) = page.records.get(i).unwrap();
-            leaves.push_back(leaf_hash(&env, &username, &record.stellar_address, record.verified));
+            leaves.push_back(leaf_hash(
+                &env,
+                &username,
+                &record.stellar_address,
+                record.verified,
+            ));
         }
 
         // "carol" (index 2) is verified; her leaf must reflect that and her

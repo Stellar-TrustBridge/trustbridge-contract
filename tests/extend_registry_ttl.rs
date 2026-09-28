@@ -33,13 +33,8 @@ fn s(env: &Env, text: &str) -> String {
 fn register_user(env: &Env, contract_id: &Address, username: &str, user: &Address) {
     env.mock_all_auths();
     env.as_contract(contract_id, || {
-        TrustBridgeContract::register(
-            env.clone(),
-            s(env, username),
-            user.clone(),
-            Vec::new(env),
-        )
-        .unwrap();
+        TrustBridgeContract::register(env.clone(), s(env, username), user.clone(), Vec::new(env))
+            .unwrap();
     });
 }
 
@@ -76,11 +71,7 @@ fn test_extend_registry_ttl_multiple_registered_usernames() {
     register_user(&env, &contract_id, "carol", &user3);
 
     env.as_contract(&contract_id, || {
-        let usernames = Vec::from_array(&env, [
-            s(&env, "alice"),
-            s(&env, "bob"),
-            s(&env, "carol"),
-        ]);
+        let usernames = Vec::from_array(&env, [s(&env, "alice"), s(&env, "bob"), s(&env, "carol")]);
         let extended = TrustBridgeContract::extend_registry_ttl(env.clone(), usernames).unwrap();
 
         assert_eq!(extended, 3, "Should extend all 3 registered usernames");
@@ -100,14 +91,20 @@ fn test_extend_registry_ttl_mixed_registered_and_unregistered() {
     // "bob" is not registered
 
     env.as_contract(&contract_id, || {
-        let usernames = Vec::from_array(&env, [
-            s(&env, "alice"),
-            s(&env, "bob"),      // Unregistered, should skip
-            s(&env, "carol"),
-        ]);
+        let usernames = Vec::from_array(
+            &env,
+            [
+                s(&env, "alice"),
+                s(&env, "bob"), // Unregistered, should skip
+                s(&env, "carol"),
+            ],
+        );
         let extended = TrustBridgeContract::extend_registry_ttl(env.clone(), usernames).unwrap();
 
-        assert_eq!(extended, 2, "Should extend only the 2 registered usernames, skip unregistered");
+        assert_eq!(
+            extended, 2,
+            "Should extend only the 2 registered usernames, skip unregistered"
+        );
     });
 }
 
@@ -118,14 +115,13 @@ fn test_extend_registry_ttl_all_unregistered() {
     let (env, _admin, contract_id) = setup();
 
     env.as_contract(&contract_id, || {
-        let usernames = Vec::from_array(&env, [
-            s(&env, "alice"),
-            s(&env, "bob"),
-            s(&env, "carol"),
-        ]);
+        let usernames = Vec::from_array(&env, [s(&env, "alice"), s(&env, "bob"), s(&env, "carol")]);
         let extended = TrustBridgeContract::extend_registry_ttl(env.clone(), usernames).unwrap();
 
-        assert_eq!(extended, 0, "Should return 0 when no usernames are registered");
+        assert_eq!(
+            extended, 0,
+            "Should return 0 when no usernames are registered"
+        );
     });
 }
 
@@ -138,15 +134,15 @@ fn test_extend_registry_ttl_duplicate_usernames_in_list() {
     register_user(&env, &contract_id, "alice", &user);
 
     env.as_contract(&contract_id, || {
-        let usernames = Vec::from_array(&env, [
-            s(&env, "alice"),
-            s(&env, "alice"),
-            s(&env, "alice"),
-        ]);
+        let usernames =
+            Vec::from_array(&env, [s(&env, "alice"), s(&env, "alice"), s(&env, "alice")]);
         let extended = TrustBridgeContract::extend_registry_ttl(env.clone(), usernames).unwrap();
 
         // Each call to extend_record_ttl returns true for the same record
-        assert_eq!(extended, 3, "Should count each duplicate extension separately");
+        assert_eq!(
+            extended, 3,
+            "Should count each duplicate extension separately"
+        );
     });
 }
 
@@ -193,7 +189,10 @@ fn test_extend_registry_ttl_at_max_batch_size() {
         }
 
         let extended = TrustBridgeContract::extend_registry_ttl(env.clone(), usernames).unwrap();
-        assert_eq!(extended, 100, "Should extend all 100 usernames at max batch size");
+        assert_eq!(
+            extended, 100,
+            "Should extend all 100 usernames at max batch size"
+        );
     });
 }
 
@@ -204,7 +203,8 @@ fn test_extend_registry_ttl_over_max_batch_size_rejected() {
 
     env.as_contract(&contract_id, || {
         let mut usernames = Vec::new(&env);
-        for i in 0..=100 {  // 101 items
+        for i in 0..=100 {
+            // 101 items
             let username = alloc::format!("user{:03}", i);
             usernames.push_back(s(&env, &username));
         }
@@ -323,12 +323,16 @@ fn test_extend_registry_ttl_idempotent() {
         let usernames = Vec::from_array(&env, [s(&env, "alice")]);
 
         // First extension
-        let extended1 = TrustBridgeContract::extend_registry_ttl(env.clone(), usernames.clone()).unwrap();
+        let extended1 =
+            TrustBridgeContract::extend_registry_ttl(env.clone(), usernames.clone()).unwrap();
         assert_eq!(extended1, 1);
 
         // Second extension (idempotent)
         let extended2 = TrustBridgeContract::extend_registry_ttl(env.clone(), usernames).unwrap();
-        assert_eq!(extended2, 1, "Extending TTL again should succeed (idempotent)");
+        assert_eq!(
+            extended2, 1,
+            "Extending TTL again should succeed (idempotent)"
+        );
     });
 }
 
@@ -351,7 +355,10 @@ fn test_extend_registry_ttl_after_removal_returns_zero() {
         let usernames = Vec::from_array(&env, [s(&env, "alice")]);
         let extended = TrustBridgeContract::extend_registry_ttl(env.clone(), usernames).unwrap();
 
-        assert_eq!(extended, 0, "Removed username should not be extended, return 0");
+        assert_eq!(
+            extended, 0,
+            "Removed username should not be extended, return 0"
+        );
     });
 }
 
@@ -407,7 +414,10 @@ fn test_extend_registry_ttl_case_folded_username() {
         let usernames = Vec::from_array(&env, [s(&env, "alice")]);
         let extended = TrustBridgeContract::extend_registry_ttl(env.clone(), usernames).unwrap();
 
-        assert_eq!(extended, 1, "Case-folded username should be found and extended");
+        assert_eq!(
+            extended, 1,
+            "Case-folded username should be found and extended"
+        );
     });
 }
 
@@ -507,10 +517,10 @@ fn test_extend_registry_ttl_varying_username_lengths() {
     let (env, _admin, contract_id) = setup();
 
     let usernames_to_register = vec![
-        "a",                                        // 1 char
-        "alice",                                    // 5 chars
-        "very-long-username-with-hyphens",          // 32 chars
-        "a".repeat(39).as_str(),                    // 39 chars (max)
+        "a",                               // 1 char
+        "alice",                           // 5 chars
+        "very-long-username-with-hyphens", // 32 chars
+        "a".repeat(39).as_str(),           // 39 chars (max)
     ];
 
     for username in &usernames_to_register {
@@ -525,7 +535,10 @@ fn test_extend_registry_ttl_varying_username_lengths() {
         }
 
         let extended = TrustBridgeContract::extend_registry_ttl(env.clone(), usernames).unwrap();
-        assert_eq!(extended, 4, "Should extend all 4 usernames of varying lengths");
+        assert_eq!(
+            extended, 4,
+            "Should extend all 4 usernames of varying lengths"
+        );
     });
 }
 
@@ -549,9 +562,9 @@ fn test_extend_registry_ttl_varying_username_lengths() {
 fn test_extend_registry_ttl_coverage_complete() {
     // This is a documentation test. If it compiles and runs, all test
     // categories exist.
-    
+
     const EXPECTED_TEST_COUNT: usize = 25;
-    
+
     // The real validation is in each individual test. This documents the scope.
     assert!(
         EXPECTED_TEST_COUNT >= 24,
