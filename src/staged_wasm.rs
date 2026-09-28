@@ -17,6 +17,14 @@
 //! the staged slot first (fail-fast on mismatch), then proceeds to the
 //! attestation check.
 //!
+//! ## Attestation gating (Issue #406)
+//!
+//! Sensitive admin entry points must consistently require attestation when
+//! `attestation_required` is configured.  `require_staged_wasm_consistent`
+//! therefore also enforces the attestation gate (fail-closed) so that any
+//! caller routing through the staged slot cannot bypass the peer-path check.
+//! The gate is a no-op when `attestation_required` is unset.
+//!
 //! ## Storage
 //!
 //! The staged hash is stored in instance storage under `STAGED_WASM_KEY`.
@@ -69,17 +77,26 @@ pub fn clear_staged_wasm(env: &Env) {
 
 // ── Business logic ────────────────────────────────────────────────────────────
 
-/// Validates that `wasm_hash` is consistent with the staged slot.
+/// Validates that `wasm_hash` is consistent with the staged slot **and** that
+/// the attestation gate is satisfied when configured.
 ///
-/// If nothing is staged, the check is a no-op — staging is advisory, not
+/// If nothing is staged, the staged check is a no-op — staging is advisory, not
 /// mandatory (use `set_attestation_required` for a hard gate).  If a hash is
 /// staged, the supplied hash must match; a mismatch fails with
 /// [`ContractError::StagedWasmMismatch`].
+///
+/// Regardless of the staged slot, when `attestation_required` is set the
+/// caller must have a valid, unexpired attestation; otherwise the call fails
+/// closed with [`ContractError::AttestationRequired`].  This unifies the
+/// attestation gate across admin/staged-wasm entry points so no sensitive path
+/// can bypass it.
 ///
 /// # Errors
 ///
 /// - [`ContractError::StagedWasmMismatch`] when a staged hash exists and
 ///   differs from `wasm_hash`.
+/// - [`ContractError::AttestationRequired`] when `attestation_required` is set
+///   and no valid attestation is present.
 pub fn require_staged_wasm_consistent(
     env: &Env,
     wasm_hash: &BytesN<32>,
@@ -89,6 +106,7 @@ pub fn require_staged_wasm_consistent(
             return Err(ContractError::StagedWasmMismatch);
         }
     }
+    crate::storage::require_attestation_if_required(env)?;
     Ok(())
 }
 
@@ -223,5 +241,26 @@ mod tests {
         assert_eq!(retrieved.wasm_hash, hash);
         assert_eq!(retrieved.staged_by, admin);
         assert_eq!(retrieved.staged_at, 9_999);
+    }
+
+    /// Attestation required but missing → fail closed (Issue #406).
+    #[test]
+    fn test_attestation_required_fails_closed_when_missing() {
+        let env = Env::default();
+        crate::storage::set_attestation_required(&env, true);
+        let hash = make_hash(&env, 0x77);
+        assert_eq!(
+            require_staged_wasm_consistent(&env, &hash),
+            Err(ContractError::AttestationRequired)
+        );
+    }
+
+    /// Attestation not required → gate is a no-op (Issue #406).
+    #[test]
+    fn test_attestation_not_required_allows_call() {
+        let env = Env::default();
+        crate::storage::set_attestation_required(&env, false);
+        let hash = make_hash(&env, 0x78);
+        assert!(require_staged_wasm_consistent(&env, &hash).is_ok());
     }
 }

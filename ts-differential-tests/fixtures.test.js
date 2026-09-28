@@ -1,85 +1,41 @@
-/**
- * Differential tests: decode XDR fixtures using TypeScript SDK
- * and compare against Rust contract golden values.
- */
+/** Decode the Rust-generated get_address simulation golden with the JS SDK. */
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { Address, xdr } from '@stellar/stellar-sdk';
 
-import { xdr, Address } from '@stellar/stellar-sdk';
-import { readFileSync } from 'fs';
-import { join } from 'path';
-import { fileURLToPath } from 'url';
+const fixturePath = fileURLToPath(
+  new URL('../tests/testdata/bindings/get_address_simulate.v1.json', import.meta.url)
+);
+const fixture = JSON.parse(readFileSync(fixturePath, 'utf8'));
 
-const __dirname = fileURLToPath(new URL('.', import.meta.url));
+function decodeRecord(encoded) {
+  const value = xdr.ScVal.fromXDR(encoded, 'base64');
+  if (value.switch().name === 'scvVoid') return null;
 
-// Load XDR fixture
-function loadFixture(name) {
-  const path = join(__dirname, 'fixtures', `${name}.xdr`);
-  const content = readFileSync(path, 'utf-8').trim();
-  
-  // Skip placeholder comments
-  if (content.startsWith('#')) {
-    throw new Error(
-      `Fixture ${name} is a placeholder. Run 'make xdr-fixtures' to generate real fixtures.`
-    );
-  }
-  
-  return content;
+  assert.equal(value.switch().name, 'scvMap');
+  const fields = Object.fromEntries(value.value().map((entry) => {
+    assert.equal(entry.key().switch().name, 'scvSymbol');
+    const key = entry.key().value().toString();
+    const field = entry.val();
+    const type = field.switch().name;
+    if (type === 'scvAddress') return [key, Address.fromScAddress(field.value()).toString()];
+    if (type === 'scvU32' || type === 'scvBool') return [key, field.value()];
+    throw new Error(`Unexpected XDR type for ${key}: ${type}`);
+  }));
+  return fields;
 }
 
-// Load golden address value
-function loadGoldenAddress(name) {
-  const path = join(__dirname, 'fixtures', `${name}.address`);
-  const content = readFileSync(path, 'utf-8').trim();
-  
-  // Skip placeholder comments
-  if (content.startsWith('#')) {
-    throw new Error(
-      `Golden address ${name} is a placeholder. Run 'make xdr-fixtures' to generate real fixtures.`
-    );
-  }
-  
-  return content;
-}
+assert.equal(fixture.function, 'get_address');
+assert.equal(fixture.version, 1);
+assert.deepEqual(
+  fixture.cases.map(({ name }) => name).sort(),
+  ['not_registered', 'registered']
+);
 
-// Parse XDR and extract address
-function parseAddressFromXdr(xdrString) {
-  const scVal = xdr.ScVal.fromXDR(xdrString, 'base64');
-  
-  // Handle Option<ContributorRecord> - Some(record) or None
-  if (scVal.switch().name === 'ScValSome') {
-    const record = scVal.value();
-    
-    // ContributorRecord is a struct with stellar_address as first field
-    const stellarAddressBytes = record.value()[0].value().value();
-    const address = Address.fromScAddress(stellarAddressBytes);
-    return address.toString();
-  }
-  
-  return null;
+for (const { name, retval_xdr, decoded } of fixture.cases) {
+  test(`Rust get_address XDR: ${name}`, () => {
+    assert.deepEqual(decodeRecord(retval_xdr), decoded);
+  });
 }
-
-// Test: get_address fixture should decode to expected address
-export default {
-  async test() {
-    console.log('Running differential tests for TypeScript bindings...');
-    
-    // Test get_address fixture
-    const get_address_xdr = loadFixture('get_address_octocat');
-    const decodedAddress = parseAddressFromXdr(get_address_xdr);
-    
-    if (!decodedAddress) {
-      throw new Error('Failed to decode address from XDR fixture');
-    }
-    
-    console.log(`Decoded address: ${decodedAddress}`);
-    
-    // This address should match the golden value in the fixture
-    const goldenAddress = loadGoldenAddress('get_address_octocat');
-    if (decodedAddress !== goldenAddress) {
-      throw new Error(
-        `Address mismatch: TS decoded ${decodedAddress} but golden is ${goldenAddress}`
-      );
-    }
-    
-    console.log('✓ TypeScript decode matches Rust golden value');
-  }
-};

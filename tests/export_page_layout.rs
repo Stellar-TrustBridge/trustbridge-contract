@@ -18,16 +18,33 @@ fn declared_export_page_fields(source: &str) -> Vec<String> {
         .collect()
 }
 
+fn golden_export_page_fields(golden: &str) -> Vec<&str> {
+    golden
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect()
+}
+
+#[test]
+fn export_page_layout_matches_golden() {
+    let source = include_str!("../src/storage.rs");
+    let golden = include_str!("../abi/export_page.layout.golden");
+    let actual = declared_export_page_fields(source);
+    let expected = golden_export_page_fields(golden);
+
+    assert_eq!(
+        actual, expected,
+        "ExportPage layout drifted from abi/export_page.layout.golden; update the golden and document the ABI break"
+    );
+}
+
 #[test]
 fn export_page_layout_preserves_golden_prefix() {
     let source = include_str!("../src/storage.rs");
     let golden = include_str!("../abi/export_page.layout.golden");
     let actual = declared_export_page_fields(source);
-    let expected: Vec<&str> = golden
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .collect();
+    let expected = golden_export_page_fields(golden);
 
     assert!(
         actual.len() >= expected.len(),
