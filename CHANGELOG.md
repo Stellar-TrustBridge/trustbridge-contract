@@ -12,10 +12,12 @@ compatible corrections.
 - Added `get_address_if_verified` to the public ABI for secure CI payouts (see [get_address_if_verified](docs/ABI.md#get_address_if_verifiedgithub_username-string---resultcontributorrecord-contracterror)).
 - Added verifier allowlist management (`add_verifier`, `remove_verifier`, `get_verifiers`, `is_active_verifier`, `verifier_slots_remaining`, `prune_expired_verifiers`).
 - Added role-grant timelock lifecycle functions (`activate_role`, `cancel_role_grant`).
-- Added build provenance tracking (`assert_build`, `set_provenance_digests`).
+- Added typed export page bindings (`ExportRecord`, `ExportPage`, `EXPORT_PAGE_LAYOUT_VERSION = 2`) and updated `abi/export_page.layout.golden` layout regression fixtures.
+- Added TypeScript export page decoding and typed parser helpers in `ts-differential-tests`.
 
 ### Changed
 
+- Fixed `calculate_verification_percentage` and `BatchSummary::new` rounding at boundary and fractional values (0%, 100%, 1/3, 2/3) to use standard round-half-up semantics.
 - Fixed `NetworkMismatch` error code by moving its discriminant from 21 to 30 to avoid overlap with `InvalidPauseReason` (see [ContractError](docs/ABI.md#contracterror-u32-discriminant)).
 - Added new error codes `VerifierAllowlistFull` (31), `VerifierNotAllowlisted` (32), `VerifierExpiryInPast` (33), `NoPendingRoleGrant` (34), `RoleGrantNotReady` (35), `ProvenanceMissing` (36), and `ProvenanceMismatch` (37).
 

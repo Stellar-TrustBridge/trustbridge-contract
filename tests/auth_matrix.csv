@@ -57,3 +57,14 @@ record_action,random,
 add_reserved,admin,
 remove_reserved,admin,
 compact_index,admin,
+propose_batch_remove,admin,
+propose_batch_remove,random,NotAuthorized
+execute_batch_remove,second_admin,
+execute_batch_remove,admin,NotAuthorized
+execute_batch_remove,random,NotAuthorized
+cancel_batch_remove,admin,
+cancel_batch_remove,random,NotAuthorized
+get_pending_batch_remove,random,
+set_batch_remove_threshold,admin,
+set_batch_remove_threshold,random,NotAuthorized
+get_batch_remove_threshold,random,

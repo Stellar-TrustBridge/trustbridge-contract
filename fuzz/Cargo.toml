@@ -1,0 +1,22 @@
+[package]
+name = "trustbridge-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+soroban-sdk = { version = "26.0.1", features = ["testutils"] }
+trustbridge-contract = { path = ".." }
+
+[[bin]]
+name = "export_cursor"
+path = "fuzz_targets/export_cursor.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]

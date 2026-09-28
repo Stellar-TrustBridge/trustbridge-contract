@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Generate the machine-readable ABI summary from docs/ABI.md."""
 
+import argparse
+import difflib
 import json
 import re
+import sys
 from pathlib import Path
 
 ABI_PATH = Path("docs/ABI.md")
@@ -97,19 +100,51 @@ def parse_events(lines):
     return events
 
 
-def main():
-    lines = ABI_PATH.read_text(encoding="utf-8").splitlines()
-    document = {
+def build_document(lines):
+    return {
         "schema_version": 1,
         "source": str(ABI_PATH),
         "functions": parse_functions(lines),
         "errors": parse_errors(lines),
         "events": parse_events(lines),
     }
-    OUTPUT_PATH.write_text(
-        json.dumps(document, indent=2, ensure_ascii=True) + "\n", encoding="utf-8"
+
+
+def render(document):
+    return json.dumps(document, indent=2, ensure_ascii=True) + "\n"
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="fail with a diff (exit 1) if docs/abi.json is stale vs docs/ABI.md, without writing",
     )
+    args = parser.parse_args(argv)
+
+    lines = ABI_PATH.read_text(encoding="utf-8").splitlines()
+    rendered = render(build_document(lines))
+    if args.check:
+        committed = OUTPUT_PATH.read_text(encoding="utf-8") if OUTPUT_PATH.exists() else ""
+        if committed == rendered:
+            print("abi-check: OK — docs/abi.json matches docs/ABI.md")
+            return 0
+        diff = "".join(
+            difflib.unified_diff(
+                committed.splitlines(keepends=True),
+                rendered.splitlines(keepends=True),
+                fromfile="docs/abi.json (committed)",
+                tofile="docs/abi.json (generated)",
+            )
+        )
+        print("abi-check: FAILED — docs/abi.json is stale vs docs/ABI.md.", file=sys.stderr)
+        print("Run `make abi` and commit the regenerated docs/abi.json.", file=sys.stderr)
+        print(diff, file=sys.stderr)
+        return 1
+    OUTPUT_PATH.write_text(rendered, encoding="utf-8")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

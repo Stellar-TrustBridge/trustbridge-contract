@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -68,5 +69,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (StellarCLIError, OSError, RuntimeError, ValueError) as exc:
-        print(f"ERROR: {exc}", file=__import__("sys").stderr)
+        print(f"ERROR: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
