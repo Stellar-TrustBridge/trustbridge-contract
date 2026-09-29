@@ -49,6 +49,7 @@ pub use events::{
     // Multisig upgrade (Issue #301)
     UpgradeProposedEvent,
     UpgradedEvent,
+    VerificationConfiguredEvent,
     VerificationRevokedEvent,
     VerifiedEvent,
     // Staged WASM (Issue #300)
@@ -87,18 +88,21 @@ use crate::storage::{
     get_verification_config, get_verified_count as storage_get_verified_count,
     get_verifier_allowlist, get_version as storage_get_version, get_wasm_attestation,
     get_wasm_provenance, has_challenge, has_pending_rotation, has_record,
-    is_active_verifier as storage_is_active_verifier, is_admin_caller, is_in_cooldown,
-    is_paused as storage_is_paused, prune_expired_verifiers, push_audit_entry, remove_challenge,
+    is_active_verifier as storage_is_active_verifier, is_admin_caller, is_attestation_required,
+    is_guardian, is_in_cooldown, is_paused as storage_is_paused, MAX_FALLBACK_ADDRESSES,
+    prune_expired_verifiers, push_audit_entry, remove_challenge,
     remove_from_index, remove_guardian as storage_remove_guardian, remove_pending_role,
     remove_pending_rotation, remove_record, remove_role as storage_remove_role,
-    remove_verifier as storage_remove_verifier, remove_wasm_attestation, require_initialized,
-    require_not_paused, require_role_not_expired, run_migration_steps, set_challenge,
-    set_cooldown as storage_set_cooldown, set_count, set_ever_verified_count, set_last_action,
-    set_last_event_ledger, set_last_upgrade, set_paused as set_paused_state, set_pending_reverify,
-    set_pending_role, set_pending_rotation, set_record, set_role as storage_set_role,
-    set_role_delay as storage_set_role_delay, set_rotation_delay as storage_set_rotation_delay,
-    set_verified_count, set_version, set_wasm_attestation, set_wasm_provenance,
-    verifier_allowlist_active, verifier_slots_remaining,
+    remove_verifier as storage_remove_verifier, remove_wasm_attestation, require_attestation_if_required,
+    require_initialized, require_not_paused, require_role_not_expired, run_migration_steps,
+    set_challenge, set_cooldown as storage_set_cooldown, set_count, set_ever_verified_count,
+    set_emergency_pause, set_emergency_pause_ts, set_guardian_address, set_last_action,
+    set_last_event_ledger, set_last_upgrade, set_network_id, set_paused as set_paused_state,
+    set_pending_reverify, set_pending_role, set_pending_rotation, set_record,
+    set_role as storage_set_role, set_role_delay as storage_set_role_delay,
+    set_rotation_delay as storage_set_rotation_delay, set_verify_limit, set_verified_count,
+    set_version, set_wasm_attestation, set_wasm_provenance, verifier_allowlist_active,
+    verifier_slots_remaining, charge_verify_rate, get_verify_limit,
     PendingRoleGrant as PendingRoleGrantRecord, ADMIN_KEY, DEFAULT_CHALLENGE_DELAY_SECS,
 };
 
@@ -427,8 +431,10 @@ impl TrustBridgeContract {
         set_emergency_pause_ts(&env, timestamp);
 
         EmergencyPausedEvent {
-            triggered_by: caller.clone(),
+            admin: caller.clone(),
             timestamp,
+            reason_code: 99,
+            domain: event_domain(&env),
         }
         .publish(&env);
 
@@ -475,6 +481,7 @@ impl TrustBridgeContract {
         EmergencyClearedEvent {
             admin: admin.clone(),
             timestamp,
+            domain: event_domain(&env),
         }
         .publish(&env);
 
@@ -1073,7 +1080,7 @@ impl TrustBridgeContract {
         let admin = get_admin(&env)?;
         admin.require_auth();
 
-        storage_set_verify_limit(&env, limit);
+        set_verify_limit(&env, limit);
         Ok(())
     }
 
@@ -1083,7 +1090,7 @@ impl TrustBridgeContract {
     /// meaning disabled), otherwise the built-in default. Read-only; no auth.
     #[must_use]
     pub fn get_verify_limit(env: Env) -> u32 {
-        storage_get_verify_limit(&env)
+        get_verify_limit(&env)
     }
 
     /// Returns the stored contract schema version as `(major, minor, patch)`.
@@ -3030,7 +3037,7 @@ impl TrustBridgeContract {
     /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
     pub fn export_attestation(
         env: Env,
-        cursor: u32,
+        cursor: Option<BytesN<8>>,
         limit: u32,
     ) -> Result<ExportAttestation, ContractError> {
         require_initialized(&env)?;

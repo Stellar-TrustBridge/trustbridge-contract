@@ -5,9 +5,14 @@ register_sponsored,user,
 pause,admin,
 unpause,admin,
 emergency_pause,admin,
+emergency_pause,guardian,
+emergency_pause,random,NotAuthorized
 set_guardian,admin,
+set_guardian,random,NotAuthorized
 remove_guardian,admin,
+remove_guardian,random,NotAuthorized
 clear_emergency_pause,admin,
+clear_emergency_pause,guardian,NotAuthorized
 set_role,admin,
 remove_role,admin,
 adopt_network_tag,admin,

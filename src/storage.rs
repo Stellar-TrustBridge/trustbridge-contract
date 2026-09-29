@@ -1354,6 +1354,23 @@ pub fn is_attestation_required(env: &Env) -> bool {
         .unwrap_or(false)
 }
 
+/// Enforces the attestation gate when it is turned on for sensitive upgrades.
+pub fn require_attestation_if_required(env: &Env) -> Result<(), ContractError> {
+    if !is_attestation_required(env) {
+        return Ok(());
+    }
+
+    // A retained valid attestation is required before a sensitive admin path can
+    // continue. `require_attestation_if_required` is the shared guard used by the
+    // staged-WASM and upgrade paths so they fail closed instead of bypassing the
+    // attestation requirement.
+    if get_wasm_attestation(env).is_none() {
+        return Err(ContractError::AttestationRequired);
+    }
+
+    Ok(())
+}
+
 /// Sets the attestation-required flag.
 pub fn set_attestation_required(env: &Env, required: bool) {
     env.storage()
@@ -1609,6 +1626,41 @@ pub fn remove_role(env: &Env, address: &Address) {
         .persistent()
         .remove(&(ROLE_EXPIRY_KEY, address.clone()));
     remove_from_role_index(env, address);
+}
+
+/// Returns the configured timelock applied to future `set_role` grants.
+pub fn get_role_delay(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&ROLE_DELAY_KEY)
+        .unwrap_or(0)
+}
+
+/// Sets the configured timelock applied to future `set_role` grants. `0` keeps
+/// grants instant.
+pub fn set_role_delay(env: &Env, secs: u64) {
+    env.storage().instance().set(&ROLE_DELAY_KEY, &secs);
+}
+
+/// Returns the pending grant for `address`, if any.
+pub fn get_pending_role(env: &Env, address: &Address) -> Option<PendingRoleGrant> {
+    env.storage().persistent().get(&(PENDING_ROLE_KEY, address.clone()))
+}
+
+/// Stores a pending role grant for `address`.
+pub fn set_pending_role(env: &Env, address: &Address, grant: &PendingRoleGrant) {
+    let key = (PENDING_ROLE_KEY, address.clone());
+    env.storage().persistent().set(&key, grant);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+}
+
+/// Removes any pending role grant for `address`.
+pub fn remove_pending_role(env: &Env, address: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&(PENDING_ROLE_KEY, address.clone()));
 }
 
 /// An `(address, role)` pair as returned by `get_role_holders` (Issue #228).
