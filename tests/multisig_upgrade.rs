@@ -588,3 +588,78 @@ fn test_multisig_functions_require_initialization() {
         );
     });
 }
+
+#[test]
+fn test_proposal_error_paths_after_cancellation() {
+    let (env, admin, upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0x01),
+            0,
+        )
+        .unwrap();
+
+        // Admin cancels proposal 0.
+        TrustBridgeContract::cancel_upgrade_proposal(env.clone(), admin.clone(), 0).unwrap();
+
+        // Approval on cancelled proposal fails with NoUpgradeProposalPending.
+        assert_eq!(
+            TrustBridgeContract::approve_upgrade(env.clone(), upgrader.clone(), 0),
+            Err(ContractError::NoUpgradeProposalPending)
+        );
+
+        // Execution on cancelled proposal fails with NoUpgradeProposalPending.
+        assert_eq!(
+            TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), 0),
+            Err(ContractError::NoUpgradeProposalPending)
+        );
+
+        // Repeat cancel on already-cancelled proposal fails with NoUpgradeProposalPending.
+        assert_eq!(
+            TrustBridgeContract::cancel_upgrade_proposal(env.clone(), admin.clone(), 0),
+            Err(ContractError::NoUpgradeProposalPending)
+        );
+    });
+}
+
+#[test]
+fn test_propose_preserves_live_proposal_state_on_already_pending_error() {
+    let (env, admin, upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+    let original_hash = hash(&env, 0xAA);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            original_hash.clone(),
+            1_800,
+        )
+        .unwrap();
+
+        // Upgrader tries to propose while one is pending -> UpgradeProposalAlreadyPending.
+        let err = TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            upgrader.clone(),
+            hash(&env, 0xBB),
+            0,
+        );
+        assert_eq!(err, Err(ContractError::UpgradeProposalAlreadyPending));
+
+        // Verify the original proposal's state is preserved intact.
+        let live = TrustBridgeContract::get_upgrade_proposal(env.clone()).unwrap();
+        assert_eq!(live.id, 0);
+        assert_eq!(live.wasm_hash, original_hash);
+        assert_eq!(live.proposed_by, admin);
+        assert_eq!(live.proposed_at, 1_000);
+        assert_eq!(live.executable_at, 2_800);
+        assert_eq!(live.approvers.len(), 1);
+    });
+}
+
