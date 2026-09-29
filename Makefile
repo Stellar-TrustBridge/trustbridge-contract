@@ -35,7 +35,7 @@ FUTURENET_FRIENDBOT_URL ?= https://friendbot-futurenet.stellar.org
 FUTURENET_IDENTITY ?= $(SOURCE)
 FUTURENET_DRY_RUN ?= false
 
-.PHONY: help build build-legacy test test-rehearsal fuzz fuzz-parser storage-keys-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
+.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser storage-keys-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
         invoke-verify invoke-revoke-verification invoke-get-all-registered invoke-export-paginated \
@@ -61,6 +61,9 @@ build-legacy: install-target ## Build with cargo directly (wasm32-unknown-unknow
 
 test: ## Run unit tests
 	cargo test
+
+test-homoglyph: ## Run the homoglyph_corpus security regression suite (CI blocking step)
+	cargo test --test homoglyph_corpus
 
 test-rehearsal: build ## Run protocol-upgrade rehearsal (requires pre-built WASM)
 	cargo test test_protocol_upgrade_rehearsal --features wasm-test -- --nocapture

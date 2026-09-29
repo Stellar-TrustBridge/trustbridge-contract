@@ -52,6 +52,7 @@ pub use events::{
     VerificationConfiguredEvent,
     VerificationRevokedEvent,
     VerifiedEvent,
+    VerificationConfiguredEvent,
     // Staged WASM (Issue #300)
     WasmStagedEvent,
 };
@@ -61,10 +62,10 @@ pub use oracle_proof::{
 };
 pub use staged_wasm::StagedWasm;
 pub use storage::{
-    ChallengeRecord, ContributorRecord, ExportAttestation, ExportPage, ExportRecord,
-    HealthSnapshot, PauseReason, PendingBatchRemove, PendingRoleGrant, PendingRotation,
-    RecordProof, RepairReport, Role, RoleHolder, Stats, VerificationConfig, VerifierAllowEntry,
-    WasmAttestation, WasmProvenance, EXPORT_PAGE_LAYOUT_VERSION, MAX_VERIFIERS,
+    ChallengeRecord, ContributorRecord, ExportAttestation, ExportPage, HealthSnapshot, PauseReason,
+    PendingBatchRemove, PendingRoleGrant, PendingRotation, RecordProof, RepairReport, Role,
+    RoleHolder, Stats, VerificationConfig, VerifierAllowEntry, WasmAttestation, WasmProvenance,
+    MAX_FALLBACK_ADDRESSES, MAX_VERIFIERS,
 };
 pub use version::Version;
 
@@ -104,6 +105,10 @@ use crate::storage::{
     set_version, set_wasm_attestation, set_wasm_provenance, verifier_allowlist_active,
     verifier_slots_remaining, charge_verify_rate, get_verify_limit,
     PendingRoleGrant as PendingRoleGrantRecord, ADMIN_KEY, DEFAULT_CHALLENGE_DELAY_SECS,
+    charge_verify_rate, get_verify_limit as storage_get_verify_limit,
+    set_verify_limit as storage_set_verify_limit,
+    set_guardian_address, is_guardian, set_emergency_pause, set_emergency_pause_ts,
+    is_attestation_required, set_network_id,
 };
 
 use crate::utils::{
@@ -7498,8 +7503,10 @@ mod test {
             assert_eq!(ContractError::from_code(variant.code()), Some(variant));
         }
         assert_eq!(ContractError::from_code(0), None);
-        // 30 is one past the highest assigned variant (AttestationRequired = 29):
-        assert_eq!(ContractError::from_code(30), None);
+        assert_eq!(
+            ContractError::from_code(30),
+            Some(ContractError::NetworkMismatch)
+        );
     }
 
     // --- Issue #69: max username length guard ---

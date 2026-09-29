@@ -42,14 +42,7 @@
 27 AdminTransferDelayActive
 28 NoPendingAdminTransfer
 29 AttestationRequired
-
-# Code 30 was skipped when the verifier-allowlist errors (31-33) were added.
-# It is recorded as reserved rather than filled: handing it to a new error now
-# would make 30 mean one thing in this build and nothing in every earlier one,
-# which is the same ambiguity renumbering causes. The test asserts that
-# `from_code(30)` stays `None`.
-!30 reserved
-
+30 NetworkMismatch
 31 VerifierAllowlistFull
 32 VerifierNotAllowlisted
 33 VerifierExpiryInPast

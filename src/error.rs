@@ -20,10 +20,10 @@ use soroban_sdk::contracterror;
 ///    consumers. Renumbering silently re-labels every failure already
 ///    recorded against the old number — including ones in an indexer's
 ///    history that nobody will think to re-check.
-/// 2. **Never reuse a gap.** Code 30 is unused, and is recorded as reserved
-///    rather than filled. Handing it to a new error would make 30 mean one
-///    thing in this build and nothing in every earlier one, which is the same
-///    ambiguity renumbering causes.
+/// 2. **Do not silently reuse a historical gap.** `NetworkMismatch` occupies
+///    code 30 (Issues #231 / #401 / #459). Other unused codes stay reserved
+///    in `abi/contract_error_codes.golden` until an explicit ABI decision
+///    assigns them.
 /// 3. **Append the next unused code**, and add the matching golden entry in
 ///    the same change. A variant without a golden entry is unfrozen, and an
 ///    unfrozen code is the one a later refactor renumbers freely.
@@ -69,7 +69,7 @@ use soroban_sdk::contracterror;
 /// | 27 | `AdminTransferDelayActive` | `accept_admin` |
 /// | 28 | `NoPendingAdminTransfer` | `accept_admin`, `cancel_admin_transfer` |
 /// | 29 | `AttestationRequired` | `upgrade` |
-/// | 30 | — | *reserved, never assigned* |
+/// | 30 | `NetworkMismatch` | `initialize`, `require_initialized` (Issue #231 / #401) |
 /// | 31 | `VerifierAllowlistFull` | `add_verifier` |
 /// | 33 | `VerifierExpiryInPast` | `add_verifier` |
 /// | 34 | `NoPendingRoleGrant` | `activate_role`, `cancel_role_grant` |
@@ -148,8 +148,9 @@ pub enum ContractError {
     /// A gated call was made on instance state whose recorded network id does
     /// not match the network executing it (Issue #231 / #401).
     ///
-    /// Raised by `storage::require_matching_network`, directly in `initialize`
-    /// and through `require_initialized` in later guarded entry points.
+    /// Discriminant **30** (not 21 — `InvalidPauseReason` owns 21). Raised by
+    /// `storage::require_matching_network`, directly in `initialize` and through
+    /// `require_initialized` in later guarded entry points.
     /// State restored onto the wrong network is the case this catches — a
     /// testnet snapshot replayed against mainnet, or the reverse.
     NetworkMismatch = 30,
@@ -346,7 +347,10 @@ impl ContractError {
             // Transient conditions that may clear without intervention.
             ContractError::CooldownActive => ErrorCategory::Retry,
             ContractError::AdminTransferDelayActive => ErrorCategory::Retry,
-            ContractError::ChallengeNotResolvable => ErrorCategory::Retry,
+            ContractError::RotationNotReady => ErrorCategory::Retry,
+            ContractError::VerifyRateLimited => ErrorCategory::Retry,
+            ContractError::UpgradeProposalDelayActive => ErrorCategory::Retry,
+            ContractError::UpgradeProposalInsufficientApprovals => ErrorCategory::Retry,
             ContractError::RoleGrantNotReady => ErrorCategory::Retry,
 
             // Operator/config conditions: the allowlist is full, which is a
@@ -382,28 +386,23 @@ impl ContractError {
             ContractError::NoPendingRoleGrant => ErrorCategory::Fatal,
             ContractError::ProvenanceMissing => ErrorCategory::Fatal,
             ContractError::ProvenanceMismatch => ErrorCategory::Fatal,
+            ContractError::NetworkMismatch => ErrorCategory::Fatal,
+            ContractError::VerifierAllowlistFull => ErrorCategory::Fatal,
+            ContractError::VerifierNotAllowlisted => ErrorCategory::Fatal,
+            ContractError::VerifierExpiryInPast => ErrorCategory::Fatal,
             ContractError::StagedWasmMismatch => ErrorCategory::Fatal,
             ContractError::UpgradeProposalAlreadyPending => ErrorCategory::Fatal,
             ContractError::NoUpgradeProposalPending => ErrorCategory::Fatal,
             ContractError::UpgradeProposalAlreadyApproved => ErrorCategory::Fatal,
-            ContractError::UpgradeProposalDelayActive => ErrorCategory::Retry,
-            ContractError::UpgradeProposalInsufficientApprovals => ErrorCategory::Fatal,
             ContractError::FallbackListFull => ErrorCategory::Fatal,
             ContractError::UsernameTaken => ErrorCategory::Fatal,
             ContractError::RotationRequired => ErrorCategory::Fatal,
             ContractError::RotationPending => ErrorCategory::Fatal,
             ContractError::NoRotationPending => ErrorCategory::Fatal,
-            ContractError::RotationNotReady => ErrorCategory::Retry,
             ContractError::InvalidCursor => ErrorCategory::Fatal,
-            ContractError::VerifyRateLimited => ErrorCategory::Retry,
             ContractError::DualControlRequired => ErrorCategory::Fatal,
             ContractError::BatchRemoveProposalPending => ErrorCategory::Fatal,
             ContractError::NoPendingBatchRemove => ErrorCategory::Fatal,
-            ContractError::RoleExpired => ErrorCategory::Auth,
-            ContractError::OracleProofBadLayout => ErrorCategory::Fatal,
-            ContractError::OracleProofNotAllowlisted => ErrorCategory::Auth,
-            ContractError::OracleProofExpired => ErrorCategory::Retry,
-            ContractError::OracleProofBadSignature => ErrorCategory::Fatal,
         }
     }
 

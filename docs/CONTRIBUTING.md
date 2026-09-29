@@ -39,7 +39,7 @@ This runs the same checks as the two jobs in `.github/workflows/ci.yml`:
 
 | CI job | Make targets |
 |---|---|
-| `quality` | `make fmt` (`cargo fmt --check`), `make lint` (`clippy -D warnings`), `make test`, `make docs-check` |
+| `quality` | `cargo test --test homoglyph_corpus` (named blocking step), then `make check` (`make fmt`, `make lint`, `make test`, `make docs-check`, plus error-codes / event-topics / abi-check / wasm-size) |
 | `build` | `make build` (`stellar contract build`), `make wasm-size`, `make wasm-hash-pin WASM_HASH_STRICT=1` |
 
 `make ci` runs the same set with the strict hash gate enabled, so it fails while
@@ -388,9 +388,14 @@ Run the dedicated test before submitting changes:
 
 ```bash
 cargo test --test homoglyph_corpus
+# equivalent: make test-homoglyph
 ```
 
-CI runs this target as a blocking step on every pull request.
+CI runs this target as a named blocking step on every pull request: the
+`quality` job in `.github/workflows/ci.yml` executes
+`cargo test --test homoglyph_corpus` (no path filters, no `continue-on-error`).
+A failing corpus test fails the quality check. The same job then runs
+`make check`, whose `cargo test` also includes this suite.
 
 ### WASM Integration Tests
 

@@ -213,6 +213,7 @@ TOPIC_TABLE="$(cat <<'TOPICS'
 registered_event|registered|registry
 removed_event|removed|registry
 renamed_event|renamed|registry
+bot_status_changed_event|bot_status_changed|registry
 verified_event|verified|attest
 verification_revoked_event|verification_revoked|attest
 verification_configured_event|verification_configured|attest
@@ -234,6 +235,12 @@ rotation_cancelled_event|rotation_cancelled|admin
 upgraded_event|upgraded|upgrade
 upgrade_attested_event|upgrade_attested|upgrade
 attestation_cleared_event|attestation_cleared|upgrade
+wasm_staged_event|wasm_staged|upgrade
+staged_wasm_cleared_event|staged_wasm_cleared|upgrade
+upgrade_proposed_event|upgrade_proposed|upgrade
+upgrade_approved_event|upgrade_approved|upgrade
+upgrade_proposal_executed_event|upgrade_proposal_executed|upgrade
+upgrade_proposal_cancelled_event|upgrade_proposal_cancelled|upgrade
 batch_remove_proposed_event|batch_remove_proposed|batch
 batch_remove_executed_event|batch_remove_executed|batch
 batch_remove_cancelled_event|batch_remove_cancelled|batch

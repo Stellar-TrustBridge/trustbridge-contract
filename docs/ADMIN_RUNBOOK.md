@@ -1051,6 +1051,15 @@ The full threshold / propose / execute / cancel / pause / auth behaviour is
 covered by `tests/batch_remove_dual_control.rs`, which also asserts the
 `BatchRemoveProposed` / `BatchRemoveExecuted` / `BatchRemoveCancelled` events.
 
+**Both approvals are required.** After only the first approval
+(`propose_batch_remove`), the usernames are still registered and
+`get_pending_batch_remove` is `Some`. A second call from the *same* key
+(`execute_batch_remove` by the proposer) is `NotAuthorized` and still
+does not delete. Removal completes only when a **different** admin-equivalent
+address executes. `tests/batch_remove_dual_control.rs::test_dual_control_batch_remove_requires_both_approvals`
+is the regression for that state machine (Issue #439): it would fail if a
+single-control bypass were introduced.
+
 ## Watchtower guardian (Issue #222)
 
 The guardian is a **pause-only** key. It exists so incident response does not
