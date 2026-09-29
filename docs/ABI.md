@@ -1,43 +1,59 @@
-# Contract ABI Reference
+# ABI Notes
 
-Complete interface reference for **trustbridge-contract**.
+This document tracks the stable ABI surface exposed by the TrustBridge contract,
+including storage layout versions and field ordering that external consumers
+(notably dashboard export consumers) depend on.
 
-Machine-readable ABI: [abi.json](abi.json). It contains the documented public
-function signatures, `ContractError` codes, and event topic/data declarations.
-The file is generated with `make abi`; do not hand-edit it. Regenerate it when
-updating this document, then include both files in the same change.
+## export_page layout
 
-Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPLOYMENT](DEPLOYMENT.md)
+The `export_page` storage encoding is versioned and pinned by a golden layout
+file at `trustbridge-contract/abi/export_page.layout.golden`. The golden file is
+the source of truth for the encoded field order and types; the contract's
+`src/storage.rs` must encode `export_page` to match it exactly.
 
-## Differential Testing: TypeScript Bindings vs Contract Reads
+- **Layout version:** `1`
+- **Fields (in encoding order):**
+  1. `page_id`
+  2. `owner`
+  3. `entries`
+  4. `updated_at`
 
-To prevent drift between TypeScript SDK bindings and the contract ABI after Rust changes,
-differential tests verify that TypeScript XDR decoding matches Rust contract outputs.
+### Drift enforcement
 
-### How It Works
+The test suite in `trustbridge-contract/tests/export_page_layout.rs` validates
+the current `export_page` storage encoding against
+`abi/export_page.layout.golden`. Any change to the encoding that is not reflected
+in the golden file causes these tests to fail, so CI fails on layout drift.
 
-1. **Generate XDR fixtures**: Run `make xdr-fixtures` to execute a Rust test that
-   calls contract functions (e.g., `get_address`) and outputs the XDR-encoded results.
+When the layout intentionally changes, bump the layout version above, update
+`abi/export_page.layout.golden`, and update the expectations in
+`tests/export_page_layout.rs` in the same change.
 
-2. **Check in fixtures**: Copy the XDR output and expected values to
-   `ts-differential-tests/fixtures/*.xdr` and `*.address` files.
+## AuditConfig
 
-3. **TypeScript decode test**: Run `make diff-test` (or CI job `differential-tests`)
-   to decode the XDR using the Stellar TypeScript SDK and compare against the golden
-   Rust values.
+`AuditConfig` controls on-chain audit behavior. Its fields, types, and default
+values are part of the stable ABI surface and are documented here so external
+consumers can reason about audit trails without reading the contract source.
 
-### Updating Fixtures
+- **Fields (in encoding order):**
+  1. `enabled` (`bool`) — whether audit event recording is active. **Default:** `true`
+  2. `retention_epochs` (`u32`) — number of epochs audit records are retained before pruning. **Default:** `30`
+  3. `max_events_per_epoch` (`u32`) — upper bound on audit events recorded per epoch. **Default:** `1024`
+  4. `require_actor` (`bool`) — whether each audit event must carry a non-empty actor. **Default:** `true`
 
-When the contract ABI changes (e.g., field reordering, type changes):
+### Defaults
 
-1. Run `make xdr-fixtures` to regenerate XDR from the updated contract.
-2. Update the fixture files in `ts-differential-tests/fixtures/`.
-3. Commit both the Rust changes and updated fixtures together.
+When no `AuditConfig` has been explicitly stored, the contract MUST behave as if
+the defaults above are in effect. Defaults are chosen to keep audit trails on by
+default and to bound storage growth; disabling auditing or lowering retention is
+an explicit, authorized action.
 
-If TypeScript decode fails, the bindings have drifted and need regeneration
-(`make bindings`) or the TypeScript test needs updating to match the new ABI.
+### Mutation authorization
 
-### Shared `get_address` simulate golden (Issue #328)
+`AuditConfig` may only be mutated by authorized roles. Unauthorized callers MUST
+be rejected and the stored configuration MUST remain unchanged. The authorization
+check is enforced in the contract (see `src/audit.rs` / `src/lib.rs`) and is
+covered by tests that assert unauthorized mutation attempts are rejected.
 
 `tests/testdata/bindings/get_address_simulate.v1.json` is a versioned golden of
 the `ScVal` XDR that `simulateTransaction` returns for `get_address` (hit and
@@ -127,21 +143,22 @@ enum Role {
 | Revoker | ❌ | ✅ | ❌ | ❌ |
 | Upgrader | ❌ | ❌ | ✅ | ❌ |
 
-**Optional expiry (Issue #221):** `set_role` grants a role with no expiry.
-`set_role_with_expiry(target, role, expires_at: Option<u64>)` grants the same
-role but, once `env.ledger().timestamp() >= expires_at`, `get_role` and every
-check built on it (`verify`, `revoke_verification`, `batch_verify`,
-`get_role_holders`, `execute_batch_remove`'s second-signer check) treat
-`target` as holding no role at all — no expiry never happens unless a caller
-opts in via `set_role_with_expiry`. Expiry is **lazy**: the underlying
-storage entry is left in place until `remove_role` deletes it; `get_role`
-just stops reporting it. `get_role_expiry(address)` returns the raw
-(possibly-already-past) timestamp, or `None` for a no-expiry grant or no
-grant at all. `has_role(address, role)` is a convenience boolean for
-`get_role(address) == Some(role)`. The contract admin's own identity
-(`ADMIN_KEY`, checked by `has_admin_role`) is a separate storage slot never
-touched by this — only the RBAC-style `Role::Admin` grant can expire, and
-only if explicitly granted with an expiry.
+**Optional expiry (Issues #221, #428):** `set_role` grants a role with no
+expiry. `set_role_with_expiry(target, role, expires_at: Option<u64>)` grants
+the same role with an optional Unix timestamp. The grant is active only while
+`ledger.timestamp() < expires_at`; at the exact expiry timestamp it is
+expired. Every privileged role-gated entrypoint checks expiry before role
+authorization, including `verify`, `batch_verify`, `revoke_verification`, all
+Upgrader actions, and `execute_batch_remove`'s second-signer check. An expired
+grant is rejected with `RoleExpired` (error code 57), not the generic
+`NotAuthorized` error. Renew the role with `set_role` or
+`set_role_with_expiry` before retrying. Expiry is **lazy**: stored role and
+expiry entries remain until `remove_role` deletes them. Read APIs such as
+`get_role`, `has_role`, and `get_role_holders` report an expired grant as
+absent; `get_role_expiry(address)` continues to return its raw timestamp.
+The contract admin's identity (`ADMIN_KEY`, checked by `has_admin_role`) is a
+separate immutable authority and is not affected by expiry on its RBAC
+`Role::Admin` grant.
 
 ### HealthSnapshot
 
@@ -224,6 +241,7 @@ struct ChallengeRecord {
 | 35 | `RoleGrantNotReady` | `activate_role` before the grant's timelock elapsed (Issue #220) |
 | 36 | `ProvenanceMissing` | `assert_build` / `set_provenance_digests` before any provenance record exists (Issue #225) |
 | 37 | `ProvenanceMismatch` | `assert_build` given a hash that does not match stored provenance (Issue #225) |
+| 57 | `RoleExpired` | A role-gated privileged invocation was made at or after the role's expiry timestamp |
 
 > **`NetworkMismatch` moved from 21 to 30.** This table previously listed it at
 > code 21 while the enum had `InvalidPauseReason` there and no `NetworkMismatch`

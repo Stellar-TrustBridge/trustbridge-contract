@@ -4,9 +4,9 @@
 //! particularly useful for dashboard syncing and bulk verifications.
 use super::{
     bump_ever_verified_count, clear_pending_reverify, event_domain, get_record, is_admin_caller,
-    push_audit_entry, require_initialized, require_not_paused, set_record, set_verified_count,
-    storage_get_role, storage_get_verified_count, storage_is_active_verifier,
-    verifier_allowlist_active,
+    push_audit_entry, require_initialized, require_not_paused, require_role_not_expired,
+    set_record, set_verified_count, storage_get_role, storage_get_verified_count,
+    storage_is_active_verifier, verifier_allowlist_active,
 };
 use crate::storage::{charge_verify_rate, is_verification_expired, set_verified_at};
 use crate::{AuditEventType, AuditLogEntry, ContractError, Role, VerifiedEvent};
@@ -65,11 +65,7 @@ impl BatchSummary {
     #[must_use]
     pub fn new(total: u32, successful: u32) -> Self {
         let failed = total.saturating_sub(successful);
-        let success_rate = if total > 0 {
-            ((successful as u64 * 100) / (total as u64)) as u32
-        } else {
-            0
-        };
+        let success_rate = crate::utils::calculate_verification_percentage(successful, total);
 
         BatchSummary {
             total,
@@ -162,6 +158,9 @@ pub(super) fn batch_verify(
     caller.require_auth();
 
     let is_admin = is_admin_caller(&env, &caller);
+    if !is_admin {
+        require_role_not_expired(&env, &caller)?;
+    }
     // Verifier authorization (Issue #293): once the campaign allowlist has
     // been populated, a non-admin caller must be an active (non-expired)
     // allowlist member. Until then, pure role-based mode preserves existing
@@ -284,7 +283,7 @@ mod tests {
         assert_eq!(summary.total, 3);
         assert_eq!(summary.successful, 2);
         assert_eq!(summary.failed, 1);
-        assert_eq!(summary.success_rate, 66);
+        assert_eq!(summary.success_rate, 67);
     }
 
     #[test]

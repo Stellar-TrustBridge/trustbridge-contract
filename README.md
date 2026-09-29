@@ -51,7 +51,7 @@ This contract provides that mapping **on-chain**:
 - `revoke_verification` — admin or `Verifier`-role holder revokes verified status
 - `get_all_registered` — admin-only full export for dashboard sync
 - `scripts/export_registry.sh` / `scripts/validate_registry.sh` — CLI export to JSON and validate-only diff against live state (see [Registry Export & Import](docs/DEPLOYMENT.md#registry-export--import))
-- `scripts/trustbridge_client.py` — typed Python wrappers for operator reads and batch operations
+- `scripts/trustbridge_client.py` — typed Python wrappers for operator reads and batch operations. CLI/RPC failures raise `StellarCLIError` with an actionable `HINT:` line on stderr; operator scripts exit `0` on success and non-zero on failure (see [Admin Runbook](docs/ADMIN_RUNBOOK.md#python-operator-client))
 - `get_stats` — total and verified registration counts
 - `pause` / `unpause` / `is_paused` — emergency circuit breaker to pause mutating contract state
 - `set_role` / `remove_role` / `get_role` — Role-Based Access Control (`Admin`, `Upgrader`, `Verifier`, `Revoker`) — see [ABI Role Matrix](docs/ABI.md#role-u32-discriminant) and [Architecture](docs/ARCHITECTURE.md#authorization-model) for details.
@@ -102,56 +102,70 @@ See the full [ABI reference](docs/ABI.md) for argument types, return values, and
 ```
 trustbridge-contract/
 ├── src/
-│   ├── lib.rs              # Contract implementation + unit tests
-│   ├── storage.rs          # Storage keys, types, accessors, TTL constants
-│   ├── events.rs           # Contract event definitions (27 event types)
-│   ├── error.rs            # ContractError enum (includes Paused, CooldownActive, etc.)
+│   ├── lib.rs              # Contract implementation, entry points & unit tests
+│   ├── storage.rs          # Storage keys, types, accessors, indexes & TTL management
+│   ├── events.rs           # Contract event definitions (33 event types with EventDomain)
+│   ├── error.rs            # ContractError enum (categorized errors with ErrorCategory)
 │   ├── domain.rs           # EventDomain for deployment identification (Issue #226)
-│   ├── utils.rs            # Username canonicalization, validation helpers
-│   ├── batch.rs            # Batch operations (verify, remove) with summaries
-│   ├── audit.rs            # Audit logging & statistics
-│   ├── merkle.rs           # Merkle tree for export attestations (Issue #216)
-│   ├── version.rs          # Version parsing & compatibility checks
-│   ├── staged_wasm.rs      # Staged WASM deployment (Issue #300)
-│   ├── multisig_upgrade.rs # Multi-sig upgrade governance (Issue #301)
-│   └── oracle_proof.rs     # Oracle-based verification proofs
+│   ├── utils.rs            # Username canonicalization, validation helpers, strkey utils
+│   ├── batch.rs            # Batch operations (verify, remove) with summary reporting
+│   ├── audit.rs            # Append-only audit logging & statistics
+│   ├── merkle.rs           # Merkle tree & leaf hashes for export attestations (Issue #216)
+│   ├── version.rs          # Semantic versioning, compatibility checks & migration harness
+│   ├── staged_wasm.rs      # Staged WASM deployment and verification workflow (Issue #300)
+│   ├── multisig_upgrade.rs # Multi-sig upgrade governance proposal workflow (Issue #301)
+│   └── oracle_proof.rs     # Oracle-signed proof-of-ownership verification & allowlist
 ├── tests/
 │   ├── integration.rs      # End-to-end integration test suite & event tracking
-│   ├── contract_error_codes.rs # Error code coverage tests
+│   ├── contract_error_codes.rs # Error code coverage & golden schema alignment tests
 │   ├── event_replay.rs     # Event replay idempotency tests (Issue #135)
 │   ├── cursor_pagination.rs # Opaque cursor pagination tests (Issue #215)
 │   ├── pagination_parity.rs # Admin vs public pagination parity (Issue #294)
-│   ├── extend_registry_ttl.rs # TTL extension tests
-│   ├── merkle_export.rs    # Merkle export & proof tests
+│   ├── extend_registry_ttl.rs # Persistent entry TTL extension & keeper tests
+│   ├── merkle_export.rs    # Merkle export root verification & proof validation tests
 │   ├── cross_contract_register_deny.rs # Cross-contract auth tests
 │   ├── registry_hole_policy.rs # Empty registry invariant tests
-│   ├── homoglyph_corpus.rs # Username homoglyph attack tests
-│   ├── username_case_fold.rs # Case-folding tests
-│   ├── counter_proofs.rs   # Record existence proof tests
-│   ├── repair_index.rs     # Index compaction tests
-│   └── zero_address.rs     # Zero address rejection tests
+│   ├── homoglyph_corpus.rs # Username homoglyph and Unicode attack test suite
+│   ├── username_case_fold.rs # Case-folding & ASCII canonicalization tests
+│   ├── counter_proofs.rs   # Record existence & non-existence counter-proof tests
+│   ├── repair_index.rs     # Index compaction & integrity tests
+│   ├── zero_address.rs     # Zero address rejection tests
+│   ├── batch_remove_dual_control.rs # Dual-control batch remove proposal/execution tests
+│   ├── challenge.rs        # Identity challenge-response lifecycle tests
+│   ├── multisig_upgrade.rs # Multi-sig upgrade flow & quorum tests
+│   ├── bindings_golden.rs  # TypeScript bindings golden parity tests
+│   ├── export_page_layout.rs # Export page layout serialization tests
+│   ├── generate_xdr_fixtures.rs # Test XDR fixture generator
+│   ├── auth_matrix.csv     # Access control permission matrix fixture
+│   └── fuzz/               # Invariant property fuzzing harness & seed corpus
 ├── scripts/
+│   ├── README.md           # Index of operational and administrative scripts
 │   ├── deploy.sh           # Network-aware deploy + initialize
-│   ├── event_indexer.sh    # Reference event indexer (Issue #288)
+│   ├── demo_e2e.sh         # End-to-end contract lifecycle demonstration
+│   ├── event_indexer.sh    # Reference event indexer with lag detection (Issue #288)
 │   ├── export_registry.sh  # Page admin export to JSON snapshot
 │   ├── export_registry.py  # Typed registry exporter (Python)
-│   ├── validate_registry.sh # Diff export JSON against live state
+│   ├── validate_registry.sh # Diff export JSON against live on-chain state
 │   ├── ttl_keeper.sh       # Walk index & bump persistent-entry TTLs
 │   ├── bulk_verify.sh      # Batched verify from username list
 │   ├── bulk_revoke.sh      # Batched revoke from username list
 │   ├── simulate_pause.sh   # Exercise pause/unpause lifecycle
 │   ├── futurenet_smoke_test.sh # End-to-end Futurenet smoke test
-│   ├── storage_rent_estimator.py # Estimate on-chain storage entry counts
-│   ├── trustbridge_client.py # Typed Python client for operator reads
-│   ├── payout_allowlist.sh / payout_allowlist.py # Payout allowlist ops
+│   ├── storage_rent_estimator.py # Estimate on-chain storage entry counts & rent
+│   ├── test_storage_rent_estimator.sh # Test storage rent estimator calculation
+│   ├── trustbridge_client.py # Typed Python client for operator reads & invokes
+│   ├── payout_allowlist.sh / payout_allowlist.py # Payout allowlist manager
 │   ├── dr_test.sh          # Disaster recovery test (export/validate round-trip)
-│   ├── generate_abi_json.py # Generate machine-readable ABI JSON
+│   ├── generate_abi_json.py # Generate machine-readable ABI JSON (docs/abi.json)
 │   ├── check_changelog_abi.sh # Verify CHANGELOG/ABI consistency
-│   └── check_bench_regression.sh # Benchmark regression detection
+│   ├── check_bench_regression.sh # Benchmark regression detection
+│   ├── check_error_codes.sh # Error code numbering & documentation validator
+│   ├── check_event_topics.sh # Event topic format & schema validator
+│   └── check_storage_keys.sh # Storage key collision & naming validator
 ├── docs/
 │   ├── README.md           # Documentation index
 │   ├── ARCHITECTURE.md     # Design, storage, auth, events, data flow
-│   ├── ABI.md              # Complete function, event, error reference
+│   ├── ABI.md              # Complete function, event, error, and type reference
 │   ├── DEPLOYMENT.md       # Testnet/mainnet deployment guide
 │   ├── EVENT_INDEXING.md   # Event consumption, idempotency, lag detection
 │   ├── DASHBOARD_SYNC.md   # Dashboard/indexer sync patterns
@@ -159,8 +173,8 @@ trustbridge-contract/
 │   ├── STORAGE_RENT.md     # Storage rent economics, TTL management
 │   ├── STORAGE_RENT_ESTIMATOR.md # Storage rent estimator specification
 │   ├── STORAGE_FOOTPRINT.md # Storage entry size analysis
-│   ├── CONTRACT_HEALTH.md  # Health endpoint specification
-│   ├── BENCHMARK_BUDGETS.md # CPU/memory budget baselines
+│   ├── CONTRACT_HEALTH.md  # Health endpoint specification & monitoring
+│   ├── BENCHMARK_BUDGETS.md # CPU/memory budget baselines & regression thresholds
 │   ├── REGISTRY_INVARIANTS.md # Invariants & property fuzzing suite
 │   ├── SECURITY.md         # Threat model & security considerations
 │   ├── ADMIN_RUNBOOK.md    # Operational runbook for admins
@@ -172,16 +186,20 @@ trustbridge-contract/
 │   │   └── README.md       # Subgraph deployment guide
 │   ├── abi.json            # Machine-readable contract ABI
 │   └── storage-rent-estimator.inputs.v1.json # Estimator input schema
+├── abi/                    # Golden contract ABI artifacts
+├── ci/                     # CI benchmark baselines (bench-samples.csv)
+├── ts-differential-tests/  # TypeScript vs Rust differential test harness
+├── .devcontainer/          # VS Code Devcontainer configuration
 ├── .github/workflows/
 │   └── ci.yml              # fmt, clippy, test, contract build, bench
 ├── Makefile                # build, test, deploy, invoke, bench targets
-├── Cargo.toml
+├── Cargo.toml              # Rust crate manifest & dependencies
 ├── rust-toolchain.toml     # Pinned toolchain & wasm target
 ├── deny.toml               # Cargo deny configuration
 ├── mutants.toml            # Mutation testing configuration
 ├── wasm-hash.pin           # Release WASM SHA-256 pin
-├── CHANGELOG.md
-├── LICENSE
+├── CHANGELOG.md            # Release notes and change history
+├── LICENSE                 # MIT License
 └── README.md
 ```
 
@@ -233,10 +251,19 @@ on every PR.
 
 ### Devcontainer / Codespaces
 
-The repository devcontainer installs Stellar CLI `26.1.0` and the required
-`wasm32v1-none` target. After reopening the repository in the container, verify
-the toolchain with `stellar --version` and
-`rustup target list --installed | grep wasm32v1-none`.
+The repository `.devcontainer` installs everything the Makefile test targets
+need: Stellar CLI `26.1.0`, the `wasm32v1-none` (plus legacy) targets,
+Python 3, `jq`, and Node LTS (for `make diff-test` / bindings). No secrets
+are baked into the image — sign with `stellar keys` identities at runtime.
+
+Open it via **Remote-Containers: Reopen in Container** (or GitHub Codespaces
+on this repo), then smoke-verify the fresh container with:
+
+```bash
+stellar --version
+rustup target list --installed | grep wasm32v1-none
+make test          # unit-suite smoke test for a fresh container
+```
 
 > **Note on WASM targets:** `soroban-sdk` 26.x requires the `wasm32v1-none` target. Building with `wasm32-unknown-unknown` on Rust 1.82+ is unsupported by the Soroban environment. The release profile uses `opt-level = "z"` and `lto = true` as specified in `Cargo.toml`.
 
@@ -318,6 +345,27 @@ make invoke-stats CONTRACT_ID=$CONTRACT_ID
 ```
 
 More examples (verify, remove, admin export): [docs/ABI.md](docs/ABI.md)
+
+### Common admin operations
+
+The [admin runbook](docs/ADMIN_RUNBOOK.md#stellar-lab--cli-invoke-recipes)
+explains the authorization and recovery steps behind these Makefile targets.
+Set `CONTRACT_ID` (or `CONTRACT`), `NETWORK`, and the signing CLI identity
+`SOURCE`. The targets submit by default; add `SEND=no` to simulate first.
+
+```bash
+make invoke-pause CONTRACT_ID="$CONTRACT_ID" NETWORK=testnet SOURCE=admin
+make invoke-unpause CONTRACT_ID="$CONTRACT_ID" NETWORK=testnet SOURCE=admin
+make invoke-set-guardian CONTRACT_ID="$CONTRACT_ID" NETWORK=testnet SOURCE=admin GUARDIAN_ADDRESS=G...
+make invoke-set-role CONTRACT_ID="$CONTRACT_ID" NETWORK=testnet SOURCE=admin TARGET_ADDRESS=G... ROLE=Verifier
+make invoke-set-cooldown CONTRACT_ID="$CONTRACT_ID" NETWORK=testnet SOURCE=admin COOLDOWN_SECONDS=86400
+make invoke-adopt-network-tag CONTRACT_ID="$CONTRACT_ID" NETWORK=testnet SOURCE=admin SEND=no
+```
+
+`invoke-pause` uses reason code `1` (maintenance) and `invoke-unpause` uses
+code `4` (resume); override `PAUSE_REASON_CODE` or `UNPAUSE_REASON_CODE` for
+another documented reason. Run `make help` for the guardian, emergency pause,
+role removal, and idempotent `invoke-set-paused` targets.
 
 ---
 
@@ -418,3 +466,12 @@ Copyright © 2026 [Stellar-TrustBridge](https://github.com/Stellar-TrustBridge)
 
 <!-- handsoff-issue-370 -->
 - #370: Implement public admin-transfer entry points documented in ABI
+
+<!-- handsoff-issue-376 -->
+- #376: Consolidate role gates onto has_role_or_admin
+
+<!-- handsoff-issue-377 -->
+- #377: Fix stale ContractError rustdoc code table (codes 17+)
+
+<!-- handsoff-issue-381 -->
+- #381: Add integration tests for staged WASM flow

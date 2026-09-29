@@ -49,8 +49,14 @@ fn test_username_case_variant_looks_up_the_same_record() {
         let stats = TrustBridgeContract::get_stats(env.clone());
         assert_eq!(stats.total, 1);
 
-        assert!(TrustBridgeContract::has_record(env.clone(), s(&env, "alice")));
-        assert!(TrustBridgeContract::has_record(env.clone(), s(&env, "ALICE")));
+        assert!(TrustBridgeContract::has_record(
+            env.clone(),
+            s(&env, "alice")
+        ));
+        assert!(TrustBridgeContract::has_record(
+            env.clone(),
+            s(&env, "ALICE")
+        ));
     });
 }
 
@@ -123,8 +129,14 @@ fn test_remove_by_case_variant_removes_the_canonical_record() {
         // Remove using a different case than the one used to register.
         TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "ALICE")).unwrap();
 
-        assert!(!TrustBridgeContract::has_record(env.clone(), s(&env, "alice")));
-        assert!(!TrustBridgeContract::has_record(env.clone(), s(&env, "Alice")));
+        assert!(!TrustBridgeContract::has_record(
+            env.clone(),
+            s(&env, "alice")
+        ));
+        assert!(!TrustBridgeContract::has_record(
+            env.clone(),
+            s(&env, "Alice")
+        ));
         let stats = TrustBridgeContract::get_stats(env.clone());
         assert_eq!(stats.total, 0);
     });

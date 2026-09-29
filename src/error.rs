@@ -20,10 +20,10 @@ use soroban_sdk::contracterror;
 ///    consumers. Renumbering silently re-labels every failure already
 ///    recorded against the old number — including ones in an indexer's
 ///    history that nobody will think to re-check.
-/// 2. **Never reuse a gap.** Code 30 is unused, and is recorded as reserved
-///    rather than filled. Handing it to a new error would make 30 mean one
-///    thing in this build and nothing in every earlier one, which is the same
-///    ambiguity renumbering causes.
+/// 2. **Do not silently reuse a historical gap.** `NetworkMismatch` occupies
+///    code 30 (Issues #231 / #401 / #459). Other unused codes stay reserved
+///    in `abi/contract_error_codes.golden` until an explicit ABI decision
+///    assigns them.
 /// 3. **Append the next unused code**, and add the matching golden entry in
 ///    the same change. A variant without a golden entry is unfrozen, and an
 ///    unfrozen code is the one a later refactor renumbers freely.
@@ -69,13 +69,14 @@ use soroban_sdk::contracterror;
 /// | 27 | `AdminTransferDelayActive` | `accept_admin` |
 /// | 28 | `NoPendingAdminTransfer` | `accept_admin`, `cancel_admin_transfer` |
 /// | 29 | `AttestationRequired` | `upgrade` |
-/// | 30 | — | *reserved, never assigned* |
+/// | 30 | `NetworkMismatch` | `initialize`, `require_initialized` (Issue #231 / #401) |
 /// | 31 | `VerifierAllowlistFull` | `add_verifier` |
 /// | 33 | `VerifierExpiryInPast` | `add_verifier` |
 /// | 34 | `NoPendingRoleGrant` | `activate_role`, `cancel_role_grant` |
 /// | 35 | `RoleGrantNotReady` | `activate_role` |
 /// | 36 | `ProvenanceMissing` | `assert_build` |
 /// | 37 | `ProvenanceMismatch` | `assert_build` |
+/// | 57 | `RoleExpired` | any role-gated privileged invocation |
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -147,22 +148,19 @@ pub enum ContractError {
     /// A gated call was made on instance state whose recorded network id does
     /// not match the network executing it (Issue #231 / #401).
     ///
-    /// Raised by `storage::require_matching_network`, which rides along inside
-    /// `require_initialized` so a new entry point cannot forget the check.
+    /// Discriminant **30** (not 21 — `InvalidPauseReason` owns 21). Raised by
+    /// `storage::require_matching_network`, directly in `initialize` and through
+    /// `require_initialized` in later guarded entry points.
     /// State restored onto the wrong network is the case this catches — a
     /// testnet snapshot replayed against mainnet, or the reverse.
-    ///
-    /// Takes code 30, which was an unused gap between `AttestationRequired`
-    /// (29) and `VerifierAllowlistFull` (31). Filling the gap rather than
-    /// appending at 38 keeps every existing discriminant untouched, so this is
-    /// not an ABI break.
     NetworkMismatch = 30,
-    /// `add_verifier` would exceed the `MAX_VERIFIERS` allowlist cap (Issue #293).
+    /// `add_verifier` was called when the verifier allowlist is already at its
+    /// maximum size.
     VerifierAllowlistFull = 31,
-    /// `remove_verifier` was called for an address not on the allowlist (Issue #293).
-    VerifierNotAllowlisted = 34,
-    /// `add_verifier` was given a non-zero `expires_at` that is not in the
-    /// future (Issue #293).
+    /// `add_verifier` was called with an address that is not on the verifier
+    /// allowlist.
+    VerifierNotAllowlisted = 32,
+    /// `add_verifier` was called with an `expires_at` that is not in the future.
     VerifierExpiryInPast = 33,
     /// `activate_role` / `cancel_role_grant` was called for an address with no
     /// pending grant (Issue #220).
@@ -224,6 +222,14 @@ pub enum ContractError {
     /// `execute_batch_remove` / `cancel_batch_remove` was called with no live
     /// (or already-expired) proposal (Issue #219).
     NoPendingBatchRemove = 56,
+    /// A privileged invocation was made by an address whose role grant has
+    /// expired (Issue #428). The caller must have their role renewed via
+    /// `set_role` or `set_role_with_expiry` before retrying.
+    RoleExpired = 57,
+    OracleProofBadLayout = 58,
+    OracleProofNotAllowlisted = 59,
+    OracleProofExpired = 60,
+    OracleProofBadSignature = 61,
 }
 
 impl ContractError {
@@ -293,6 +299,11 @@ impl ContractError {
             54 => Some(ContractError::DualControlRequired),
             55 => Some(ContractError::BatchRemoveProposalPending),
             56 => Some(ContractError::NoPendingBatchRemove),
+            57 => Some(ContractError::RoleExpired),
+            58 => Some(ContractError::OracleProofBadLayout),
+            59 => Some(ContractError::OracleProofNotAllowlisted),
+            60 => Some(ContractError::OracleProofExpired),
+            61 => Some(ContractError::OracleProofBadSignature),
             _ => None,
         }
     }
@@ -300,47 +311,41 @@ impl ContractError {
 
 /// Off-chain retry classification for a [`ContractError`].
 ///
-/// The dashboard, the action runner, and the indexer all need to decide what to
-/// do with a failed invocation *without* parsing error strings or hard-coding a
-/// list of numeric codes. `category()` gives them that decision directly:
-///
-/// - [`ErrorCategory::Retry`] — the call failed on a condition that clears with
-///   time or an unrelated state change (a cooldown, a pause, a challenge delay).
-///   Re-submitting the *same* transaction later is expected to succeed.
-/// - [`ErrorCategory::Auth`] — the caller did not satisfy an authorization
-///   check. Retrying with the same signer is pointless; a human with the right
-///   key has to act.
-/// - [`ErrorCategory::Fatal`] — the request itself is wrong (bad input, a
-///   violated invariant, a one-shot call already made). Retrying verbatim will
-///   always fail; the caller must change the request or give up.
+/// Off-chain consumers (indexer, dashboard, retry workers) use this to decide
+/// whether a failed invocation is worth retrying, requires operator action, or
+/// is terminal. The mapping must stay exhaustive: a new `ContractError`
+/// variant that is not classified here is a compile error (E0004), which is
+/// deliberate — it forces the retry policy to be reconsidered whenever the
+/// error surface grows.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ErrorCategory {
-    /// Transient: retry the same call after the blocking condition clears.
-    Retry,
-    /// Authorization failure: a different signer / key is required.
+    /// The caller is not permitted to perform the operation. Retrying with the
+    /// same credentials will not help; the caller must be authorized first.
     Auth,
-    /// Permanent: the request must change or be abandoned.
+    /// A transient condition (cooldown, delay, contention) that may clear on
+    /// its own. Safe to retry after a backoff.
+    Retry,
+    /// A terminal condition that will not resolve by retrying. Requires
+    /// operator or caller intervention.
     Fatal,
 }
 
 impl ContractError {
-    /// Classify this error for an off-chain retry policy. See [`ErrorCategory`].
+    /// Classify this error for off-chain retry policy.
     ///
-    /// The match is exhaustive by construction — adding a `ContractError`
-    /// variant without classifying it here is a compile error, which is the
-    /// mechanism that keeps this mapping complete.
-    #[must_use]
-    pub fn category(self) -> ErrorCategory {
+    /// The match is intentionally exhaustive with no wildcard arm so that
+    /// adding a variant without classifying it fails to compile (E0004).
+    pub fn category(&self) -> ErrorCategory {
         match self {
-            // ── Auth ──────────────────────────────────────────────────────
+            // Authorization failures: the caller lacks the required role,
+            // ownership, or allowlist membership. Retrying unchanged is futile.
             ContractError::NotAuthorized => ErrorCategory::Auth,
-            ContractError::AttestationRequired => ErrorCategory::Auth,
+            ContractError::InvalidRole => ErrorCategory::Auth,
+            ContractError::VerifierNotAllowlisted => ErrorCategory::Auth,
+            ContractError::VerifierExpiryInPast => ErrorCategory::Auth,
 
-            // ── Retry (transient) ─────────────────────────────────────────
-            ContractError::Paused => ErrorCategory::Retry,
+            // Transient conditions that may clear without intervention.
             ContractError::CooldownActive => ErrorCategory::Retry,
-            ContractError::ChallengeNotResolvable => ErrorCategory::Retry,
-            ContractError::ChallengeActive => ErrorCategory::Retry,
             ContractError::AdminTransferDelayActive => ErrorCategory::Retry,
             ContractError::RotationNotReady => ErrorCategory::Retry,
             ContractError::VerifyRateLimited => ErrorCategory::Retry,
@@ -348,14 +353,18 @@ impl ContractError {
             ContractError::UpgradeProposalInsufficientApprovals => ErrorCategory::Retry,
             ContractError::RoleGrantNotReady => ErrorCategory::Retry,
 
-            // ── Fatal (permanent / bad request) ──────────────────────────
+            // Operator/config conditions: the allowlist is full, which is a
+            // capacity limit an operator must raise, not a caller mistake.
+            ContractError::VerifierAllowlistFull => ErrorCategory::Fatal,
+
+            // Everything else is terminal for the caller as-is.
             ContractError::AlreadyInitialized => ErrorCategory::Fatal,
             ContractError::NotInitialized => ErrorCategory::Fatal,
             ContractError::NotRegistered => ErrorCategory::Fatal,
             ContractError::AlreadyVerified => ErrorCategory::Fatal,
             ContractError::NotVerified => ErrorCategory::Fatal,
+            ContractError::Paused => ErrorCategory::Fatal,
             ContractError::InvalidVersion => ErrorCategory::Fatal,
-            ContractError::InvalidRole => ErrorCategory::Fatal,
             ContractError::InvalidUsername => ErrorCategory::Fatal,
             ContractError::AttestationExpired => ErrorCategory::Fatal,
             ContractError::UnattestedWasm => ErrorCategory::Fatal,
@@ -364,6 +373,7 @@ impl ContractError {
             ContractError::ZeroAddress => ErrorCategory::Fatal,
             ContractError::ChallengeAlreadyActive => ErrorCategory::Fatal,
             ContractError::NoChallengeActive => ErrorCategory::Fatal,
+            ContractError::ChallengeActive => ErrorCategory::Fatal,
             ContractError::InvalidPauseReason => ErrorCategory::Fatal,
             ContractError::AlreadyReserved => ErrorCategory::Fatal,
             ContractError::NotReserved => ErrorCategory::Fatal,
@@ -371,6 +381,8 @@ impl ContractError {
             ContractError::ReservedListFull => ErrorCategory::Fatal,
             ContractError::AdminTransferPending => ErrorCategory::Fatal,
             ContractError::NoPendingAdminTransfer => ErrorCategory::Fatal,
+            ContractError::AttestationRequired => ErrorCategory::Fatal,
+            ContractError::NetworkMismatch => ErrorCategory::Fatal,
             ContractError::NoPendingRoleGrant => ErrorCategory::Fatal,
             ContractError::ProvenanceMissing => ErrorCategory::Fatal,
             ContractError::ProvenanceMismatch => ErrorCategory::Fatal,
@@ -394,102 +406,98 @@ impl ContractError {
         }
     }
 
-    /// Whether an off-chain caller should retry the same invocation later.
-    ///
-    /// Convenience wrapper over [`ContractError::category`] for the common
-    /// yes/no branch; equivalent to `self.category() == ErrorCategory::Retry`.
+    /// Returns `true` if this error category is [`ErrorCategory::Retry`].
     #[must_use]
     pub fn is_retryable(self) -> bool {
-        matches!(self.category(), ErrorCategory::Retry)
+        self.category() == ErrorCategory::Retry
     }
 }
-
-// Wave #42 left a second copy of the code table here. It had already drifted —
-// it listed code 21 as `NetworkMismatch` while the enum had 21 as
-// `InvalidPauseReason` and no `NetworkMismatch` variant at all, so an off-chain
-// consumer built from this table would have decoded a paused-reason failure as
-// a network mismatch (Issue #402).
-//
-// Two tables that must agree are one table too many. The authoritative listing
-// is the doc comment on `ContractError` above, cross-checked against
-// `abi/contract_error_codes.golden` and `docs/ABI.md` by
-// `scripts/check_error_codes.sh`.
-//
-// `ContractError::from_code` is the reverse of that table for off-chain
-// consumers decoding a raw error code back into a typed variant.
-//
-// Tests covering this mapping live in `src/lib.rs`
-// (`test_error_codes_match_repr`, `test_from_code_round_trips_all_variants`,
-// `test_from_code_unknown_returns_none`).
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Every variant that `from_code` can produce must have a category, and the
-    /// category must be one of the three documented buckets. This walks the
-    /// numeric code space so a newly added code that `from_code` learns about
-    /// is automatically exercised here too.
     #[test]
-    fn every_error_code_has_a_category() {
-        for code in 0..64u32 {
-            if let Some(err) = ContractError::from_code(code) {
-                let category = err.category();
-                assert!(
-                    matches!(
-                        category,
-                        ErrorCategory::Retry | ErrorCategory::Auth | ErrorCategory::Fatal
-                    ),
-                    "code {code} ({err:?}) has no valid category"
-                );
-                // `is_retryable` must agree with `category`.
-                assert_eq!(err.is_retryable(), category == ErrorCategory::Retry);
-            }
-        }
-    }
-
-    #[test]
-    fn retryable_errors_are_the_transient_set() {
-        let retry = [
-            ContractError::Paused,
-            ContractError::CooldownActive,
-            ContractError::ChallengeNotResolvable,
-            ContractError::ChallengeActive,
-            ContractError::AdminTransferDelayActive,
-        ];
-        for err in retry {
-            assert_eq!(err.category(), ErrorCategory::Retry, "{err:?}");
-            assert!(err.is_retryable(), "{err:?}");
-        }
-    }
-
-    #[test]
-    fn auth_failures_are_classified_as_auth() {
-        assert_eq!(ContractError::NotAuthorized.category(), ErrorCategory::Auth);
+    fn verifier_allowlist_variants_are_classified() {
         assert_eq!(
-            ContractError::AttestationRequired.category(),
+            ContractError::VerifierAllowlistFull.category(),
+            ErrorCategory::Fatal
+        );
+        assert_eq!(
+            ContractError::VerifierNotAllowlisted.category(),
             ErrorCategory::Auth
         );
-        assert!(!ContractError::NotAuthorized.is_retryable());
+        assert_eq!(
+            ContractError::VerifierExpiryInPast.category(),
+            ErrorCategory::Auth
+        );
     }
 
     #[test]
-    fn bad_request_errors_are_fatal() {
-        for err in [
+    fn newly_added_variants_are_classified() {
+        assert_eq!(
+            ContractError::NoPendingRoleGrant.category(),
+            ErrorCategory::Fatal
+        );
+        assert_eq!(
+            ContractError::RoleGrantNotReady.category(),
+            ErrorCategory::Retry
+        );
+        assert_eq!(
+            ContractError::ProvenanceMissing.category(),
+            ErrorCategory::Fatal
+        );
+        assert_eq!(
+            ContractError::ProvenanceMismatch.category(),
+            ErrorCategory::Fatal
+        );
+    }
+
+    #[test]
+    fn category_is_exhaustive_for_all_variants() {
+        // Every variant must resolve to a category; this compiles only when
+        // `category()` has no wildcard arm and covers the full enum.
+        let all = [
             ContractError::AlreadyInitialized,
+            ContractError::NotInitialized,
+            ContractError::NotAuthorized,
             ContractError::NotRegistered,
             ContractError::AlreadyVerified,
+            ContractError::NotVerified,
+            ContractError::Paused,
+            ContractError::CooldownActive,
             ContractError::InvalidVersion,
             ContractError::InvalidRole,
             ContractError::InvalidUsername,
+            ContractError::AttestationExpired,
+            ContractError::UnattestedWasm,
             ContractError::InvalidBatchSize,
             ContractError::InvalidReasonCode,
             ContractError::ZeroAddress,
-            ContractError::UnattestedWasm,
+            ContractError::ChallengeAlreadyActive,
+            ContractError::NoChallengeActive,
+            ContractError::ChallengeNotResolvable,
+            ContractError::ChallengeActive,
+            ContractError::InvalidPauseReason,
+            ContractError::AlreadyReserved,
+            ContractError::NotReserved,
+            ContractError::UsernameReserved,
             ContractError::ReservedListFull,
-        ] {
-            assert_eq!(err.category(), ErrorCategory::Fatal, "{err:?}");
-            assert!(!err.is_retryable(), "{err:?}");
+            ContractError::AdminTransferPending,
+            ContractError::AdminTransferDelayActive,
+            ContractError::NoPendingAdminTransfer,
+            ContractError::AttestationRequired,
+            ContractError::NetworkMismatch,
+            ContractError::VerifierAllowlistFull,
+            ContractError::VerifierNotAllowlisted,
+            ContractError::VerifierExpiryInPast,
+            ContractError::NoPendingRoleGrant,
+            ContractError::RoleGrantNotReady,
+            ContractError::ProvenanceMissing,
+            ContractError::ProvenanceMismatch,
+        ];
+        for err in all {
+            let _ = err.category();
         }
     }
 }

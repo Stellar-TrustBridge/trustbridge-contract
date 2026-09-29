@@ -58,8 +58,8 @@ fn test_full_walk_with_cursor_none_start_visits_every_record_once() {
         let mut seen: alloc::vec::Vec<String> = alloc::vec::Vec::new();
         let mut cursor = None;
         loop {
-            let page = TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 10)
-                .unwrap();
+            let page =
+                TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 10).unwrap();
             for i in 0..page.records.len() {
                 let (username, _) = page.records.get(i).unwrap();
                 seen.push(username);
@@ -111,8 +111,7 @@ fn test_removing_a_record_after_a_cursor_is_issued_invalidates_it() {
         register_n(&env, 10);
 
         // First page of 4; there is more after it.
-        let page1 =
-            TrustBridgeContract::get_registered_paginated(env.clone(), None, 4).unwrap();
+        let page1 = TrustBridgeContract::get_registered_paginated(env.clone(), None, 4).unwrap();
         assert_eq!(page1.records.len(), 4);
         assert!(page1.has_more);
         let stale_cursor = page1.next_cursor.clone().unwrap();
@@ -160,8 +159,7 @@ fn test_removal_anywhere_invalidates_outstanding_cursors_even_if_already_passed(
     env.as_contract(&contract_id, || {
         register_n(&env, 10);
 
-        let page1 =
-            TrustBridgeContract::get_registered_paginated(env.clone(), None, 4).unwrap();
+        let page1 = TrustBridgeContract::get_registered_paginated(env.clone(), None, 4).unwrap();
         let stale_cursor = page1.next_cursor.clone().unwrap();
 
         // Remove a record *after* the cursor's offset this time.
@@ -186,8 +184,7 @@ fn test_cursor_is_interchangeable_between_admin_and_public_paginated() {
 
         // Resume with the admin-gated variant using the cursor the public
         // variant issued.
-        let page2 =
-            TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 3).unwrap();
+        let page2 = TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 3).unwrap();
         assert_eq!(page2.records.len(), 3);
         assert!(!page2.has_more);
     });
@@ -217,8 +214,7 @@ fn test_registering_more_after_a_cursor_is_issued_does_not_invalidate_it() {
         // before this registration must still be valid.
         register_range(&env, 3, 2);
 
-        let page2 =
-            TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 10).unwrap();
+        let page2 = TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 10).unwrap();
         assert!(page2.records.len() >= 1);
     });
 }

@@ -62,9 +62,10 @@
 //! Leaf and node hashes are prefixed with distinct, versioned ASCII domain
 //! strings (`LEAF_DOMAIN`, `NODE_DOMAIN`) so a leaf hash can never be
 //! mistaken for a node hash — or for a hash from an unrelated protocol —
-//! even though both are 32-byte SHA-256 outputs. Changing either string
-//! changes the tree shape and must ship as a new version suffix (`v2`, ...),
-//! never an in-place edit to `v1`.
+//! even though both are 32-byte SHA-256 outputs. The domain strings, field
+//! bytes and order, separator, boolean representation, and tree rules below
+//! are a public proof format. Changing any of them must ship as a new version
+//! suffix (`v2`, ...) and new vectors, never as an in-place edit to `v1`.
 //!
 //! ## Scope
 //!
@@ -153,7 +154,12 @@ pub fn root_of_records(env: &Env, records: &Vec<(String, ContributorRecord)>) ->
     let mut leaves: Vec<BytesN<32>> = Vec::new(env);
     for i in 0..records.len() {
         let (username, record) = records.get(i).unwrap();
-        leaves.push_back(leaf_hash(env, &username, &record.stellar_address, record.verified));
+        leaves.push_back(leaf_hash(
+            env,
+            &username,
+            &record.stellar_address,
+            record.verified,
+        ));
     }
     root_of(env, &leaves)
 }

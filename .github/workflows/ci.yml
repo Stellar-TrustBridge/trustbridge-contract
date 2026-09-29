@@ -12,7 +12,7 @@ env:
 
 jobs:
   quality:
-    name: Quality gate (fmt, clippy, test, docs)
+    name: Quality gate (make check)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -22,21 +22,83 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: wasm32v1-none, wasm32-unknown-unknown
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Format
-        run: make fmt
+      # Named blocking step so the homoglyph corpus cannot be dropped if
+      # `make check` / `cargo test` is later filtered. Same quality job —
+      # not a parallel subsystem. Failures fail the pull-request check.
+      - name: Homoglyph corpus tests
+        run: cargo test --test homoglyph_corpus
 
-      - name: Clippy
-        run: make lint
+      - name: Run quality gate
+        run: make check
 
-      - name: Test
-        run: make test
+  audit:
+    name: Audit (cargo audit + cargo deny)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Rustdoc
-        run: make docs-check
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit and cargo-deny
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+
+      - name: cargo audit
+        run: make audit
+
+      - name: cargo deny
+        run: make deny
+
+  mutants:
+    name: Mutation testing (cargo-mutants on src/utils.rs)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: cargo mutants
+        run: make mutants
+
+  coverage:
+    name: Coverage (tarpaulin on src/storage.rs)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --locked
+
+      - name: cargo tarpaulin
+        run: make tarpaulin
 
   storage-rent-estimator:
     name: Storage-rent estimator golden test

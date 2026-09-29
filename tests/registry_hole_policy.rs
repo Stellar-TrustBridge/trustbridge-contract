@@ -54,7 +54,7 @@ fn assert_index_membership_property(env: &Env, contract_id: &Address) {
         let chunk_count: u32 = env
             .storage()
             .instance()
-            .get(&symbol_short!("chkcnt"))
+            .get(&symbol_short!("chkcnt")) // CHUNK_CNT_KEY — persisted as chkcnt, not chunkcnt
             .unwrap_or(0);
 
         let mut chunked: Vec<String> = Vec::new(env);

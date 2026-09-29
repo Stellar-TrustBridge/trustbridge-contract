@@ -58,6 +58,34 @@ operation with an actionable error instead of being inferred with `grep` or
 `jq`. Keep the Stellar CLI identity and network explicit for every operation;
 the WASM hash remains independently checked by `make wasm-hash-pin`.
 
+### Error handling and exit codes
+
+`StellarCLIError` appends a `HINT:` line for common failure classes so the
+next step is visible without re-reading CLI internals:
+
+| Failure text (stderr) | Hint points at |
+|---|---|
+| RPC connect / reset / timeout / DNS | `--network` / `NETWORK`, RPC connectivity, retry with backoff |
+| Contract ID not found | `CONTRACT_ID` and network-vs-deployment mismatch |
+| Account missing / unfunded / insufficient balance | `SOURCE` funding on that network |
+| `require_auth` / not authorized / signature | `--caller` must equal the signing `--source-account` |
+| Contract paused | `is_paused` / `is_emergency_paused` before retrying writes |
+| Rate-limited / overloaded RPC | Backoff, slower pacing, smaller `--page-limit` |
+| CLI binary missing / not executable | Install `stellar-cli >= 26.x`, `PATH`, or `STELLAR=<path>` |
+| Non-JSON CLI output | CLI version and live `<fn> --help` signature match |
+
+Exit contract for `scripts/export_registry.py` and
+`scripts/payout_allowlist.py` (both delegate to this client):
+
+- `0` — success; the artifact was written.
+- `1` — CLI/RPC failure, malformed response, pagination stall, or invalid
+  response shape. The `ERROR:` line goes to stderr and carries the hint.
+- `2` — argument/config errors via `argparse` (missing `--contract` /
+  `CONTRACT_ID`, bad `--page-limit`).
+
+These examples keep working unchanged — same environment-variable interface,
+same commands as above. Only the failure output is richer.
+
 ---
 
 ## Stellar Lab & CLI invoke recipes
@@ -74,6 +102,11 @@ name, print the live spec for the deployed build and match it exactly:
 stellar contract invoke --id "$CONTRACT_ID" --network "$NETWORK" -- --help
 stellar contract invoke --id "$CONTRACT_ID" --network "$NETWORK" -- <fn> --help
 ```
+
+For routine operations, use the [Makefile invoke targets](../README.md#common-admin-operations)
+with `CONTRACT_ID` (or `CONTRACT`), `NETWORK`, and `SOURCE` set explicitly.
+`make help` lists them. Set `SEND=no` to simulate before submitting; the direct
+CLI recipes below show the equivalent submitted commands.
 
 ### Conventions & auth gotchas
 
@@ -101,7 +134,7 @@ procedure; these are the bare invoke lines.
 
 ```bash
 stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
-  -- pause
+  -- pause --reason-code 1
 ```
 
 - **Auth:** admin only. **Works while paused:** yes (idempotent).
@@ -112,7 +145,7 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 
 ```bash
 stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
-  -- unpause
+  -- unpause --reason-code 4
 ```
 
 - **Auth:** admin only. Emits `UnpausedEvent`.
@@ -124,8 +157,12 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 
 ```bash
 stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
-  -- set_paused --paused true      # or --paused false
+  -- set_paused --paused true --reason-code 1
 ```
+
+Use `--paused false --reason-code 4` to resume. Reason codes are `1`
+maintenance, `2` security incident, `3` regulatory hold, `4` unpause, and
+`99` other.
 
 - **Auth:** admin only. Emits `PausedEvent` / `UnpausedEvent` **only on a state
   change** (Issue #197) — a no-op call is silent, which is what makes it safe
@@ -291,6 +328,16 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 ```bash
 stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
   -- batch_remove --caller "$ADMIN" --usernames '["octocat","alice"]'
+```
+
+Or via Makefile:
+
+```bash
+make invoke-batch-remove \
+  CONTRACT_ID=$CONTRACT_ID \
+  SOURCE=admin \
+  CALLER=$ADMIN \
+  USERNAMES='["octocat","alice"]'
 ```
 
 - **Auth:** strictly admin (unlike single `remove`, registrants cannot use it).
@@ -901,6 +948,16 @@ stellar contract invoke \
   -- set_batch_remove_threshold --threshold 10
 ```
 
+Or via Makefile:
+
+```bash
+# Set threshold (0 to disable)
+make invoke-set-batch-remove-threshold CONTRACT_ID=$CONTRACT_ID SOURCE=admin-identity THRESHOLD=10
+
+# Inspect configured threshold
+make invoke-get-batch-remove-threshold CONTRACT_ID=$CONTRACT_ID
+```
+
 `0` (the default) disables dual control entirely — every `batch_remove` call
 executes directly regardless of size, identical to pre-#219 behavior. With a
 threshold set, any batch **larger** than it (strictly greater; a batch
@@ -945,6 +1002,26 @@ stellar contract invoke \
   -- execute_batch_remove --caller $SECOND_KEY
 ```
 
+Or via Makefile:
+
+```bash
+# Admin proposes
+make invoke-propose-batch-remove \
+  CONTRACT_ID=$CONTRACT_ID \
+  SOURCE=admin-identity \
+  CALLER=$ADMIN \
+  USERNAMES='["squatter1","squatter2"]'
+
+# View pending proposal (read-only)
+make invoke-get-pending-batch-remove CONTRACT_ID=$CONTRACT_ID
+
+# A DIFFERENT Role::Admin holder executes
+make invoke-execute-batch-remove \
+  CONTRACT_ID=$CONTRACT_ID \
+  SOURCE=second-key-identity \
+  CALLER=$SECOND_KEY
+```
+
 `get_pending_batch_remove` shows what is queued (works while paused). A
 proposal not executed within 24 hours (`BATCH_REMOVE_PROPOSAL_TTL_SECS`) is
 treated as gone the next time anyone calls `execute_batch_remove` — propose
@@ -958,12 +1035,30 @@ stellar contract invoke \
   -- cancel_batch_remove --caller $ADMIN
 ```
 
+Or via Makefile:
+
+```bash
+make invoke-cancel-batch-remove \
+  CONTRACT_ID=$CONTRACT_ID \
+  SOURCE=admin-identity \
+  CALLER=$ADMIN
+```
+
 Available even while paused, so a stuck or mistaken proposal is never
 trapped behind the same freeze that might be the reason to cancel it.
 
 The full threshold / propose / execute / cancel / pause / auth behaviour is
 covered by `tests/batch_remove_dual_control.rs`, which also asserts the
 `BatchRemoveProposed` / `BatchRemoveExecuted` / `BatchRemoveCancelled` events.
+
+**Both approvals are required.** After only the first approval
+(`propose_batch_remove`), the usernames are still registered and
+`get_pending_batch_remove` is `Some`. A second call from the *same* key
+(`execute_batch_remove` by the proposer) is `NotAuthorized` and still
+does not delete. Removal completes only when a **different** admin-equivalent
+address executes. `tests/batch_remove_dual_control.rs::test_dual_control_batch_remove_requires_both_approvals`
+is the regression for that state machine (Issue #439): it would fail if a
+single-control bypass were introduced.
 
 ## Watchtower guardian (Issue #222)
 

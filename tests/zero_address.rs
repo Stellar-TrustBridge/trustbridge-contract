@@ -81,12 +81,8 @@ fn test_zero_address_register_fallback_address_rejected_with_mock_all_auths() {
     env.mock_all_auths();
 
     env.as_contract(&contract_id, || {
-        let result = TrustBridgeContract::register(
-            env.clone(),
-            s(&env, "octocat"),
-            valid_user,
-            fallbacks,
-        );
+        let result =
+            TrustBridgeContract::register(env.clone(), s(&env, "octocat"), valid_user, fallbacks);
 
         assert_eq!(result, Err(ContractError::ZeroAddress));
     });
@@ -258,7 +254,10 @@ fn test_is_address_zero_helper_identifies_zero_address() {
 #[test]
 fn test_zero_address_error_code_is_stable() {
     assert_eq!(ContractError::ZeroAddress.code(), 16);
-    assert_eq!(ContractError::from_code(16), Some(ContractError::ZeroAddress));
+    assert_eq!(
+        ContractError::from_code(16),
+        Some(ContractError::ZeroAddress)
+    );
 }
 
 /// `ZeroAddress` error must be classified as Fatal (not retryable).
@@ -337,12 +336,8 @@ fn test_zero_address_in_mixed_fallback_list_rejected() {
     env.mock_all_auths();
 
     env.as_contract(&contract_id, || {
-        let result = TrustBridgeContract::register(
-            env.clone(),
-            s(&env, "octocat"),
-            valid_user,
-            fallbacks,
-        );
+        let result =
+            TrustBridgeContract::register(env.clone(), s(&env, "octocat"), valid_user, fallbacks);
 
         assert_eq!(result, Err(ContractError::ZeroAddress));
     });
@@ -368,8 +363,7 @@ fn test_security_md_zero_address_documentation_is_accurate() {
 
     // Confirm the strkey we're using matches the documented value
     assert_eq!(
-        ZERO_ADDRESS_STRKEY,
-        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        ZERO_ADDRESS_STRKEY, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
         "Zero address strkey must match SECURITY.md documentation"
     );
 

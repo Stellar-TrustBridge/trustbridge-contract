@@ -38,6 +38,8 @@ pub const INDEX_KEY: Symbol = symbol_short!("idx");
 pub const PAUSED_KEY: Symbol = symbol_short!("pause");
 /// Last `PauseReason` recorded by `pause` / `unpause`.
 pub const PAUSE_RSN_KEY: Symbol = symbol_short!("pause_rsn");
+/// Consolidated alias for [`PAUSE_RSN_KEY`].
+pub const PAUSE_REASON_KEY: Symbol = PAUSE_RSN_KEY;
 pub const COOLDOWN_KEY: Symbol = symbol_short!("cdown");
 /// Seconds a requested address rotation must wait before it can execute
 /// (Issue #234). 0 disables the delay, matching the cooldown convention.
@@ -85,6 +87,11 @@ pub const MAX_ROLE_PAGE_LIMIT: u32 = 50;
 
 /// Key prefix for chunked username index entries.
 pub const CHUNK_KEY: Symbol = symbol_short!("chunk");
+/// Number of chunk pages in the chunked username index.
+///
+/// The persisted instance symbol is `"chkcnt"` (Soroban `symbol_short!` limit
+/// is 9 bytes). Do **not** introduce a second constant or write `"chunkcnt"`:
+/// live instances already store the count under `"chkcnt"` (Issue #468).
 pub const CHUNK_CNT_KEY: Symbol = symbol_short!("chkcnt");
 /// Monotonic counter bumped every time the flat index's existing positions
 /// shift — i.e. on every removal (Issue #215). An opaque pagination cursor
@@ -429,6 +436,13 @@ pub struct Stats {
     /// (Issue #229). Monotonic: this never decreases.
     pub ever_verified: u32,
 }
+
+/// Documented layout version for [`ExportPage`] and its records.
+/// Breaking changes to the struct layout or field ordering bump this version.
+pub const EXPORT_PAGE_LAYOUT_VERSION: u32 = 2;
+
+/// A single exported record tuple: `(github_username, ContributorRecord)`.
+pub type ExportRecord = (String, ContributorRecord);
 
 /// A single page of registry records returned by paginated export functions.
 ///
@@ -1480,11 +1494,7 @@ pub fn set_verify_limit(env: &Env, limit: u32) {
 ///
 /// The admin is expected to have been filtered out by the caller before this
 /// runs; nothing here special-cases it.
-pub fn charge_verify_rate(
-    env: &Env,
-    verifier: &Address,
-    units: u32,
-) -> Result<(), ContractError> {
+pub fn charge_verify_rate(env: &Env, verifier: &Address, units: u32) -> Result<(), ContractError> {
     let limit = get_verify_limit(env);
     if limit == 0 {
         return Ok(());
@@ -1548,6 +1558,20 @@ pub fn is_role_expired(env: &Env, address: &Address) -> bool {
         Some(expires_at) => env.ledger().timestamp() >= expires_at,
         None => false,
     }
+}
+
+/// Fails with [`ContractError::RoleExpired`] when `address` holds a role grant
+/// that has an expiry timestamp and that timestamp has been reached or passed
+/// (Issue #428).
+///
+/// Call this before a privileged invoke checks the caller's active role,
+/// because [`get_role`] intentionally hides expired grants. Addresses with no
+/// stored role grant pass; grants with no expiry always pass.
+pub fn require_role_not_expired(env: &Env, address: &Address) -> Result<(), ContractError> {
+    if role_key_exists(env, address) && is_role_expired(env, address) {
+        return Err(ContractError::RoleExpired);
+    }
+    Ok(())
 }
 
 /// Returns `address`'s currently active role, or `None` if it holds no role
@@ -1715,7 +1739,9 @@ pub fn get_role_holders_internal(env: &Env, offset: u32, limit: u32) -> Vec<Role
 
     let end = offset.saturating_add(capped).min(index.len());
     for i in offset..end {
-        let Some(address) = index.get(i) else { continue };
+        let Some(address) = index.get(i) else {
+            continue;
+        };
         if let Some(role) = get_role(env, &address) {
             page.push_back(RoleHolder { address, role });
         }
@@ -1793,9 +1819,7 @@ pub fn get_verifier_allowlist(env: &Env) -> Vec<VerifierAllowEntry> {
 }
 
 fn set_verifier_allowlist(env: &Env, list: &Vec<VerifierAllowEntry>) {
-    env.storage()
-        .instance()
-        .set(&VERIFIER_ALLOWLIST_KEY, list);
+    env.storage().instance().set(&VERIFIER_ALLOWLIST_KEY, list);
 }
 
 /// `true` when the allowlist has ever been populated. Used to decide whether the
@@ -2101,11 +2125,7 @@ pub const MIGRATION_STEPS: &[MigrationStep] = &[
 ///
 /// Idempotent: calling again with the same `current` / `target` pair
 /// returns 0 because `current >= step.from_version` after the first run.
-pub fn run_migration_steps(
-    env: &Env,
-    current: (u32, u32, u32),
-    target: (u32, u32, u32),
-) -> u32 {
+pub fn run_migration_steps(env: &Env, current: (u32, u32, u32), target: (u32, u32, u32)) -> u32 {
     let mut applied: u32 = 0;
 
     for step in MIGRATION_STEPS {
@@ -2151,6 +2171,11 @@ pub fn get_pause_reason(env: &Env) -> Option<PauseReason> {
     env.storage()
         .instance()
         .get::<Symbol, u32>(&PAUSE_RSN_KEY)
+        .or_else(|| {
+            env.storage()
+                .instance()
+                .get::<Symbol, u32>(&symbol_short!("p_reason"))
+        })
         .and_then(PauseReason::from_code)
 }
 
@@ -2420,7 +2445,7 @@ pub fn set_last_event_ledger(env: &Env) {
 #[cfg(test)]
 mod storage_dead_code_tests {
     use super::*;
-    use soroban_sdk::{Address, Env};
+    use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, Symbol};
 
     fn make_env() -> Env {
         Env::default()
@@ -2505,6 +2530,53 @@ mod storage_dead_code_tests {
                 !has_role_or_admin(&env, &stranger, Role::Verifier),
                 "address with no role must return false"
             );
+        });
+    }
+
+    /// Authoritative chunk-count key is `"chkcnt"`, not the longer `"chunkcnt"`
+    /// spelling that appeared in rent/footprint docs (Issue #468). Reads and
+    /// writes must use [`CHUNK_CNT_KEY`] so a duplicate definition cannot
+    /// silently split the persisted counter.
+    #[test]
+    fn test_chunk_cnt_key_is_chkcnt_not_chunkcnt() {
+        let env = make_env();
+        let contract_id = setup_contract(&env);
+
+        assert_eq!(
+            CHUNK_CNT_KEY,
+            symbol_short!("chkcnt"),
+            "CHUNK_CNT_KEY must remain the persisted chkcnt symbol"
+        );
+        assert_ne!(
+            CHUNK_CNT_KEY,
+            symbol_short!("chunkcnt"),
+            "chunkcnt is not a storage key and must not alias CHUNK_CNT_KEY"
+        );
+
+        env.as_contract(&contract_id, || {
+            set_chunk_count(&env, 7);
+            let via_canonical = env
+                .storage()
+                .instance()
+                .get::<Symbol, u32>(&CHUNK_CNT_KEY)
+                .unwrap_or(0);
+            let via_chkcnt = env
+                .storage()
+                .instance()
+                .get::<Symbol, u32>(&symbol_short!("chkcnt"))
+                .unwrap_or(0);
+            let via_chunkcnt = env
+                .storage()
+                .instance()
+                .get::<Symbol, u32>(&symbol_short!("chunkcnt"))
+                .unwrap_or(0);
+            assert_eq!(via_canonical, 7);
+            assert_eq!(via_chkcnt, 7, "get_chunk_count must persist under chkcnt");
+            assert_eq!(
+                via_chunkcnt, 0,
+                "chunkcnt must not receive the chunk-count write"
+            );
+            assert_eq!(get_chunk_count(&env), 7);
         });
     }
 

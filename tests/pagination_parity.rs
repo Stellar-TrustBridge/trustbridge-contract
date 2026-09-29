@@ -15,7 +15,7 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec, BytesN};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Vec};
 use trustbridge_contract::{ContractError, TrustBridgeContract};
 
 fn setup() -> (Env, Address, Address) {
@@ -37,13 +37,8 @@ fn s(env: &Env, text: &str) -> String {
 fn register_user(env: &Env, contract_id: &Address, username: &str, user: &Address) {
     env.mock_all_auths();
     env.as_contract(contract_id, || {
-        TrustBridgeContract::register(
-            env.clone(),
-            s(env, username),
-            user.clone(),
-            Vec::new(env),
-        )
-        .unwrap();
+        TrustBridgeContract::register(env.clone(), s(env, username), user.clone(), Vec::new(env))
+            .unwrap();
     });
 }
 
@@ -78,9 +73,16 @@ fn test_parity_empty_registry_get_registered_paginated() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
-        assert_eq!(page.records.len(), 0, "Empty registry should return empty page");
+        assert_eq!(
+            page.records.len(),
+            0,
+            "Empty registry should return empty page"
+        );
         assert!(!page.has_more, "Empty registry should have has_more=false");
-        assert_eq!(page.next_cursor, None, "Empty registry should have no next_cursor");
+        assert_eq!(
+            page.next_cursor, None,
+            "Empty registry should have no next_cursor"
+        );
     });
 }
 
@@ -91,9 +93,16 @@ fn test_parity_empty_registry_get_public_paginated() {
 
     env.as_contract(&contract_id, || {
         let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
-        assert_eq!(page.records.len(), 0, "Empty registry should return empty page");
+        assert_eq!(
+            page.records.len(),
+            0,
+            "Empty registry should return empty page"
+        );
         assert!(!page.has_more, "Empty registry should have has_more=false");
-        assert_eq!(page.next_cursor, None, "Empty registry should have no next_cursor");
+        assert_eq!(
+            page.next_cursor, None,
+            "Empty registry should have no next_cursor"
+        );
     });
 }
 
@@ -113,7 +122,7 @@ fn test_parity_single_record_get_registered_page() {
     env.as_contract(&contract_id, || {
         let result = TrustBridgeContract::get_registered_page(env.clone(), 0, 10).unwrap();
         assert_eq!(result.len(), 1, "Single record should return 1 entry");
-        
+
         let (username, addr) = result.get(0).unwrap();
         assert_eq!(username, s(&env, "alice"));
         assert_eq!(addr, user);
@@ -134,7 +143,7 @@ fn test_parity_single_record_get_registered_paginated() {
         assert_eq!(page.records.len(), 1, "Single record should return 1 entry");
         assert!(!page.has_more, "Single record should have has_more=false");
         assert_eq!(page.next_cursor, None);
-        
+
         let (username, record) = page.records.get(0).unwrap();
         assert_eq!(username, s(&env, "alice"));
         assert_eq!(record.stellar_address, user);
@@ -154,7 +163,7 @@ fn test_parity_single_record_get_public_paginated() {
         assert_eq!(page.records.len(), 1, "Single record should return 1 entry");
         assert!(!page.has_more, "Single record should have has_more=false");
         assert_eq!(page.next_cursor, None);
-        
+
         let (username, record) = page.records.get(0).unwrap();
         assert_eq!(username, s(&env, "alice"));
         assert_eq!(record.stellar_address, user);
@@ -183,12 +192,19 @@ fn test_parity_middle_removal_get_registered_page() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         let result = TrustBridgeContract::get_registered_page(env.clone(), 0, 10).unwrap();
-        assert_eq!(result.len(), 2, "After middle removal, should return 2 records");
-        
+        assert_eq!(
+            result.len(),
+            2,
+            "After middle removal, should return 2 records"
+        );
+
         let names: Vec<String> = result.iter().map(|(name, _)| name).collect();
         assert!(names.contains(&s(&env, "alice")));
         assert!(names.contains(&s(&env, "carol")));
-        assert!(!names.contains(&s(&env, "bob")), "Removed record should not appear");
+        assert!(
+            !names.contains(&s(&env, "bob")),
+            "Removed record should not appear"
+        );
     });
 }
 
@@ -210,12 +226,19 @@ fn test_parity_middle_removal_get_registered_paginated() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
-        assert_eq!(page.records.len(), 2, "After middle removal, should return 2 records");
-        
+        assert_eq!(
+            page.records.len(),
+            2,
+            "After middle removal, should return 2 records"
+        );
+
         let names: Vec<String> = page.records.iter().map(|(name, _)| name).collect();
         assert!(names.contains(&s(&env, "alice")));
         assert!(names.contains(&s(&env, "carol")));
-        assert!(!names.contains(&s(&env, "bob")), "Removed record should not appear");
+        assert!(
+            !names.contains(&s(&env, "bob")),
+            "Removed record should not appear"
+        );
     });
 }
 
@@ -236,12 +259,19 @@ fn test_parity_middle_removal_get_public_paginated() {
 
     env.as_contract(&contract_id, || {
         let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
-        assert_eq!(page.records.len(), 2, "After middle removal, should return 2 records");
-        
+        assert_eq!(
+            page.records.len(),
+            2,
+            "After middle removal, should return 2 records"
+        );
+
         let names: Vec<String> = page.records.iter().map(|(name, _)| name).collect();
         assert!(names.contains(&s(&env, "alice")));
         assert!(names.contains(&s(&env, "carol")));
-        assert!(!names.contains(&s(&env, "bob")), "Removed record should not appear");
+        assert!(
+            !names.contains(&s(&env, "bob")),
+            "Removed record should not appear"
+        );
     });
 }
 
@@ -282,8 +312,14 @@ fn test_parity_last_page_get_registered_paginated() {
         // Get first page with limit 2
         let page1 = TrustBridgeContract::get_registered_paginated(env.clone(), None, 2).unwrap();
         assert_eq!(page1.records.len(), 2);
-        assert!(!page1.has_more, "2 records with limit 2 should be last page");
-        assert_eq!(page1.next_cursor, None, "Last page should have no next_cursor");
+        assert!(
+            !page1.has_more,
+            "2 records with limit 2 should be last page"
+        );
+        assert_eq!(
+            page1.next_cursor, None,
+            "Last page should have no next_cursor"
+        );
     });
 }
 
@@ -301,8 +337,14 @@ fn test_parity_last_page_get_public_paginated() {
         // Get first page with limit 2
         let page1 = TrustBridgeContract::get_public_paginated(env.clone(), None, 2).unwrap();
         assert_eq!(page1.records.len(), 2);
-        assert!(!page1.has_more, "2 records with limit 2 should be last page");
-        assert_eq!(page1.next_cursor, None, "Last page should have no next_cursor");
+        assert!(
+            !page1.has_more,
+            "2 records with limit 2 should be last page"
+        );
+        assert_eq!(
+            page1.next_cursor, None,
+            "Last page should have no next_cursor"
+        );
     });
 }
 
@@ -314,7 +356,7 @@ fn test_parity_last_page_get_public_paginated() {
 #[test]
 fn test_parity_multi_page_get_registered_page() {
     let (env, admin, contract_id) = setup();
-    
+
     // Register 5 users
     for i in 0..5 {
         let user = Address::generate(&env);
@@ -327,15 +369,15 @@ fn test_parity_multi_page_get_registered_page() {
         // Get page 1 (2 records)
         let page1 = TrustBridgeContract::get_registered_page(env.clone(), 0, 2).unwrap();
         assert_eq!(page1.len(), 2);
-        
+
         // Get page 2 (2 records)
         let page2 = TrustBridgeContract::get_registered_page(env.clone(), 2, 2).unwrap();
         assert_eq!(page2.len(), 2);
-        
+
         // Get page 3 (1 record)
         let page3 = TrustBridgeContract::get_registered_page(env.clone(), 4, 2).unwrap();
         assert_eq!(page3.len(), 1);
-        
+
         // Total should be 5 unique records
         let mut all_names = Vec::new(&env);
         for (name, _) in page1.iter() {
@@ -347,7 +389,11 @@ fn test_parity_multi_page_get_registered_page() {
         for (name, _) in page3.iter() {
             all_names.push_back(name);
         }
-        assert_eq!(all_names.len(), 5, "Should collect all 5 records across pages");
+        assert_eq!(
+            all_names.len(),
+            5,
+            "Should collect all 5 records across pages"
+        );
     });
 }
 
@@ -355,7 +401,7 @@ fn test_parity_multi_page_get_registered_page() {
 #[test]
 fn test_parity_multi_page_get_registered_paginated() {
     let (env, admin, contract_id) = setup();
-    
+
     // Register 5 users
     for i in 0..5 {
         let user = Address::generate(&env);
@@ -367,21 +413,26 @@ fn test_parity_multi_page_get_registered_paginated() {
     env.as_contract(&contract_id, || {
         let mut all_names = Vec::new(&env);
         let mut cursor = None;
-        
+
         loop {
-            let page = TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 2).unwrap();
-            
+            let page =
+                TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 2).unwrap();
+
             for (name, _) in page.records.iter() {
                 all_names.push_back(name);
             }
-            
+
             if !page.has_more {
                 break;
             }
             cursor = page.next_cursor;
         }
-        
-        assert_eq!(all_names.len(), 5, "Should collect all 5 records across cursor walk");
+
+        assert_eq!(
+            all_names.len(),
+            5,
+            "Should collect all 5 records across cursor walk"
+        );
     });
 }
 
@@ -389,7 +440,7 @@ fn test_parity_multi_page_get_registered_paginated() {
 #[test]
 fn test_parity_multi_page_get_public_paginated() {
     let (env, admin, contract_id) = setup();
-    
+
     // Register 5 users
     for i in 0..5 {
         let user = Address::generate(&env);
@@ -400,21 +451,25 @@ fn test_parity_multi_page_get_public_paginated() {
     env.as_contract(&contract_id, || {
         let mut all_names = Vec::new(&env);
         let mut cursor = None;
-        
+
         loop {
             let page = TrustBridgeContract::get_public_paginated(env.clone(), cursor, 2).unwrap();
-            
+
             for (name, _) in page.records.iter() {
                 all_names.push_back(name);
             }
-            
+
             if !page.has_more {
                 break;
             }
             cursor = page.next_cursor;
         }
-        
-        assert_eq!(all_names.len(), 5, "Should collect all 5 records across cursor walk");
+
+        assert_eq!(
+            all_names.len(),
+            5,
+            "Should collect all 5 records across cursor walk"
+        );
     });
 }
 
@@ -510,7 +565,11 @@ fn test_parity_pause_get_registered_paginated_works_while_paused() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
-        assert_eq!(page.records.len(), 1, "Admin export should work while paused");
+        assert_eq!(
+            page.records.len(),
+            1,
+            "Admin export should work while paused"
+        );
     });
 }
 
@@ -531,7 +590,11 @@ fn test_parity_pause_get_public_paginated_works_while_paused() {
     // get_public_paginated should still work (Issue #294)
     env.as_contract(&contract_id, || {
         let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
-        assert_eq!(page.records.len(), 1, "Public export should work while paused (Issue #294)");
+        assert_eq!(
+            page.records.len(),
+            1,
+            "Public export should work while paused (Issue #294)"
+        );
     });
 }
 
@@ -551,7 +614,7 @@ fn test_parity_return_type_get_registered_page() {
     env.as_contract(&contract_id, || {
         let result = TrustBridgeContract::get_registered_page(env.clone(), 0, 10).unwrap();
         let (username, address) = result.get(0).unwrap();
-        
+
         // Only username and address available
         assert_eq!(username, s(&env, "alice"));
         assert_eq!(address, user);
@@ -571,13 +634,16 @@ fn test_parity_return_type_get_registered_paginated() {
     env.as_contract(&contract_id, || {
         let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         let (username, record) = page.records.get(0).unwrap();
-        
+
         // Full record with metadata
         assert_eq!(username, s(&env, "alice"));
         assert_eq!(record.stellar_address, user);
         assert!(!record.verified, "Newly registered should not be verified");
-        assert!(record.registered_at > 0, "Should have registration timestamp");
-        
+        assert!(
+            record.registered_at > 0,
+            "Should have registration timestamp"
+        );
+
         // ExportPage has pagination metadata
         assert_eq!(page.total, 1);
         assert!(!page.has_more);
@@ -596,13 +662,13 @@ fn test_parity_return_type_get_public_paginated() {
     env.as_contract(&contract_id, || {
         let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
         let (username, record) = page.records.get(0).unwrap();
-        
+
         // Full record with metadata (same as admin paginated)
         assert_eq!(username, s(&env, "alice"));
         assert_eq!(record.stellar_address, user);
         assert!(!record.verified);
         assert!(record.registered_at > 0);
-        
+
         // ExportPage has pagination metadata
         assert_eq!(page.total, 1);
         assert!(!page.has_more);
@@ -629,9 +695,9 @@ fn test_parity_return_type_get_public_paginated() {
 fn test_parity_coverage_complete() {
     // This is a documentation test. If it compiles and runs, all parity
     // scenarios exist for all three APIs.
-    
+
     const EXPECTED_TEST_COUNT: usize = 24; // 8 scenarios × 3 APIs
-    
+
     assert!(
         EXPECTED_TEST_COUNT >= 24,
         "Should have at least 24 parity tests covering all three APIs"

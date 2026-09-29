@@ -37,8 +37,12 @@ fn s(env: &Env, text: &str) -> String {
 /// every public entry point — this is the drifted fixture.
 fn corrupt_counters(env: &Env, contract_id: &Address, count: u32, verified: u32) {
     env.as_contract(contract_id, || {
-        env.storage().instance().set(&symbol_short!("count"), &count);
-        env.storage().instance().set(&symbol_short!("vcount"), &verified);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("count"), &count);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("vcount"), &verified);
     });
 }
 
@@ -49,10 +53,20 @@ fn test_repair_index_dry_run_reports_no_drift_on_healthy_registry() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1, soroban_sdk::Vec::new(&env))
-            .unwrap();
-        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2, soroban_sdk::Vec::new(&env))
-            .unwrap();
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "alice"),
+            user1,
+            soroban_sdk::Vec::new(&env),
+        )
+        .unwrap();
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "bob"),
+            user2,
+            soroban_sdk::Vec::new(&env),
+        )
+        .unwrap();
         TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
     });
 
@@ -62,7 +76,10 @@ fn test_repair_index_dry_run_reports_no_drift_on_healthy_registry() {
     });
 
     assert!(!report.drifted, "a healthy registry must report no drift");
-    assert!(!report.applied, "a dry run must never apply, even with no drift");
+    assert!(
+        !report.applied,
+        "a dry run must never apply, even with no drift"
+    );
     assert_eq!(report.stored_count, 2);
     assert_eq!(report.recomputed_count, 2);
     assert_eq!(report.stored_verified, 1);
@@ -76,10 +93,20 @@ fn test_repair_index_dry_run_detects_drift_without_writing() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1, soroban_sdk::Vec::new(&env))
-            .unwrap();
-        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2, soroban_sdk::Vec::new(&env))
-            .unwrap();
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "alice"),
+            user1,
+            soroban_sdk::Vec::new(&env),
+        )
+        .unwrap();
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "bob"),
+            user2,
+            soroban_sdk::Vec::new(&env),
+        )
+        .unwrap();
         TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
     });
 
@@ -100,9 +127,7 @@ fn test_repair_index_dry_run_detects_drift_without_writing() {
 
     // Confirm nothing was actually written: the corrupted values persist.
     env.mock_all_auths();
-    let stats = env.as_contract(&contract_id, || {
-        TrustBridgeContract::get_stats(env.clone())
-    });
+    let stats = env.as_contract(&contract_id, || TrustBridgeContract::get_stats(env.clone()));
     assert_eq!(stats.total, 99);
     assert_eq!(stats.verified, 99);
 }
@@ -115,12 +140,27 @@ fn test_repair_index_apply_true_corrects_drifted_counters() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), s(&env, "alice"), user1, soroban_sdk::Vec::new(&env))
-            .unwrap();
-        TrustBridgeContract::register(env.clone(), s(&env, "bob"), user2, soroban_sdk::Vec::new(&env))
-            .unwrap();
-        TrustBridgeContract::register(env.clone(), s(&env, "carol"), user3, soroban_sdk::Vec::new(&env))
-            .unwrap();
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "alice"),
+            user1,
+            soroban_sdk::Vec::new(&env),
+        )
+        .unwrap();
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "bob"),
+            user2,
+            soroban_sdk::Vec::new(&env),
+        )
+        .unwrap();
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "carol"),
+            user3,
+            soroban_sdk::Vec::new(&env),
+        )
+        .unwrap();
         TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
         TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "bob")).unwrap();
     });
@@ -138,9 +178,7 @@ fn test_repair_index_apply_true_corrects_drifted_counters() {
     assert_eq!(report.recomputed_verified, 2);
 
     env.mock_all_auths();
-    let stats = env.as_contract(&contract_id, || {
-        TrustBridgeContract::get_stats(env.clone())
-    });
+    let stats = env.as_contract(&contract_id, || TrustBridgeContract::get_stats(env.clone()));
     assert_eq!(stats.total, 3, "count must be corrected on chain");
     assert_eq!(stats.verified, 2, "verified must be corrected on chain");
 
@@ -150,7 +188,10 @@ fn test_repair_index_apply_true_corrects_drifted_counters() {
         TrustBridgeContract::repair_index(env.clone(), true).unwrap()
     });
     assert!(!second.drifted);
-    assert!(!second.applied, "repairing an already-healthy registry must not write");
+    assert!(
+        !second.applied,
+        "repairing an already-healthy registry must not write"
+    );
 }
 
 #[test]

@@ -11,11 +11,14 @@ STELLAR     ?= stellar
 SOURCE      ?= default
 NETWORK     ?= testnet
 ADMIN       ?= $(shell $(STELLAR) keys address $(SOURCE) 2>/dev/null || echo "")
-CONTRACT_ID ?=
+CONTRACT_ID ?= $(CONTRACT)
 GITHUB_USER ?=
 STELLAR_ADDR ?=
 CALLER      ?=
+THRESHOLD   ?=
+USERNAMES   ?=
 FUZZ_SEEDS  ?=
+FUZZ_RUNS   ?= 1000
 BENCH_OUT   ?= bench-results.txt
 NORM_BENCH_OUT ?= bench-username-normalization.txt
 REGISTER_BUDGET_CPU_MAX ?= 25000000
@@ -32,9 +35,14 @@ FUTURENET_FRIENDBOT_URL ?= https://friendbot-futurenet.stellar.org
 FUTURENET_IDENTITY ?= $(SOURCE)
 FUTURENET_DRY_RUN ?= false
 
-.PHONY: help build build-legacy test test-rehearsal fuzz storage-keys-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
+.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser storage-keys-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
+        invoke-verify invoke-revoke-verification invoke-get-all-registered invoke-export-paginated \
+        invoke-public-paginated invoke-remove invoke-set-paused \
+        invoke-batch-remove invoke-set-batch-remove-threshold invoke-get-batch-remove-threshold \
+        invoke-propose-batch-remove invoke-execute-batch-remove invoke-cancel-batch-remove \
+        invoke-get-pending-batch-remove \
         ttl-keeper \
 	export-registry validate-registry dr-test futurenet-smoke assert-build \
 	xdr-fixtures diff-test
@@ -53,6 +61,9 @@ build-legacy: install-target ## Build with cargo directly (wasm32-unknown-unknow
 
 test: ## Run unit tests
 	cargo test
+
+test-homoglyph: ## Run the homoglyph_corpus security regression suite (CI blocking step)
+	cargo test --test homoglyph_corpus
 
 test-rehearsal: build ## Run protocol-upgrade rehearsal (requires pre-built WASM)
 	cargo test test_protocol_upgrade_rehearsal --features wasm-test -- --nocapture
@@ -73,6 +84,9 @@ fuzz: ## Run the invariant property fuzzing suite (seeds: tests/fuzz/seeds.txt o
 	n=$$(echo "$$out" | sed -nE 's/^test result: ok\. ([0-9]+) passed.*/\1/p' | awk '{s+=$$1} END {print s+0}'); \
 	if [ "$$n" -eq 0 ]; then echo "make fuzz: no fuzz tests executed" >&2; exit 1; fi; \
 	echo "make fuzz: $$n fuzz tests passed"
+
+fuzz-parser: ## Fuzz export cursor parsing (install cargo-fuzz + nightly; FUZZ_RUNS=1000 for CI smoke, 0 for continuous)
+	cargo +nightly fuzz run export_cursor -- -runs=$(FUZZ_RUNS) -max_len=9 -timeout=5 -rss_limit_mb=1024
 
 storage-keys-check: ## Fail if a storage.rs key is missing from docs/STORAGE_KEYS.md
 	./scripts/check_storage_keys.sh
@@ -177,6 +191,9 @@ docs-check: ## Build rustdoc without opening browser (CI-equivalent)
 abi: ## Generate the machine-readable ABI JSON artifact
 	python3 scripts/generate_abi_json.py
 
+abi-check: ## Fail if docs/abi.json is stale vs docs/ABI.md (no files written)
+	python3 scripts/generate_abi_json.py --check
+
 wasm-size: build ## Report release WASM size and check against budget (WASM_SIZE_LIMIT)
 	@if [ -f $(WASM_V1) ]; then \
 		WASM=$(WASM_V1); \
@@ -213,7 +230,7 @@ error-codes: ## Verify ContractError discriminants agree across enum, golden, an
 event-topics: ## Verify the indexer's topic table matches src/events.rs (Issue #399)
 	./scripts/check_event_topics.sh
 
-check: fmt lint error-codes event-topics test build docs-check wasm-size ## Run full local quality gate
+check: fmt lint error-codes event-topics abi-check test build docs-check wasm-size ## Run full local quality gate
 
 wasm-hash-pin: build ## Verify release WASM hash matches wasm-hash.pin (mirrors CI hash gate)
 	@if [ -f $(WASM_V1) ]; then WASM=$(WASM_V1); elif [ -f $(WASM_LEGACY) ]; then WASM=$(WASM_LEGACY); else echo "ERROR: No WASM artifact found. Run 'make build' first."; exit 1; fi; \
@@ -274,8 +291,14 @@ deploy-mainnet: build ## Deploy to Stellar Mainnet (requires explicit ADMIN and 
 
 require-contract-id:
 	@if [ -z "$(CONTRACT_ID)" ]; then \
-		echo "ERROR: set CONTRACT_ID=<C...> for this target."; exit 1; \
+		echo "ERROR: set CONTRACT_ID=<C...> (or CONTRACT=<C...>) for this target."; exit 1; \
 	fi
+
+require-caller:
+	@test -n "$(CALLER)" || { echo "ERROR: set CALLER=<G...> to the signing identity's address." >&2; exit 1; }
+
+# SEND=no omits --send=yes so operators can simulate before submitting.
+admin-invoke = $(STELLAR) contract invoke --id "$(CONTRACT_ID)" --source-account "$(SOURCE)" --network "$(NETWORK)" $(if $(filter yes,$(SEND)),--send=yes,) --
 
 invoke-init: require-contract-id ## Initialize contract (CONTRACT_ID and ADMIN required)
 	@if [ -z "$(ADMIN)" ]; then \
@@ -349,12 +372,12 @@ bulk-verify: require-contract-id ## Bulk verify from BULK_VERIFY_FILE with audit
 		--continue-on-error \
 		--pace-ms $(BULK_VERIFY_PACE)
 
-invoke-verify: ## Mark a contributor as verified (admin-only) (GITHUB_USER, SOURCE=admin, CONTRACT_ID)
+invoke-verify: require-contract-id require-caller ## Mark a contributor as verified (GITHUB_USER, CALLER, SOURCE=admin)
 	$(STELLAR) contract invoke \
 		--id $(CONTRACT_ID) \
 		--source-account $(SOURCE) \
 		--network $(NETWORK) \
-		--send=yes \
+		$(if $(filter yes,$(SEND)),--send=yes,) \
 		-- verify --caller $(CALLER) --github-username $(GITHUB_USER)
 
 BULK_REVOKE_FILE ?= usernames.txt
@@ -379,13 +402,14 @@ bulk-revoke: require-contract-id ## Bulk revoke from BULK_REVOKE_FILE with audit
 		--continue-on-error \
 		$(if $(filter yes,$(CONFIRM)),--yes,)
 
-invoke-revoke-verification: ## Revoke contributor verification (admin-only) (GITHUB_USER, SOURCE=admin, CONTRACT_ID)
+invoke-revoke-verification: require-contract-id require-caller ## Revoke verification (GITHUB_USER, CALLER, REVOKE_REASON_CODE required)
+	@test -n "$(REVOKE_REASON_CODE)" || { echo "ERROR: set REVOKE_REASON_CODE=1,2,3,4,5,6,99." >&2; exit 1; }
 	$(STELLAR) contract invoke \
 		--id $(CONTRACT_ID) \
 		--source-account $(SOURCE) \
 		--network $(NETWORK) \
-		--send=yes \
-		-- revoke_verification --caller $(CALLER) --github-username $(GITHUB_USER)
+		$(if $(filter yes,$(SEND)),--send=yes,) \
+		-- revoke_verification --caller $(CALLER) --github-username $(GITHUB_USER) --reason-code $(REVOKE_REASON_CODE)
 
 invoke-get-all-registered: ## Export full registry mapping (admin-only) (SOURCE=admin, CONTRACT_ID)
 	$(STELLAR) contract invoke \
@@ -416,13 +440,119 @@ invoke-remove: ## Remove a registration (CALLER, GITHUB_USER, CONTRACT_ID)
 		--send=yes \
 		-- remove --caller $(CALLER) --github-username $(GITHUB_USER)
 
-invoke-set-paused: ## Toggle contract pause state (PAUSED, SOURCE=admin, CONTRACT_ID)
+invoke-pause: require-contract-id ## Pause the contract (SOURCE=admin; PAUSE_REASON_CODE=1 by default)
+	$(admin-invoke) pause --reason-code "$(PAUSE_REASON_CODE)"
+
+invoke-unpause: require-contract-id ## Resume the contract (SOURCE=admin; UNPAUSE_REASON_CODE=4 by default)
+	$(admin-invoke) unpause --reason-code "$(UNPAUSE_REASON_CODE)"
+
+invoke-set-paused: require-contract-id ## Idempotent pause toggle (PAUSED=true|false, REASON_CODE required)
+	@case "$(PAUSED)" in true|false) ;; *) echo "ERROR: set PAUSED=true or PAUSED=false." >&2; exit 1;; esac
+	@test -n "$(REASON_CODE)" || { echo "ERROR: set REASON_CODE=1,2,3,4,99." >&2; exit 1; }
+	$(admin-invoke) set_paused --paused "$(PAUSED)" --reason-code "$(REASON_CODE)"
+
+invoke-set-guardian: require-contract-id ## Set the guardian (GUARDIAN_ADDRESS=<G...>, SOURCE=admin)
+	@test -n "$(GUARDIAN_ADDRESS)" || { echo "ERROR: set GUARDIAN_ADDRESS=<G...>." >&2; exit 1; }
+	$(admin-invoke) set_guardian --guardian "$(GUARDIAN_ADDRESS)"
+
+invoke-remove-guardian: require-contract-id ## Remove the guardian (SOURCE=admin)
+	$(admin-invoke) remove_guardian
+
+invoke-emergency-pause: require-contract-id require-caller ## Emergency freeze (SOURCE=guardian or admin, CALLER=<signer G...>)
+	$(admin-invoke) emergency_pause --caller "$(CALLER)"
+
+invoke-clear-emergency-pause: require-contract-id ## Lift emergency freeze (SOURCE=admin)
+	$(admin-invoke) clear_emergency_pause
+
+invoke-set-role: require-contract-id ## Grant role (TARGET_ADDRESS=<G...>, ROLE=Verifier|Revoker|Upgrader|Admin)
+	@test -n "$(TARGET_ADDRESS)" && test -n "$(ROLE)" || { echo "ERROR: set TARGET_ADDRESS=<G...> and ROLE=<variant>." >&2; exit 1; }
+	$(admin-invoke) set_role --target "$(TARGET_ADDRESS)" --role "$(ROLE)"
+
+invoke-remove-role: require-contract-id ## Revoke role (TARGET_ADDRESS=<G...>, SOURCE=admin)
+	@test -n "$(TARGET_ADDRESS)" || { echo "ERROR: set TARGET_ADDRESS=<G...>." >&2; exit 1; }
+	$(admin-invoke) remove_role --target "$(TARGET_ADDRESS)"
+
+invoke-set-cooldown: require-contract-id ## Set upgrade cooldown (COOLDOWN_SECONDS=<seconds>, SOURCE=admin)
+	@test -n "$(COOLDOWN_SECONDS)" || { echo "ERROR: set COOLDOWN_SECONDS=<seconds> (0 disables)." >&2; exit 1; }
+	$(admin-invoke) set_cooldown --cooldown-seconds "$(COOLDOWN_SECONDS)"
+
+invoke-adopt-network-tag: require-contract-id ## Tag an untagged legacy instance (SOURCE=admin)
+	$(admin-invoke) adopt_network_tag
+
+invoke-batch-remove: require-contract-id ## Directly remove a batch of registrations (CALLER, USERNAMES='["user1",...]', SOURCE=admin, CONTRACT_ID)
+	@if [ -z "$(CALLER)" ]; then \
+		echo "ERROR: set CALLER=<G...> for this target."; exit 1; \
+	fi
+	@if [ -z "$(USERNAMES)" ]; then \
+		echo "ERROR: set USERNAMES='[\"user1\",\"user2\"]' for this target."; exit 1; \
+	fi
 	$(STELLAR) contract invoke \
 		--id $(CONTRACT_ID) \
 		--source-account $(SOURCE) \
 		--network $(NETWORK) \
 		--send=yes \
-		-- set_paused --paused $(PAUSED)
+		-- batch_remove --caller $(CALLER) --usernames '$(USERNAMES)'
+
+invoke-set-batch-remove-threshold: require-contract-id ## Set dual-control threshold for batch_remove (THRESHOLD, SOURCE=admin, CONTRACT_ID)
+	@if [ -z "$(THRESHOLD)" ]; then \
+		echo "ERROR: set THRESHOLD=<count> (0 to disable) for this target."; exit 1; \
+	fi
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		--send=yes \
+		-- set_batch_remove_threshold --threshold $(THRESHOLD)
+
+invoke-get-batch-remove-threshold: require-contract-id ## Read configured dual-control batch_remove threshold (read-only)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		-- get_batch_remove_threshold
+
+invoke-propose-batch-remove: require-contract-id ## Propose a dual-control batch removal (CALLER, USERNAMES='["user1",...]', SOURCE=admin, CONTRACT_ID)
+	@if [ -z "$(CALLER)" ]; then \
+		echo "ERROR: set CALLER=<G...> for this target."; exit 1; \
+	fi
+	@if [ -z "$(USERNAMES)" ]; then \
+		echo "ERROR: set USERNAMES='[\"user1\",\"user2\"]' for this target."; exit 1; \
+	fi
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		--send=yes \
+		-- propose_batch_remove --caller $(CALLER) --usernames '$(USERNAMES)'
+
+invoke-execute-batch-remove: require-contract-id ## Execute pending dual-control batch removal from second key (CALLER, SOURCE=second_key, CONTRACT_ID)
+	@if [ -z "$(CALLER)" ]; then \
+		echo "ERROR: set CALLER=<G...> for this target."; exit 1; \
+	fi
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		--send=yes \
+		-- execute_batch_remove --caller $(CALLER)
+
+invoke-cancel-batch-remove: require-contract-id ## Cancel pending dual-control batch removal (CALLER, SOURCE=admin, CONTRACT_ID)
+	@if [ -z "$(CALLER)" ]; then \
+		echo "ERROR: set CALLER=<G...> for this target."; exit 1; \
+	fi
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		--send=yes \
+		-- cancel_batch_remove --caller $(CALLER)
+
+invoke-get-pending-batch-remove: require-contract-id ## View pending dual-control batch removal proposal (read-only)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		-- get_pending_batch_remove
 
 dr-test: ## Run a non-destructive export/validate round-trip on a disposable instance
 	CONTRACT_ID=$(CONTRACT_ID) SOURCE=$(SOURCE) ADMIN_SOURCE=$(ADMIN_SOURCE) \

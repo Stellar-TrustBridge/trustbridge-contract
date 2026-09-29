@@ -514,6 +514,7 @@ tests validate this property against 78+ known confusable characters and ensure
 no bypass path exists at the `register()` entry point.
 
 Run the full corpus: `cargo test homoglyph` or `cargo test unicode`
+(CI: `cargo test --test homoglyph_corpus` on every pull request).
 
 ### Performance
 
@@ -722,6 +723,93 @@ A batch call does not revert if a single username fails to be removed (e.g., if 
 
 ### 3. Griefing Size Cap
 To prevent a malicious or erroneous caller from exhausting the network CPU/memory budget in a single transaction (and causing an out-of-gas panic that masks partial success), `batch_remove` enforces a strict maximum batch size (configured via `BatchConfig`). Submitting a list of usernames larger than this cap immediately reverts the transaction with `InvalidBatchSize`.
+
+---
+
+## Dual-Control `batch_remove` Auth Negative Matrix (Issue #219)
+
+Dashboard operators and auditors need the full failure surface of the dual-control
+`batch_remove` entrypoints spelled out. The matrix below covers every unauthorized and
+invalid state transition across all six entrypoints. Each cell maps to a test in
+`tests/batch_remove_dual_control.rs`.
+
+Cross-reference: [`tests/auth_matrix.csv`](../tests/auth_matrix.csv) ·
+[ABI reference](ABI.md) · [ADMIN_RUNBOOK.md — Dual-Control batch_remove](ADMIN_RUNBOOK.md)
+
+Auth rules in brief:
+
+```
+propose_batch_remove:
+  caller == contract admin          →  allowed (subject to pause and pending-proposal checks)
+  caller holds Role::Admin          →  NotAuthorized (only the contract admin may propose)
+  any other caller                  →  NotAuthorized
+
+execute_batch_remove:
+  caller == contract admin OR holds Role::Admin  →  allowed …
+  … but caller == proposed_by                    →  NotAuthorized (one signature is never enough)
+  no live proposal (or expired)                  →  NoPendingBatchRemove
+  any other caller                               →  NotAuthorized
+
+Records stay registered until the second distinct approval succeeds
+(`test_dual_control_batch_remove_requires_both_approvals`, Issue #439).
+
+cancel_batch_remove:
+  caller == contract admin          →  allowed (works even while paused)
+  any other caller                  →  NotAuthorized
+  no live proposal                  →  NoPendingBatchRemove
+
+get_pending_batch_remove:           public read — no auth, works while paused
+
+set_batch_remove_threshold:
+  caller == contract admin          →  allowed
+  any other caller                  →  NotAuthorized
+
+get_batch_remove_threshold:         public read — no auth, works while paused
+```
+
+### `propose_batch_remove` — auth matrix
+
+| # | Scenario | Expected error | Code | Test |
+|---|----------|----------------|------|------|
+| PB1 | Contract admin proposes a batch above threshold | `Ok(())` | — | `test_propose_then_execute_by_a_second_key` |
+| PB2 | `Role::Admin` holder (not contract admin) proposes | `NotAuthorized` | 3 | `test_second_proposal_rejected_while_pending` |
+| PB3 | Random address proposes | `NotAuthorized` | 3 | `test_random_cannot_propose` |
+| PB4 | Contract is paused | `Paused` | 7 | `test_pause_blocks_propose_and_execute_but_not_cancel` |
+| PB5 | A proposal is already pending | `BatchRemoveProposalPending` | 55 | `test_second_proposal_rejected_while_pending` |
+
+### `execute_batch_remove` — auth matrix
+
+| # | Scenario | Expected error | Code | Test |
+|---|----------|----------------|------|------|
+| EB1 | `Role::Admin` holder (not the proposer) executes | `Ok(())` | — | `test_propose_then_execute_by_a_second_key` |
+| EB2 | Contract admin executes their own proposal | `NotAuthorized` | 3 | `test_execute_by_same_proposer_rejected` |
+| EB3 | Random address (no admin role) executes | `NotAuthorized` | 3 | `test_execute_by_non_admin_rejected` |
+| EB4 | Contract is paused | `Paused` | 7 | `test_pause_blocks_propose_and_execute_but_not_cancel` |
+| EB5 | No proposal is pending | `NoPendingBatchRemove` | 56 | `test_execute_with_no_pending_proposal_fails` |
+| EB6 | Proposal TTL has elapsed (24 h) | `NoPendingBatchRemove` | 56 | `test_execute_after_proposal_ttl_elapsed_rejected` |
+| EB7 | One approver only: records still present; second distinct key completes removal | `Ok(BatchSummary)` after two keys | — | `test_dual_control_batch_remove_requires_both_approvals` |
+
+### `cancel_batch_remove` — auth matrix
+
+| # | Scenario | Expected error | Code | Test |
+|---|----------|----------------|------|------|
+| CB1 | Contract admin cancels a live proposal | `Ok(())` | — | `test_cancel_clears_proposal_and_allows_a_new_one` |
+| CB2 | Random address tries to cancel | `NotAuthorized` | 3 | `test_cancel_by_non_admin_or_without_proposal_fails` |
+| CB3 | No proposal is pending | `NoPendingBatchRemove` | 56 | `test_cancel_by_non_admin_or_without_proposal_fails` |
+| CB4 | Contract is paused (cancel still works) | `Ok(())` | — | `test_pause_blocks_propose_and_execute_but_not_cancel` |
+
+### `set_batch_remove_threshold` — auth matrix
+
+| # | Scenario | Expected error | Code | Test |
+|---|----------|----------------|------|------|
+| ST1 | Contract admin sets threshold | `Ok(())` | — | `test_threshold_above_forces_the_propose_path` |
+| ST2 | Random address sets threshold | `NotAuthorized` | 3 | `test_auth_matrix_set_batch_remove_threshold_random` |
+
+### Public reads — `get_pending_batch_remove` and `get_batch_remove_threshold`
+
+Both functions are read-only, require no authorization, and remain accessible while
+the contract is paused. `get_pending_batch_remove` returns `None` when nothing is
+pending or after a proposal has expired, regardless of caller identity.
 
 ---
 

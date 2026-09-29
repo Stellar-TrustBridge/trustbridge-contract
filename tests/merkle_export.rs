@@ -13,10 +13,15 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Bytes, BytesN, Env, String};
 use soroban_sdk::Vec as SVec;
+use soroban_sdk::{testutils::Address as _, Address, Bytes, BytesN, Env, String};
 
 use trustbridge_contract::TrustBridgeContract;
+
+const GOLDEN_ADMIN: &str = "GAAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQDZ7H";
+const GOLDEN_ALICE: &str = "GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA";
+const GOLDEN_BOB: &str = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ";
+const GOLDEN_CAROL: &str = "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H";
 
 fn setup() -> (Env, Address, Address) {
     let env = Env::default();
@@ -30,6 +35,13 @@ fn setup() -> (Env, Address, Address) {
 
 fn s(env: &Env, text: &str) -> String {
     String::from_str(env, text)
+}
+
+fn hash_from_hex(env: &Env, hex: &str) -> BytesN<32> {
+    let bytes = std::array::from_fn(|index| {
+        u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).unwrap()
+    });
+    BytesN::from_array(env, &bytes)
 }
 
 // ── Independent off-chain-style Merkle implementation, per docs/ABI.md ─────
@@ -62,7 +74,10 @@ fn node_hash(env: &Env, left: &BytesN<32>, right: &BytesN<32>) -> BytesN<32> {
 /// had no sibling and was carried up unchanged.
 #[derive(Clone)]
 enum Step {
-    Pair { sibling: BytesN<32>, sibling_is_left: bool },
+    Pair {
+        sibling: BytesN<32>,
+        sibling_is_left: bool,
+    },
     Promoted,
 }
 
@@ -115,7 +130,10 @@ fn verify_proof(env: &Env, leaf: &BytesN<32>, steps: &[Step], root: &BytesN<32>)
     let mut acc = leaf.clone();
     for step in steps {
         acc = match step {
-            Step::Pair { sibling, sibling_is_left } => {
+            Step::Pair {
+                sibling,
+                sibling_is_left,
+            } => {
                 if *sibling_is_left {
                     node_hash(env, sibling, &acc)
                 } else {
@@ -202,8 +220,13 @@ fn test_included_member_proves_inclusion_and_non_member_fails() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         for (name, addr) in names.iter().zip(addrs.iter()) {
-            TrustBridgeContract::register(env.clone(), s(&env, name), addr.clone(), SVec::new(&env))
-                .unwrap();
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, name),
+                addr.clone(),
+                SVec::new(&env),
+            )
+            .unwrap();
         }
         TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "carol")).unwrap();
 
@@ -215,7 +238,12 @@ fn test_included_member_proves_inclusion_and_non_member_fails() {
         let mut leaves: SVec<BytesN<32>> = SVec::new(&env);
         for i in 0..page.records.len() {
             let (username, record) = page.records.get(i).unwrap();
-            leaves.push_back(leaf_hash(&env, &username, &record.stellar_address, record.verified));
+            leaves.push_back(leaf_hash(
+                &env,
+                &username,
+                &record.stellar_address,
+                record.verified,
+            ));
         }
 
         // "carol" (index 2) is verified; her leaf must reflect that and her
@@ -270,5 +298,81 @@ fn test_single_record_page_root_equals_its_own_leaf() {
         assert_eq!(page.records.len(), 1);
         let expected = leaf_hash(&env, &s(&env, "octocat"), &addr, false);
         assert_eq!(page.merkle_root, expected);
+    });
+}
+
+#[test]
+fn test_v1_export_merkle_golden_vectors() {
+    let env = Env::default();
+    let admin = Address::from_str(&env, GOLDEN_ADMIN);
+    let alice = Address::from_str(&env, GOLDEN_ALICE);
+    let bob = Address::from_str(&env, GOLDEN_BOB);
+    let carol = Address::from_str(&env, GOLDEN_CAROL);
+    let contract_id = env.register(TrustBridgeContract, ());
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        for (name, address) in [("Alice", &alice), ("bob", &bob), ("carol", &carol)] {
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, name),
+                address.clone(),
+                SVec::new(&env),
+            )
+            .unwrap();
+        }
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "carol")).unwrap();
+
+        let expected_alice = hash_from_hex(
+            &env,
+            "03f5777f71952d65b384a30ee2a389996eec0c5411882fab4b825dbd45ba34f1",
+        );
+        let expected_bob = hash_from_hex(
+            &env,
+            "965304356c6c946637f68203856da9f67804028a3bc009e5fb82d6d66ff3554c",
+        );
+        let expected_carol = hash_from_hex(
+            &env,
+            "f36b3fabc5f6ded2df39a6ff6def7e7e751e62bc2754467ccadd214bdc2b3a31",
+        );
+
+        assert_eq!(
+            TrustBridgeContract::merkle_leaf_hash(
+                env.clone(),
+                s(&env, "alice"),
+                alice.clone(),
+                true,
+            ),
+            expected_alice
+        );
+        assert_eq!(
+            TrustBridgeContract::merkle_leaf_hash(env.clone(), s(&env, "bob"), bob.clone(), false,),
+            expected_bob
+        );
+        assert_eq!(
+            TrustBridgeContract::merkle_leaf_hash(
+                env.clone(),
+                s(&env, "carol"),
+                carol.clone(),
+                true,
+            ),
+            expected_carol
+        );
+
+        let single = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 1).unwrap();
+        assert_eq!(single.records.len(), 1);
+        assert_eq!(single.merkle_root, expected_alice);
+
+        let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+        assert_eq!(page.records.len(), 3);
+        assert_eq!(
+            page.merkle_root,
+            hash_from_hex(
+                &env,
+                "81074a96376e707644a2042a2fb47bceb61f9f572b42fa9f92ce2817e6f873b0",
+            )
+        );
     });
 }
