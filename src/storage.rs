@@ -613,6 +613,47 @@ pub fn get_admin(env: &Env) -> Result<Address, ContractError> {
         .ok_or(ContractError::NotInitialized)
 }
 
+/// Write `admin` into instance storage. Used only by `initialize`.
+pub fn set_admin(env: &Env, admin: &Address) {
+    env.storage().instance().set(&ADMIN_KEY, admin);
+}
+
+// ── Timelocked role grants (Issue #220) ───────────────────────────────────────
+
+/// Returns the pending (timelocked) role grant for `address`, if any.
+pub fn get_pending_role(env: &Env, address: &Address) -> Option<PendingRoleGrant> {
+    env.storage()
+        .persistent()
+        .get(&(PENDING_ROLE_KEY, address.clone()))
+}
+
+/// Stores a pending role grant, overwriting any existing one for `address`.
+pub fn set_pending_role(env: &Env, address: &Address, grant: &PendingRoleGrant) {
+    let key = (PENDING_ROLE_KEY, address.clone());
+    env.storage().persistent().set(&key, grant);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+}
+
+/// Removes the pending role grant for `address`. No-op if none exists.
+pub fn remove_pending_role(env: &Env, address: &Address) {
+    env.storage()
+        .persistent()
+        .remove(&(PENDING_ROLE_KEY, address.clone()));
+}
+
+/// Seconds the `set_role` timelock is currently configured for. `0` means
+/// grants take effect immediately (default pre-Issue-#220 behaviour).
+pub fn get_role_delay(env: &Env) -> u64 {
+    env.storage().instance().get(&ROLE_DELAY_KEY).unwrap_or(0)
+}
+
+/// Sets the `set_role` timelock in seconds.
+pub fn set_role_delay(env: &Env, secs: u64) {
+    env.storage().instance().set(&ROLE_DELAY_KEY, &secs);
+}
+
 pub fn get_record(env: &Env, github_username: &String) -> Option<ContributorRecord> {
     let key = (REG_KEY, canon(env, github_username));
     let record: Option<ContributorRecord> = env.storage().persistent().get(&key);

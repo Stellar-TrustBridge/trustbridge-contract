@@ -193,9 +193,6 @@ pub enum ContractError {
     /// `execute_upgrade` was called before the approval threshold was met
     /// (Issue #301).
     UpgradeProposalInsufficientApprovals = 44,
-    /// Instance state was initialized on a different network than the one
-    /// executing (Issue #231).
-    NetworkMismatch = 45,
     /// `register` was given more fallback addresses than `MAX_FALLBACK_ADDRESSES`.
     FallbackListFull = 46,
     /// `rename` was called with a `new_username` that is already registered.
@@ -285,7 +282,6 @@ impl ContractError {
             42 => Some(ContractError::UpgradeProposalAlreadyApproved),
             43 => Some(ContractError::UpgradeProposalDelayActive),
             44 => Some(ContractError::UpgradeProposalInsufficientApprovals),
-            45 => Some(ContractError::NetworkMismatch),
             46 => Some(ContractError::FallbackListFull),
             47 => Some(ContractError::UsernameTaken),
             48 => Some(ContractError::RotationRequired),
@@ -347,14 +343,9 @@ impl ContractError {
             ContractError::ChallengeActive => ErrorCategory::Retry,
             ContractError::AdminTransferDelayActive => ErrorCategory::Retry,
             ContractError::RotationNotReady => ErrorCategory::Retry,
-            // A rate-limit rejection clears when the ledger rolls over or the
-            // permit resets — retrying later is expected to succeed.
             ContractError::VerifyRateLimited => ErrorCategory::Retry,
-            // A proposal becomes executable once more approvals arrive or the
-            // delay elapses — retrying the same call later can succeed.
             ContractError::UpgradeProposalDelayActive => ErrorCategory::Retry,
             ContractError::UpgradeProposalInsufficientApprovals => ErrorCategory::Retry,
-            // A pending grant becomes activatable once its timelock elapses.
             ContractError::RoleGrantNotReady => ErrorCategory::Retry,
 
             // ── Fatal (permanent / bad request) ──────────────────────────
@@ -383,12 +374,23 @@ impl ContractError {
             ContractError::NoPendingRoleGrant => ErrorCategory::Fatal,
             ContractError::ProvenanceMissing => ErrorCategory::Fatal,
             ContractError::ProvenanceMismatch => ErrorCategory::Fatal,
-            // Fatal, not Retry: the executing network does not change between
-            // attempts. Someone has to re-deploy or re-tag the instance.
             ContractError::NetworkMismatch => ErrorCategory::Fatal,
-
-            // A pending grant becomes activatable once its timelock elapses.
-            ContractError::RoleGrantNotReady => ErrorCategory::Retry,
+            ContractError::VerifierAllowlistFull => ErrorCategory::Fatal,
+            ContractError::VerifierNotAllowlisted => ErrorCategory::Fatal,
+            ContractError::VerifierExpiryInPast => ErrorCategory::Fatal,
+            ContractError::StagedWasmMismatch => ErrorCategory::Fatal,
+            ContractError::UpgradeProposalAlreadyPending => ErrorCategory::Fatal,
+            ContractError::NoUpgradeProposalPending => ErrorCategory::Fatal,
+            ContractError::UpgradeProposalAlreadyApproved => ErrorCategory::Fatal,
+            ContractError::FallbackListFull => ErrorCategory::Fatal,
+            ContractError::UsernameTaken => ErrorCategory::Fatal,
+            ContractError::RotationRequired => ErrorCategory::Fatal,
+            ContractError::RotationPending => ErrorCategory::Fatal,
+            ContractError::NoRotationPending => ErrorCategory::Fatal,
+            ContractError::InvalidCursor => ErrorCategory::Fatal,
+            ContractError::DualControlRequired => ErrorCategory::Fatal,
+            ContractError::BatchRemoveProposalPending => ErrorCategory::Fatal,
+            ContractError::NoPendingBatchRemove => ErrorCategory::Fatal,
         }
     }
 

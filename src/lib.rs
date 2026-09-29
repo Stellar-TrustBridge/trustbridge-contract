@@ -5,7 +5,9 @@ mod batch;
 mod domain;
 mod error;
 mod events;
+mod merkle;
 mod multisig_upgrade;
+mod oracle_proof;
 mod staged_wasm;
 mod storage;
 mod utils;
@@ -49,6 +51,7 @@ pub use events::{
     UpgradedEvent,
     VerificationRevokedEvent,
     VerifiedEvent,
+    VerificationConfiguredEvent,
     // Staged WASM (Issue #300)
     WasmStagedEvent,
 };
@@ -61,7 +64,7 @@ pub use storage::{
     ChallengeRecord, ContributorRecord, ExportAttestation, ExportPage, HealthSnapshot, PauseReason,
     PendingBatchRemove, PendingRoleGrant, PendingRotation, RecordProof, RepairReport, Role,
     RoleHolder, Stats, VerificationConfig, VerifierAllowEntry, WasmAttestation, WasmProvenance,
-    MAX_VERIFIERS,
+    MAX_FALLBACK_ADDRESSES, MAX_VERIFIERS,
 };
 pub use version::Version;
 
@@ -97,6 +100,10 @@ use crate::storage::{
     set_rotation_delay as storage_set_rotation_delay, set_verified_count, set_version,
     set_wasm_attestation, set_wasm_provenance, verifier_allowlist_active, verifier_slots_remaining,
     PendingRoleGrant as PendingRoleGrantRecord, ADMIN_KEY, DEFAULT_CHALLENGE_DELAY_SECS,
+    charge_verify_rate, get_verify_limit as storage_get_verify_limit,
+    set_verify_limit as storage_set_verify_limit,
+    set_guardian_address, is_guardian, set_emergency_pause, set_emergency_pause_ts,
+    is_attestation_required, set_network_id,
 };
 
 use crate::utils::{
@@ -1228,7 +1235,7 @@ impl TrustBridgeContract {
             &WasmProvenance {
                 wasm_hash: new_wasm_hash.clone(),
                 previous_wasm_hash,
-                upgraded_by: admin,
+                upgraded_by: admin.clone(),
                 upgraded_at: now,
                 version: soroban_sdk::vec![&env, version.0, version.1, version.2],
                 attested,
@@ -3010,7 +3017,7 @@ impl TrustBridgeContract {
     /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
     pub fn export_attestation(
         env: Env,
-        cursor: u32,
+        cursor: Option<BytesN<8>>,
         limit: u32,
     ) -> Result<ExportAttestation, ContractError> {
         require_initialized(&env)?;
