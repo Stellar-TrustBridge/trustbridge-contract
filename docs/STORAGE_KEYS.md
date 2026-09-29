@@ -33,7 +33,7 @@ These keys live in Soroban's **instance** storage partition. Each key is a `Symb
 | `"network"` | `NETWORK_KEY` | `BytesN<32>` | Network ID (SHA-256 of passphrase) recorded at `initialize` (Issue #231) |
 | `"roldelay"` | `ROLE_DELAY_KEY` | `u64` | Timelock delay for role grants in seconds (Issue #220) |
 | `"role_idx"` | `ROLE_IDX_KEY` | `Vec<Address>` | Enumeration index of addresses holding roles (Issue #228) |
-| `"chkcnt"` | `CHUNK_CNT_KEY` | `u32` | Number of chunks in the chunked username index |
+| `"chkcnt"` | `CHUNK_CNT_KEY` | `u32` | Number of chunks in the chunked username index. Authoritative persisted symbol is chkcnt (Issue #468); do not introduce a chunkcnt duplicate. |
 | `"idx_gen"` | `INDEX_GEN_KEY` | `u32` | Index generation counter for cursor invalidation (Issue #215) |
 | `"evt_ledger"` | `LAST_EVENT_LEDGER_KEY` | `u32` | Ledger sequence of most recent contract event (Issue #282) |
 | `"prov"` | `PROV_KEY` | `Option<WasmProvenance>` | WASM provenance record (Wave #24) |

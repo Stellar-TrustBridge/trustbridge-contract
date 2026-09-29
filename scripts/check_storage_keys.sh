@@ -38,6 +38,22 @@ fi
 if [[ $count -eq 0 ]]; then
   echo "ERROR: no Symbol constants found in $SRC (parser broken?)"; exit 1
 fi
+
+# Issue #468: CHUNK_CNT_KEY must have exactly one definition, persisted as chkcnt.
+chunk_cnt_defs=$(grep -cE '^\s*(pub(\([a-z]+\))? )?const CHUNK_CNT_KEY:' "$SRC" || true)
+if [[ "$chunk_cnt_defs" -ne 1 ]]; then
+  echo "ERROR: expected exactly one CHUNK_CNT_KEY definition in $SRC, found $chunk_cnt_defs"; fail=1
+fi
+if grep -nE 'const [A-Z0-9_]+: *Symbol = symbol_short!\("chunkcnt"\)' "$SRC"; then
+  echo "ERROR: obsolete chunkcnt Symbol constant in $SRC — persisted key is chkcnt (CHUNK_CNT_KEY)"; fail=1
+fi
+if ! grep -qE 'const CHUNK_CNT_KEY: Symbol = symbol_short!\("chkcnt"\)' "$SRC"; then
+  echo "ERROR: CHUNK_CNT_KEY must be symbol_short!(\"chkcnt\")"; fail=1
+fi
+if grep -qE '^\| `"chunkcnt"` \|' "$DOC"; then
+  echo "ERROR: $DOC still documents chunkcnt as a key row; canonical symbol is chkcnt"; fail=1
+fi
+
 if [[ $fail -ne 0 ]]; then
   echo "Storage key inventory check FAILED — update $DOC"; exit 1
 fi

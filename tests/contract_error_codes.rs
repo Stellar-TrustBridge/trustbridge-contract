@@ -41,6 +41,7 @@ fn variant_for_name(name: &str) -> ContractError {
         "AdminTransferDelayActive" => ContractError::AdminTransferDelayActive,
         "NoPendingAdminTransfer" => ContractError::NoPendingAdminTransfer,
         "AttestationRequired" => ContractError::AttestationRequired,
+        "NetworkMismatch" => ContractError::NetworkMismatch,
         "VerifierAllowlistFull" => ContractError::VerifierAllowlistFull,
         "VerifierNotAllowlisted" => ContractError::VerifierNotAllowlisted,
         "VerifierExpiryInPast" => ContractError::VerifierExpiryInPast,
@@ -92,6 +93,22 @@ fn entries() -> Vec<Entry> {
             }
         })
         .collect()
+}
+
+#[test]
+fn network_mismatch_is_code_30_not_invalid_pause_reason() {
+    // Issue #459: rustdoc / abi.json had listed NetworkMismatch at 21, which
+    // is InvalidPauseReason. The contract discriminant is 30.
+    assert_eq!(ContractError::InvalidPauseReason.code(), 21);
+    assert_eq!(ContractError::NetworkMismatch.code(), 30);
+    assert_eq!(
+        ContractError::from_code(21),
+        Some(ContractError::InvalidPauseReason)
+    );
+    assert_eq!(
+        ContractError::from_code(30),
+        Some(ContractError::NetworkMismatch)
+    );
 }
 
 #[test]

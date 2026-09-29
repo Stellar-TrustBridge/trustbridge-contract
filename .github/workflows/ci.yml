@@ -1,0 +1,140 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  STELLAR_CLI_VERSION: 26.1.0
+
+jobs:
+  quality:
+    name: Quality gate (make check)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32v1-none, wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Named blocking step so the homoglyph corpus cannot be dropped if
+      # `make check` / `cargo test` is later filtered. Same quality job —
+      # not a parallel subsystem. Failures fail the pull-request check.
+      - name: Homoglyph corpus tests
+        run: cargo test --test homoglyph_corpus
+
+      - name: Run quality gate
+        run: make check
+
+  audit:
+    name: Audit (cargo audit + cargo deny)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-audit and cargo-deny
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+
+      - name: cargo audit
+        run: make audit
+
+      - name: cargo deny
+        run: make deny
+
+  mutants:
+    name: Mutation testing (cargo-mutants on src/utils.rs)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: cargo mutants
+        run: make mutants
+
+  coverage:
+    name: Coverage (tarpaulin on src/storage.rs)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --locked
+
+      - name: cargo tarpaulin
+        run: make tarpaulin
+
+  storage-rent-estimator:
+    name: Storage-rent estimator golden test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check storage-rent estimator golden
+        run: bash scripts/test_storage_rent_estimator.sh
+        working-directory: trustbridge-contract
+
+  build:
+    name: Contract build + WASM hash gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none, wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify required files are present
+        run: |
+          test -f Cargo.toml
+          test -f rust-toolchain.toml
+          test -f src/lib.rs
+          test -f README.md
+          test -f Makefile

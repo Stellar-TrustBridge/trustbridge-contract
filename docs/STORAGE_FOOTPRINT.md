@@ -31,7 +31,7 @@ The registry currently writes:
 
 | Key | Class | Grows with N? | Holds |
 |---|---|---|---|
-| `admin`, `count`, `vcount`, `paused`, `cdown`, `lastupg`, `ver`, `chunkcnt`, `prov`, `attest` | instance | No — fixed count | Scalars + the two WASM-provenance structs |
+| `admin`, `count`, `vcount`, `paused`, `cdown`, `lastupg`, `ver`, `chkcnt`, `prov`, `attest` | instance | No — fixed count | Scalars + the two WASM-provenance structs |
 | `idx` | instance | **Yes — linearly** | `Vec<String>` of *every* registered username, in one entry |
 | `(reg, username)` | persistent | Yes — one entry per registration | `ContributorRecord` |
 | `(chunk, chunk_idx)` | persistent | Yes — one entry per 100 usernames | `Vec<String>` slice (`CHUNK_SIZE = 100`, `src/storage.rs`) |

@@ -272,6 +272,81 @@ fn test_execute_by_same_proposer_rejected() {
     });
 }
 
+/// Issue #439: a single authorized approver must never complete a dual-control
+/// `batch_remove`. Direct `batch_remove` and same-key `execute_batch_remove`
+/// leave every record in place; only a distinct second approval removes them.
+/// Dropping the second-key check would make this test fail at the state
+/// assertions after one approval.
+#[test]
+fn test_dual_control_batch_remove_requires_both_approvals() {
+    let (env, admin, second, contract_id) = setup();
+    let names = register_n(&env, &contract_id, 4);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+
+        // One admin signature on the direct path is not enough.
+        let direct = TrustBridgeContract::batch_remove(env.clone(), admin.clone(), names.clone());
+        assert_eq!(direct, Err(ContractError::DualControlRequired));
+        assert_eq!(
+            TrustBridgeContract::get_stats(env.clone()).total,
+            4,
+            "direct batch_remove must not delete after a single approval"
+        );
+        for i in 0..names.len() {
+            let name = names.get(i).unwrap();
+            assert!(
+                TrustBridgeContract::get_address(env.clone(), name).is_some(),
+                "record must remain after rejected direct batch_remove"
+            );
+        }
+
+        // First approval: propose. Registry still complete; proposal pending.
+        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
+            .unwrap();
+        assert!(
+            TrustBridgeContract::get_pending_batch_remove(env.clone()).is_some(),
+            "first approval records a pending proposal"
+        );
+        assert_eq!(
+            TrustBridgeContract::get_stats(env.clone()).total,
+            4,
+            "propose must not remove records"
+        );
+
+        // Same authorized approver cannot consume their own proposal.
+        let same_key = TrustBridgeContract::execute_batch_remove(env.clone(), admin.clone());
+        assert_eq!(same_key, Err(ContractError::NotAuthorized));
+        assert!(
+            TrustBridgeContract::get_pending_batch_remove(env.clone()).is_some(),
+            "proposal must survive a one-approver execute"
+        );
+        assert_eq!(
+            TrustBridgeContract::get_stats(env.clone()).total,
+            4,
+            "one approval must not complete removal"
+        );
+
+        // Second distinct admin-equivalent approval completes the removal.
+        let summary =
+            TrustBridgeContract::execute_batch_remove(env.clone(), second.clone()).unwrap();
+        assert_eq!(summary.successful, 4);
+        assert!(
+            TrustBridgeContract::get_pending_batch_remove(env.clone()).is_none(),
+            "proposal is consumed only after the second approval"
+        );
+        assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 0);
+        for i in 0..names.len() {
+            let name = names.get(i).unwrap();
+            assert!(
+                TrustBridgeContract::get_address(env.clone(), name).is_none(),
+                "record must be gone only after both approvals"
+            );
+        }
+    });
+}
+
 /// A caller that is neither the contract admin nor a `Role::Admin` holder
 /// cannot execute, even after auth succeeds.
 #[test]

@@ -35,6 +35,10 @@
       "signature": "get_address(github_username: String) -> Option<ContributorRecord>"
     },
     {
+      "name": "get_address_if_verified",
+      "signature": "get_address_if_verified(github_username: String) -> Result<ContributorRecord, ContractError>"
+    },
+    {
       "name": "remove",
       "signature": "remove(caller: Address, github_username: String) -> Result<(), ContractError>"
     },
@@ -53,102 +57,6 @@
     {
       "name": "get_registered_paginated",
       "signature": "get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>"
-    },
-    {
-      "name": "get_public_paginated",
-      "signature": "get_public_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>"
-    },
-    {
-      "name": "config_verification",
-      "signature": "config_verification(caller: Address, attestation: Symbol, expires_in: u64, threshold: u32) -> Result<(), ContractError>"
-    },
-    {
-      "name": "get_verification_config",
-      "signature": "get_verification_config() -> Option<VerificationConfig>"
-    },
-    {
-      "name": "batch_verify",
-      "signature": "batch_verify(caller: Address, usernames: Vec<String>) -> Result<BatchSummary, ContractError>"
-    },
-    {
-      "name": "revoke_verification",
-      "signature": "revoke_verification(caller: Address, github_username: String, reason_code: u32) -> Result<(), ContractError>"
-    },
-    {
-      "name": "set_bot_status",
-      "signature": "set_bot_status(caller: Address, github_username: String, is_bot: bool) -> Result<(), ContractError>"
-    },
-    {
-      "name": "get_verified_count",
-      "signature": "get_verified_count() -> u32"
-    },
-    {
-      "name": "get_ever_verified_count",
-      "signature": "get_ever_verified_count() -> u32"
-    },
-    {
-      "name": "get_stats",
-      "signature": "get_stats() -> Stats"
-    },
-    {
-      "name": "pause",
-      "signature": "pause() -> Result<(), ContractError>"
-    },
-    {
-      "name": "unpause",
-      "signature": "unpause() -> Result<(), ContractError>"
-    },
-    {
-      "name": "is_paused",
-      "signature": "is_paused() -> bool"
-    },
-    {
-      "name": "set_role",
-      "signature": "set_role(target: Address, role: Role) -> Result<(), ContractError>"
-    },
-    {
-      "name": "remove_role",
-      "signature": "remove_role(target: Address) -> Result<(), ContractError>"
-    },
-    {
-      "name": "get_role",
-      "signature": "get_role(address: Address) -> Option<Role>"
-    },
-    {
-      "name": "set_cooldown",
-      "signature": "set_cooldown(cooldown_seconds: u64) -> Result<(), ContractError>"
-    },
-    {
-      "name": "get_cooldown",
-      "signature": "get_cooldown() -> u64"
-    },
-    {
-      "name": "get_version",
-      "signature": "get_version() -> (u32, u32, u32)"
-    },
-    {
-      "name": "upgrade",
-      "signature": "upgrade(new_wasm_hash: BytesN<32>) -> Result<(), ContractError>"
-    },
-    {
-      "name": "attest_upgrade",
-      "signature": "attest_upgrade(wasm_hash: BytesN<32>, expires_at: u64) -> Result<(), ContractError>"
-    },
-    {
-      "name": "clear_attestation",
-      "signature": "clear_attestation() -> Result<(), ContractError>"
-    },
-    {
-      "name": "get_attestation",
-      "signature": "get_attestation() -> Option<WasmAttestation>"
-    },
-    {
-      "name": "get_provenance",
-      "signature": "get_provenance() -> Option<WasmProvenance>"
-    },
-    {
-      "name": "migrate",
-      "signature": "migrate(new_version: (u32, u32, u32)) -> Result<(), ContractError>"
     }
   ],
   "errors": [
@@ -176,16 +84,6 @@
       "code": 5,
       "name": "AlreadyVerified",
       "description": "Username already verified"
-    },
-    {
-      "code": 6,
-      "name": "InvalidEntityType",
-      "description": "Unknown entity type value"
-    },
-    {
-      "code": 7,
-      "name": "OrgNameRequired",
-      "description": "Team registration requires org_name"
     },
     {
       "code": 6,
@@ -264,8 +162,88 @@
     },
     {
       "code": 21,
+      "name": "InvalidPauseReason",
+      "description": "`pause` / `unpause` / `set_paused` given an unrecognized reason code"
+    },
+    {
+      "code": 22,
+      "name": "AlreadyReserved",
+      "description": "`add_reserved` for a username already on the reserved list"
+    },
+    {
+      "code": 23,
+      "name": "NotReserved",
+      "description": "`remove_reserved` for a username not on the reserved list"
+    },
+    {
+      "code": 24,
+      "name": "UsernameReserved",
+      "description": "`register` for a username on the reserved list"
+    },
+    {
+      "code": 25,
+      "name": "ReservedListFull",
+      "description": "Reserved list has reached its maximum size"
+    },
+    {
+      "code": 26,
+      "name": "AdminTransferPending",
+      "description": "`propose_admin_transfer` while a transfer is already pending"
+    },
+    {
+      "code": 27,
+      "name": "AdminTransferDelayActive",
+      "description": "`execute_admin_transfer` before the delay has elapsed"
+    },
+    {
+      "code": 28,
+      "name": "NoPendingAdminTransfer",
+      "description": "`execute_admin_transfer` with no pending proposal"
+    },
+    {
+      "code": 29,
+      "name": "AttestationRequired",
+      "description": "`upgrade` without an attestation while attestation-required mode is on"
+    },
+    {
+      "code": 30,
       "name": "NetworkMismatch",
-      "description": "Instance state was initialized on a different network than the one executing (Issue #231)"
+      "description": "Instance state was initialized on a different network than the one executing (Issue #231 / #401)"
+    },
+    {
+      "code": 31,
+      "name": "VerifierAllowlistFull",
+      "description": "`add_verifier` would exceed the `MAX_VERIFIERS` cap (Issue #293)"
+    },
+    {
+      "code": 32,
+      "name": "VerifierNotAllowlisted",
+      "description": "`remove_verifier` for an address not on the allowlist (Issue #293)"
+    },
+    {
+      "code": 33,
+      "name": "VerifierExpiryInPast",
+      "description": "`add_verifier` given a non-zero `expires_at` not in the future (Issue #293)"
+    },
+    {
+      "code": 34,
+      "name": "NoPendingRoleGrant",
+      "description": "`activate_role` / `cancel_role_grant` with no pending grant (Issue #220)"
+    },
+    {
+      "code": 35,
+      "name": "RoleGrantNotReady",
+      "description": "`activate_role` before the grant's timelock elapsed (Issue #220)"
+    },
+    {
+      "code": 36,
+      "name": "ProvenanceMissing",
+      "description": "`assert_build` / `set_provenance_digests` before any provenance record exists (Issue #225)"
+    },
+    {
+      "code": 37,
+      "name": "ProvenanceMismatch",
+      "description": "`assert_build` given a hash that does not match stored provenance (Issue #225)"
     },
     {
       "code": 57,
@@ -288,7 +266,7 @@
         "\"bot_status_changed_event\"",
         "github_username"
       ],
-      "data": "{ is_bot, actor, timestamp, domain: EventDomain }"
+      "data": "{ is_bot: bool, actor: Address, timestamp, domain: EventDomain }"
     },
     {
       "name": "RemovedEvent",
@@ -385,6 +363,54 @@
         "new_admin"
       ],
       "data": "{ old_admin, timestamp }"
+    },
+    {
+      "name": "WasmStagedEvent",
+      "topics": [
+        "\"wasm_staged_event\"",
+        "wasm_hash"
+      ],
+      "data": "{ staged_by, timestamp }"
+    },
+    {
+      "name": "StagedWasmClearedEvent",
+      "topics": [
+        "\"staged_wasm_cleared_event\"",
+        "wasm_hash"
+      ],
+      "data": "{ cleared_by, timestamp }"
+    },
+    {
+      "name": "UpgradeProposedEvent",
+      "topics": [
+        "\"upgrade_proposed_event\"",
+        "proposal_id"
+      ],
+      "data": "{ wasm_hash, proposed_by, executable_at, timestamp }"
+    },
+    {
+      "name": "UpgradeApprovedEvent",
+      "topics": [
+        "\"upgrade_approved_event\"",
+        "proposal_id"
+      ],
+      "data": "{ approved_by, approval_count, timestamp }"
+    },
+    {
+      "name": "UpgradeProposalExecutedEvent",
+      "topics": [
+        "\"upgrade_proposal_executed_event\"",
+        "proposal_id"
+      ],
+      "data": "{ wasm_hash, executed_by, approval_count, timestamp }"
+    },
+    {
+      "name": "UpgradeProposalCancelledEvent",
+      "topics": [
+        "\"upgrade_proposal_cancelled_event\"",
+        "proposal_id"
+      ],
+      "data": "{ wasm_hash, cancelled_by, timestamp }"
     }
   ]
 }

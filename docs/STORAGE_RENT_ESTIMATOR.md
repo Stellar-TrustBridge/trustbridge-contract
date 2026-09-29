@@ -113,7 +113,7 @@ Let `N` = number of live registered contributors (`count`).
 | Driver | Formula | Notes |
 |--------|---------|-------|
 | Chunk entries | `ceil(N / CHUNK_SIZE)` | Key `(Symbol("chunk"), chunk_idx)` |
-| Chunk count key | `1` instance entry | `chunkcnt` / chunk-count symbol |
+| Chunk count key | `1` instance entry | `chkcnt` (`CHUNK_CNT_KEY`) |
 
 Dual-write note: registration also maintains the legacy instance `idx`
 `Vec<String>` (full username list). That is **instance** overhead that grows
@@ -179,7 +179,7 @@ Logical schema:
       "per_user_persistent_keys": ["reg"],
       "optional_per_user_persistent_keys": ["lastact"],
       "per_address_persistent_keys": ["role"],
-      "instance_keys": ["admin", "count", "vcount", "idx", "pause", "cdown", "lastupg", "ver", "chunkcnt"]
+      "instance_keys": ["admin", "count", "vcount", "idx", "pause", "cdown", "lastupg", "ver", "chkcnt"]
     },
     "cost_drivers": {
       "reg_entries": "N",
