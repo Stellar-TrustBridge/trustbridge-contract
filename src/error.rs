@@ -71,12 +71,34 @@ use soroban_sdk::contracterror;
 /// | 29 | `AttestationRequired` | `upgrade` |
 /// | 30 | `NetworkMismatch` | `initialize`, `require_initialized` (Issue #231 / #401) |
 /// | 31 | `VerifierAllowlistFull` | `add_verifier` |
+/// | 32 | `VerifierNotAllowlisted` | `remove_verifier` |
 /// | 33 | `VerifierExpiryInPast` | `add_verifier` |
 /// | 34 | `NoPendingRoleGrant` | `activate_role`, `cancel_role_grant` |
 /// | 35 | `RoleGrantNotReady` | `activate_role` |
 /// | 36 | `ProvenanceMissing` | `assert_build` |
 /// | 37 | `ProvenanceMismatch` | `assert_build` |
+/// | 39 | `StagedWasmMismatch` | `upgrade`, `execute_upgrade` |
+/// | 40 | `UpgradeProposalAlreadyPending` | `propose_multisig_upgrade` |
+/// | 41 | `NoUpgradeProposalPending` | `approve_upgrade`, `execute_upgrade`, `cancel_upgrade_proposal` |
+/// | 42 | `UpgradeProposalAlreadyApproved` | `approve_upgrade` |
+/// | 43 | `UpgradeProposalDelayActive` | `execute_upgrade` |
+/// | 44 | `UpgradeProposalInsufficientApprovals` | `execute_upgrade` |
+/// | 46 | `FallbackListFull` | `register` |
+/// | 47 | `UsernameTaken` | `rename` |
+/// | 48 | `RotationRequired` | `register` |
+/// | 49 | `RotationPending` | `rename`, `request_address_rotation` |
+/// | 50 | `NoRotationPending` | `execute_address_rotation`, `cancel_address_rotation` |
+/// | 51 | `RotationNotReady` | `execute_address_rotation` |
+/// | 52 | `InvalidCursor` | paginated reads |
+/// | 53 | `VerifyRateLimited` | `verify`, `revoke_verification`, `batch_verify` |
+/// | 54 | `DualControlRequired` | `batch_remove` |
+/// | 55 | `BatchRemoveProposalPending` | `propose_batch_remove` |
+/// | 56 | `NoPendingBatchRemove` | `execute_batch_remove`, `cancel_batch_remove` |
 /// | 57 | `RoleExpired` | any role-gated privileged invocation |
+/// | 58 | `OracleProofBadLayout` | `verify_with_proof` |
+/// | 59 | `OracleProofNotAllowlisted` | `verify_with_proof` |
+/// | 60 | `OracleProofExpired` | `verify_with_proof` |
+/// | 61 | `OracleProofBadSignature` | `verify_with_proof` |
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -164,14 +186,14 @@ pub enum ContractError {
     VerifierExpiryInPast = 33,
     /// `activate_role` / `cancel_role_grant` was called for an address with no
     /// pending grant (Issue #220).
-    NoPendingRoleGrant = 35,
+    NoPendingRoleGrant = 34,
     /// `activate_role` was called before the grant's timelock elapsed (Issue #220).
-    RoleGrantNotReady = 36,
+    RoleGrantNotReady = 35,
     /// `assert_build` was called before any provenance record exists (Issue #225).
-    ProvenanceMissing = 37,
+    ProvenanceMissing = 36,
     /// `assert_build` was given a hash that does not match stored provenance
     /// (Issue #225).
-    ProvenanceMismatch = 38,
+    ProvenanceMismatch = 37,
     /// `upgrade` / `execute_upgrade` was given a WASM hash that does not match
     /// the staged-WASM slot (Issue #300).
     StagedWasmMismatch = 39,
@@ -276,12 +298,12 @@ impl ContractError {
             29 => Some(ContractError::AttestationRequired),
             30 => Some(ContractError::NetworkMismatch),
             31 => Some(ContractError::VerifierAllowlistFull),
+            32 => Some(ContractError::VerifierNotAllowlisted),
             33 => Some(ContractError::VerifierExpiryInPast),
-            34 => Some(ContractError::VerifierNotAllowlisted),
-            35 => Some(ContractError::NoPendingRoleGrant),
-            36 => Some(ContractError::RoleGrantNotReady),
-            37 => Some(ContractError::ProvenanceMissing),
-            38 => Some(ContractError::ProvenanceMismatch),
+            34 => Some(ContractError::NoPendingRoleGrant),
+            35 => Some(ContractError::RoleGrantNotReady),
+            36 => Some(ContractError::ProvenanceMissing),
+            37 => Some(ContractError::ProvenanceMismatch),
             39 => Some(ContractError::StagedWasmMismatch),
             40 => Some(ContractError::UpgradeProposalAlreadyPending),
             41 => Some(ContractError::NoUpgradeProposalPending),
@@ -343,9 +365,12 @@ impl ContractError {
             ContractError::InvalidRole => ErrorCategory::Auth,
             ContractError::VerifierNotAllowlisted => ErrorCategory::Auth,
             ContractError::VerifierExpiryInPast => ErrorCategory::Auth,
+            ContractError::RoleExpired => ErrorCategory::Auth,
+            ContractError::OracleProofNotAllowlisted => ErrorCategory::Auth,
 
             // Transient conditions that may clear without intervention.
             ContractError::CooldownActive => ErrorCategory::Retry,
+            ContractError::ChallengeNotResolvable => ErrorCategory::Retry,
             ContractError::AdminTransferDelayActive => ErrorCategory::Retry,
             ContractError::RotationNotReady => ErrorCategory::Retry,
             ContractError::VerifyRateLimited => ErrorCategory::Retry,
@@ -386,10 +411,6 @@ impl ContractError {
             ContractError::NoPendingRoleGrant => ErrorCategory::Fatal,
             ContractError::ProvenanceMissing => ErrorCategory::Fatal,
             ContractError::ProvenanceMismatch => ErrorCategory::Fatal,
-            ContractError::NetworkMismatch => ErrorCategory::Fatal,
-            ContractError::VerifierAllowlistFull => ErrorCategory::Fatal,
-            ContractError::VerifierNotAllowlisted => ErrorCategory::Fatal,
-            ContractError::VerifierExpiryInPast => ErrorCategory::Fatal,
             ContractError::StagedWasmMismatch => ErrorCategory::Fatal,
             ContractError::UpgradeProposalAlreadyPending => ErrorCategory::Fatal,
             ContractError::NoUpgradeProposalPending => ErrorCategory::Fatal,
@@ -403,6 +424,9 @@ impl ContractError {
             ContractError::DualControlRequired => ErrorCategory::Fatal,
             ContractError::BatchRemoveProposalPending => ErrorCategory::Fatal,
             ContractError::NoPendingBatchRemove => ErrorCategory::Fatal,
+            ContractError::OracleProofBadLayout => ErrorCategory::Fatal,
+            ContractError::OracleProofExpired => ErrorCategory::Fatal,
+            ContractError::OracleProofBadSignature => ErrorCategory::Fatal,
         }
     }
 
@@ -495,6 +519,28 @@ mod tests {
             ContractError::RoleGrantNotReady,
             ContractError::ProvenanceMissing,
             ContractError::ProvenanceMismatch,
+            ContractError::StagedWasmMismatch,
+            ContractError::UpgradeProposalAlreadyPending,
+            ContractError::NoUpgradeProposalPending,
+            ContractError::UpgradeProposalAlreadyApproved,
+            ContractError::UpgradeProposalDelayActive,
+            ContractError::UpgradeProposalInsufficientApprovals,
+            ContractError::FallbackListFull,
+            ContractError::UsernameTaken,
+            ContractError::RotationRequired,
+            ContractError::RotationPending,
+            ContractError::NoRotationPending,
+            ContractError::RotationNotReady,
+            ContractError::InvalidCursor,
+            ContractError::VerifyRateLimited,
+            ContractError::DualControlRequired,
+            ContractError::BatchRemoveProposalPending,
+            ContractError::NoPendingBatchRemove,
+            ContractError::RoleExpired,
+            ContractError::OracleProofBadLayout,
+            ContractError::OracleProofNotAllowlisted,
+            ContractError::OracleProofExpired,
+            ContractError::OracleProofBadSignature,
         ];
         for err in all {
             let _ = err.category();
