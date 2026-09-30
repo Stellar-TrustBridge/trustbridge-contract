@@ -480,4 +480,42 @@ mod tests {
         let after_two = record_approval(&env, proposal.id, signer_b).unwrap();
         assert!(has_enough_approvals(&env, &after_two));
     }
+
+    #[test]
+    fn test_record_approval_no_proposal_pending() {
+        let env = Env::default();
+        let signer = Address::generate(&env);
+        let result = record_approval(&env, 0, signer);
+        assert_eq!(result, Err(ContractError::NoUpgradeProposalPending));
+    }
+
+    #[test]
+    fn test_require_proposal_executable_wrong_id() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000);
+        let proposer = Address::generate(&env);
+        let proposal = create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 0).unwrap();
+        assert_eq!(
+            require_proposal_executable(&env, proposal.id + 1),
+            Err(ContractError::NoUpgradeProposalPending)
+        );
+    }
+
+    #[test]
+    fn test_record_approval_capped_at_max_signers() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000);
+        let proposer = Address::generate(&env);
+        let proposal = create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 0).unwrap();
+        let mut last_proposal = proposal.clone();
+        for _ in 0..(MAX_UPGRADE_SIGNERS - 1) {
+            let signer = Address::generate(&env);
+            last_proposal = record_approval(&env, proposal.id, signer).unwrap();
+        }
+        assert_eq!(last_proposal.approvers.len(), MAX_UPGRADE_SIGNERS);
+        let extra_signer = Address::generate(&env);
+        let after_cap = record_approval(&env, proposal.id, extra_signer).unwrap();
+        assert_eq!(after_cap.approvers.len(), MAX_UPGRADE_SIGNERS);
+    }
 }
+
