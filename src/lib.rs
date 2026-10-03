@@ -52,7 +52,6 @@ pub use events::{
     VerificationConfiguredEvent,
     VerificationRevokedEvent,
     VerifiedEvent,
-    VerificationConfiguredEvent,
     // Staged WASM (Issue #300)
     WasmStagedEvent,
 };
@@ -75,9 +74,10 @@ use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, 
 
 use crate::storage::{
     add_to_index, add_verifier as storage_add_verifier, build_record_proof,
-    bump_ever_verified_count, clear_pending_reverify, get_admin, get_audit_logs, get_audit_stats,
-    get_challenge, get_cooldown as storage_get_cooldown, get_count, get_emergency_pause,
-    get_emergency_pause_ts, get_ever_verified_count as storage_get_ever_verified_count,
+    bump_ever_verified_count, charge_verify_rate, clear_pending_reverify, get_admin,
+    get_audit_logs, get_audit_stats, get_challenge, get_cooldown as storage_get_cooldown,
+    get_count, get_emergency_pause, get_emergency_pause_ts,
+    get_ever_verified_count as storage_get_ever_verified_count,
     get_guardian as storage_get_guardian, get_index,
     get_last_event_ledger as storage_get_last_event_ledger, get_last_upgrade,
     get_network_id as storage_get_network_id, get_pending_role as storage_get_pending_role,
@@ -87,28 +87,25 @@ use crate::storage::{
     get_role_holder_count as storage_get_role_holder_count, get_role_holders_internal,
     get_rotation_delay as storage_get_rotation_delay, get_stats as read_stats,
     get_verification_config, get_verified_count as storage_get_verified_count,
-    get_verifier_allowlist, get_version as storage_get_version, get_wasm_attestation,
-    get_wasm_provenance, has_challenge, has_pending_rotation, has_record,
-    is_active_verifier as storage_is_active_verifier, is_admin_caller, is_attestation_required,
-    is_guardian, is_in_cooldown, is_paused as storage_is_paused, MAX_FALLBACK_ADDRESSES,
-    prune_expired_verifiers, push_audit_entry, remove_challenge,
+    get_verifier_allowlist, get_verify_limit, get_verify_limit as storage_get_verify_limit,
+    get_version as storage_get_version, get_wasm_attestation, get_wasm_provenance, has_challenge,
+    has_pending_rotation, has_record, is_active_verifier as storage_is_active_verifier,
+    is_admin_caller, is_attestation_required, is_guardian, is_in_cooldown,
+    is_paused as storage_is_paused, prune_expired_verifiers, push_audit_entry, remove_challenge,
     remove_from_index, remove_guardian as storage_remove_guardian, remove_pending_role,
     remove_pending_rotation, remove_record, remove_role as storage_remove_role,
-    remove_verifier as storage_remove_verifier, remove_wasm_attestation, require_attestation_if_required,
-    require_initialized, require_not_paused, require_role_not_expired, run_migration_steps,
-    set_challenge, set_cooldown as storage_set_cooldown, set_count, set_ever_verified_count,
-    set_emergency_pause, set_emergency_pause_ts, set_guardian_address, set_last_action,
-    set_last_event_ledger, set_last_upgrade, set_network_id, set_paused as set_paused_state,
-    set_pending_reverify, set_pending_role, set_pending_rotation, set_record,
-    set_role as storage_set_role, set_role_delay as storage_set_role_delay,
-    set_rotation_delay as storage_set_rotation_delay, set_verify_limit, set_verified_count,
+    remove_verifier as storage_remove_verifier, remove_wasm_attestation,
+    require_attestation_if_required, require_initialized, require_not_paused,
+    require_role_not_expired, run_migration_steps, set_challenge,
+    set_cooldown as storage_set_cooldown, set_count, set_emergency_pause, set_emergency_pause_ts,
+    set_ever_verified_count, set_guardian_address, set_last_action, set_last_event_ledger,
+    set_last_upgrade, set_network_id, set_paused as set_paused_state, set_pending_reverify,
+    set_pending_role, set_pending_rotation, set_record, set_role as storage_set_role,
+    set_role_delay as storage_set_role_delay, set_rotation_delay as storage_set_rotation_delay,
+    set_verified_count, set_verify_limit, set_verify_limit as storage_set_verify_limit,
     set_version, set_wasm_attestation, set_wasm_provenance, verifier_allowlist_active,
-    verifier_slots_remaining, charge_verify_rate, get_verify_limit,
-    PendingRoleGrant as PendingRoleGrantRecord, ADMIN_KEY, DEFAULT_CHALLENGE_DELAY_SECS,
-    charge_verify_rate, get_verify_limit as storage_get_verify_limit,
-    set_verify_limit as storage_set_verify_limit,
-    set_guardian_address, is_guardian, set_emergency_pause, set_emergency_pause_ts,
-    is_attestation_required, set_network_id,
+    verifier_slots_remaining, PendingRoleGrant as PendingRoleGrantRecord, ADMIN_KEY,
+    DEFAULT_CHALLENGE_DELAY_SECS, MAX_FALLBACK_ADDRESSES,
 };
 
 use crate::utils::{
@@ -8307,7 +8304,8 @@ mod test {
         });
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
+            let page =
+                TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
             assert_eq!(
                 page.records.len(),
                 2,
@@ -10246,12 +10244,8 @@ mod test {
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
             register_personal(&env, &contract_id, "octocat", &user);
-            TrustBridgeContract::verify(
-                env.clone(),
-                admin.clone(),
-                username(&env, "octocat"),
-            )
-            .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
+                .unwrap();
             register_personal(&env, &contract_id, "octocat", &new_user);
             let res =
                 TrustBridgeContract::remove(env.clone(), other.clone(), username(&env, "octocat"));
@@ -11262,7 +11256,7 @@ mod test {
                 user.clone(),
                 Vec::new(&env),
             )
-                .unwrap();
+            .unwrap();
             let record =
                 TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
             assert!(!record.is_bot);
@@ -11410,7 +11404,8 @@ mod test {
         let mut found = false;
         for (_source, topics, _data) in events {
             if topics.len() > 0
-                && topics.get(0).unwrap() == soroban_sdk::Symbol::new(&env, "RegisteredEvent").to_val()
+                && topics.get(0).unwrap()
+                    == soroban_sdk::Symbol::new(&env, "RegisteredEvent").to_val()
             {
                 found = true;
             }
@@ -12107,8 +12102,7 @@ mod test {
                 Vec::new(&env),
             )
             .unwrap();
-            let attestation =
-                TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap();
+            let attestation = TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap();
             let page =
                 TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
             assert_eq!(attestation.page, page);

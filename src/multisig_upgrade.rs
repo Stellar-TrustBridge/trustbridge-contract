@@ -518,4 +518,3 @@ mod tests {
         assert_eq!(after_cap.approvers.len(), MAX_UPGRADE_SIGNERS);
     }
 }
-

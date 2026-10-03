@@ -1676,10 +1676,7 @@ pub fn remove_role(env: &Env, address: &Address) {
 
 /// Returns the configured timelock applied to future `set_role` grants.
 pub fn get_role_delay(env: &Env) -> u64 {
-    env.storage()
-        .instance()
-        .get(&ROLE_DELAY_KEY)
-        .unwrap_or(0)
+    env.storage().instance().get(&ROLE_DELAY_KEY).unwrap_or(0)
 }
 
 /// Sets the configured timelock applied to future `set_role` grants. `0` keeps
@@ -1690,7 +1687,9 @@ pub fn set_role_delay(env: &Env, secs: u64) {
 
 /// Returns the pending grant for `address`, if any.
 pub fn get_pending_role(env: &Env, address: &Address) -> Option<PendingRoleGrant> {
-    env.storage().persistent().get(&(PENDING_ROLE_KEY, address.clone()))
+    env.storage()
+        .persistent()
+        .get(&(PENDING_ROLE_KEY, address.clone()))
 }
 
 /// Stores a pending role grant for `address`.

@@ -24,7 +24,10 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::{Address as _, Ledger as _, LedgerInfo}, Address, Env, Vec};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger as _, LedgerInfo},
+    Address, Env, Vec,
+};
 use trustbridge_contract::{ContractError, Role, TrustBridgeContract};
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -97,8 +100,14 @@ fn test_proof_for_nonexistent_username() {
     });
 
     assert!(!proof.exists, "non-existent record must yield exists=false");
-    assert!(!proof.verified, "non-existent record must yield verified=false");
-    assert_eq!(proof.registered_at, 0, "registered_at must be 0 for missing record");
+    assert!(
+        !proof.verified,
+        "non-existent record must yield verified=false"
+    );
+    assert_eq!(
+        proof.registered_at, 0,
+        "registered_at must be 0 for missing record"
+    );
 }
 
 // ─── 2. Existence proof (unverified) ─────────────────────────────────────────
@@ -115,7 +124,10 @@ fn test_proof_for_registered_unverified_username() {
     });
 
     assert!(proof.exists, "registered record must yield exists=true");
-    assert!(!proof.verified, "freshly registered record must be unverified");
+    assert!(
+        !proof.verified,
+        "freshly registered record must be unverified"
+    );
     // registered_at is set to env.ledger().timestamp() at registration time —
     // it may be 0 in a default Env where timestamp starts at 0, so we just
     // verify the field is present and the proof is self-consistent.
@@ -136,7 +148,10 @@ fn test_proof_reflects_verified_state() {
     });
 
     assert!(proof.exists, "verified record must still exist");
-    assert!(proof.verified, "proof must reflect verified=true after verify()");
+    assert!(
+        proof.verified,
+        "proof must reflect verified=true after verify()"
+    );
 }
 
 // ─── 4. Revoked proof ────────────────────────────────────────────────────────
@@ -177,7 +192,10 @@ fn test_proof_for_removed_username() {
 
     assert!(!proof.exists, "removed record must yield exists=false");
     assert!(!proof.verified, "removed record must yield verified=false");
-    assert_eq!(proof.registered_at, 0, "registered_at must be 0 after removal");
+    assert_eq!(
+        proof.registered_at, 0,
+        "registered_at must be 0 after removal"
+    );
 }
 
 // ─── 6. Parity with has_record ────────────────────────────────────────────────
@@ -305,10 +323,8 @@ fn test_proof_case_folded_lookup_matches_canonical() {
     env.as_contract(&contract_id, || {
         let canonical =
             TrustBridgeContract::get_record_proof(env.clone(), username(&env, "octocat"));
-        let upper =
-            TrustBridgeContract::get_record_proof(env.clone(), username(&env, "OctoCat"));
-        let mixed =
-            TrustBridgeContract::get_record_proof(env.clone(), username(&env, "OCTOCAT"));
+        let upper = TrustBridgeContract::get_record_proof(env.clone(), username(&env, "OctoCat"));
+        let mixed = TrustBridgeContract::get_record_proof(env.clone(), username(&env, "OCTOCAT"));
 
         assert_eq!(
             canonical.exists, upper.exists,
@@ -345,7 +361,10 @@ fn test_proof_records_are_independent() {
         let bob = TrustBridgeContract::get_record_proof(env.clone(), username(&env, "bob"));
 
         assert!(alice.exists && alice.verified, "alice must be verified");
-        assert!(bob.exists && !bob.verified, "bob must be unverified — alice's state must not bleed over");
+        assert!(
+            bob.exists && !bob.verified,
+            "bob must be unverified — alice's state must not bleed over"
+        );
     });
 }
 

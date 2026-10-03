@@ -662,4 +662,3 @@ fn test_propose_preserves_live_proposal_state_on_already_pending_error() {
         assert_eq!(live.approvers.len(), 1);
     });
 }
-
