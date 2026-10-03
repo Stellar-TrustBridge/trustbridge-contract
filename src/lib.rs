@@ -3096,7 +3096,7 @@ impl TrustBridgeContract {
     ) -> Result<ExportPage, ContractError> {
         require_initialized(&env)?;
 
-        get_public_paginated_internal(&env, cursor, limit)
+        crate::storage::get_registered_paginated(&env, cursor, limit)
     }
 
     /// Toggles contract pause state. Admin-only (Issue #3).

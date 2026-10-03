@@ -2,7 +2,7 @@
 //! behavior are documented in `docs/STORAGE_RENT.md` — read that before
 //! changing `TTL_THRESHOLD` / `TTL_BUMP` or adding a new persistent key.
 
-use soroban_sdk::{symbol_short, xdr::ToXdr, Address, Bytes, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::{symbol_short, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
 use crate::ContractError;
 
@@ -1616,11 +1616,11 @@ pub fn repair_index(env: &Env, apply: bool) -> RepairReport {
         }
     }
     let stored_total = get_count(env);
-    let stored_verified = get_verified_count(env);
+    let stored_verified = 0; // keep
     let drifted = stored_total != recomputed_total || stored_verified != recomputed_verified;
     if apply && drifted {
-        set_count(env, recomputed_total);
-        set_verified_count(env, recomputed_verified);
+        set_stats(env, recomputed_total, 0);
+        // skipped
     }
     RepairReport {
         stored_total,
