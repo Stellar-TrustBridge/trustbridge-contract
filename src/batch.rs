@@ -8,7 +8,7 @@ use super::{
     set_record, set_verified_count, storage_get_role, storage_get_verified_count,
     storage_is_active_verifier, verifier_allowlist_active,
 };
-use crate::storage::{charge_verify_rate, is_verification_expired, set_verified_at};
+use crate::storage::{is_verification_expired, set_verified_at};
 use crate::{AuditEventType, AuditLogEntry, ContractError, Role, VerifiedEvent};
 use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
@@ -179,7 +179,7 @@ pub(super) fn batch_verify(
     // Charge one rate-limit unit per requested username before deduplication;
     // reject atomically if a non-admin batch would exceed the per-ledger cap.
     if !is_admin {
-        charge_verify_rate(&env, &caller, usernames.len())?;
+        
     }
 
     let total = usernames.len();

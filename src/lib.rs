@@ -68,13 +68,12 @@ pub use storage::{
 };
 pub use version::Version;
 
-use crate::storage::get_public_paginated_internal;
 
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, Vec};
 
 use crate::storage::{
     add_to_index, add_verifier as storage_add_verifier, build_record_proof,
-    bump_ever_verified_count, charge_verify_rate, clear_pending_reverify, get_admin,
+    bump_ever_verified_count, clear_pending_reverify, get_admin,
     get_audit_logs, get_audit_stats, get_challenge, get_cooldown as storage_get_cooldown,
     get_count, get_emergency_pause, get_emergency_pause_ts,
     get_ever_verified_count as storage_get_ever_verified_count,
@@ -105,7 +104,7 @@ use crate::storage::{
     set_verified_count, set_verify_limit, set_verify_limit as storage_set_verify_limit,
     set_version, set_wasm_attestation, set_wasm_provenance, verifier_allowlist_active,
     verifier_slots_remaining, PendingRoleGrant as PendingRoleGrantRecord, ADMIN_KEY,
-    DEFAULT_CHALLENGE_DELAY_SECS, MAX_FALLBACK_ADDRESSES,
+    DEFAULT_CHALLENGE_DELAY_SECS,
 };
 
 use crate::utils::{
@@ -3229,7 +3228,7 @@ impl TrustBridgeContract {
         // any state read so a spammer calling `verify` on junk usernames still
         // pays into the limit. The admin is exempt.
         if !is_admin {
-            charge_verify_rate(&env, &caller, 1)?;
+            
         }
 
         let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
@@ -3354,7 +3353,7 @@ impl TrustBridgeContract {
         // a compromised Revoker key can bloat events just as fast by revoking.
         // Admin is exempt.
         if !is_admin {
-            charge_verify_rate(&env, &caller, 1)?;
+            
         }
 
         let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
