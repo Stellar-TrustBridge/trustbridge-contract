@@ -68,15 +68,13 @@ pub use storage::{
 };
 pub use version::Version;
 
-
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, Vec};
 
 use crate::storage::{
     add_to_index, add_verifier as storage_add_verifier, build_record_proof,
-    bump_ever_verified_count, clear_pending_reverify, get_admin,
-    get_audit_logs, get_audit_stats, get_challenge, get_cooldown as storage_get_cooldown,
-    get_count, get_emergency_pause, get_emergency_pause_ts,
-    get_ever_verified_count as storage_get_ever_verified_count,
+    bump_ever_verified_count, clear_pending_reverify, get_admin, get_audit_logs, get_audit_stats,
+    get_challenge, get_cooldown as storage_get_cooldown, get_count, get_emergency_pause,
+    get_emergency_pause_ts, get_ever_verified_count as storage_get_ever_verified_count,
     get_guardian as storage_get_guardian, get_index,
     get_last_event_ledger as storage_get_last_event_ledger, get_last_upgrade,
     get_network_id as storage_get_network_id, get_pending_role as storage_get_pending_role,
@@ -3227,9 +3225,7 @@ impl TrustBridgeContract {
         // Per-verifier, per-ledger anti-grief cap (Issue #292). Charged before
         // any state read so a spammer calling `verify` on junk usernames still
         // pays into the limit. The admin is exempt.
-        if !is_admin {
-            
-        }
+        if !is_admin {}
 
         let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
 
@@ -3352,9 +3348,7 @@ impl TrustBridgeContract {
         // Revoke shares the per-actor, per-ledger cap with verify (Issue #292):
         // a compromised Revoker key can bloat events just as fast by revoking.
         // Admin is exempt.
-        if !is_admin {
-            
-        }
+        if !is_admin {}
 
         let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
 

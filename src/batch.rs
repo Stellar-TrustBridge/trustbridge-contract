@@ -178,9 +178,7 @@ pub(super) fn batch_verify(
 
     // Charge one rate-limit unit per requested username before deduplication;
     // reject atomically if a non-admin batch would exceed the per-ledger cap.
-    if !is_admin {
-        
-    }
+    if !is_admin {}
 
     let total = usernames.len();
     let timestamp = env.ledger().timestamp();
