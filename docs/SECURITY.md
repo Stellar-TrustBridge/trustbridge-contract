@@ -974,6 +974,32 @@ proof can't be replayed against a different subject), is an off-chain
 contract between the oracle operator and whoever consumes its proofs; it is
 not parsed or enforced by `verify_with_proof` itself.
 
+### Oracle Proof Message Layout & Canonical Encoding Specification
+
+To ensure cross-implementation consistency between off-chain oracle services and contract verifiers, `OracleProof.message` must conform to the following deterministic canonical layout:
+
+```text
++-----------------------+-----------------------------------------------+
+| Field                 | Format / Size                                 |
++-----------------------+-----------------------------------------------+
+| Domain Separator Tag  | UTF-8 string: "trustbridge:oracle:v1" (21 B)  |
+| Network Passphrase    | SHA-256 hash of network passphrase (32 B)    |
+| Contract ID           | 32-byte Contract Address Hash (32 B)          |
+| Subject Stellar Key   | 32-byte Ed25519 Public Key (32 B)             |
+| GitHub Username       | UTF-8 string, max 39 chars (1-byte len prefix)|
+| Nonce / Session ID    | 8-byte big-endian unsigned integer (u64, 8 B) |
+| Expiration Timestamp  | 8-byte big-endian Unix timestamp (u64, 8 B)   |
++-----------------------+-----------------------------------------------+
+```
+
+#### Security Properties & Cross-Replay Mitigations
+
+1. **Domain Separation**: The leading prefix `"trustbridge:oracle:v1"` guarantees that an oracle signature produced for Trustbridge cannot be replayed against other Soroban protocols or off-chain attestation registries.
+2. **Network Isolation**: Binding `SHA256(network_passphrase)` ensures signatures issued for Stellar Testnet cannot be presented on Mainnet.
+3. **Contract Binding**: Embedding the 32-byte contract ID prevents replaying proofs between distinct contract deployments or forks.
+4. **Subject Non-Repudiation**: The subject's Stellar public key and GitHub username are bound together into the signed digest, preventing front-running where an observer takes another user's verified proof and submits it for their own account.
+5. **Freshness & Revocation**: The inclusion of `expires_at` and `nonce` bounds the validity window of any proof, ensuring expired or superseded OAuth sessions cannot be exploited.
+
 **Explicitly out of scope:**
 
 - Wiring a valid `OracleProof` into `verify()`/`batch_verify()` as an
