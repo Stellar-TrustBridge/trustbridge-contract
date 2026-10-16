@@ -252,6 +252,7 @@ pub fn generate_event_id(env: &Env, nonce: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Ledger as _;
     use soroban_sdk::Env;
 
     fn s(env: &Env, value: &str) -> String {

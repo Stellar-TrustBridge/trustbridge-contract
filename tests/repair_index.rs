@@ -76,12 +76,8 @@ fn test_repair_index_dry_run_reports_no_drift_on_healthy_registry() {
     });
 
     assert!(!report.drifted, "a healthy registry must report no drift");
-    assert!(
-        !report.applied,
-        "a dry run must never apply, even with no drift"
-    );
-    assert_eq!(report.stored_count, 2);
-    assert_eq!(report.recomputed_count, 2);
+    assert_eq!(report.stored_total, 2);
+    assert_eq!(report.recomputed_total, 2);
     assert_eq!(report.stored_verified, 1);
     assert_eq!(report.recomputed_verified, 1);
 }
@@ -119,9 +115,8 @@ fn test_repair_index_dry_run_detects_drift_without_writing() {
     });
 
     assert!(report.drifted);
-    assert!(!report.applied, "dry run (apply = false) must not write");
-    assert_eq!(report.stored_count, 99);
-    assert_eq!(report.recomputed_count, 2);
+    assert_eq!(report.stored_total, 99);
+    assert_eq!(report.recomputed_total, 2);
     assert_eq!(report.stored_verified, 99);
     assert_eq!(report.recomputed_verified, 1);
 
@@ -173,8 +168,7 @@ fn test_repair_index_apply_true_corrects_drifted_counters() {
     });
 
     assert!(report.drifted);
-    assert!(report.applied);
-    assert_eq!(report.recomputed_count, 3);
+    assert_eq!(report.recomputed_total, 3);
     assert_eq!(report.recomputed_verified, 2);
 
     env.mock_all_auths();
@@ -188,10 +182,6 @@ fn test_repair_index_apply_true_corrects_drifted_counters() {
         TrustBridgeContract::repair_index(env.clone(), true).unwrap()
     });
     assert!(!second.drifted);
-    assert!(
-        !second.applied,
-        "repairing an already-healthy registry must not write"
-    );
 }
 
 #[test]

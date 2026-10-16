@@ -150,7 +150,7 @@ fn proof_verify_increments_verified_count() {
 fn proof_verify_increments_count_by_n() {
     for &n in &[2u32, 4, 8] {
         let (env, admin, _user, cid) = setup();
-        let names: Vec<(&str, Address)> = (0..n)
+        let names: std::vec::Vec<(&str, Address)> = (0..n)
             .map(|i| {
                 let name = match i {
                     0 => "u0",
