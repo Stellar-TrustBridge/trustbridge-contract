@@ -792,6 +792,9 @@ impl TrustBridgeContract {
     /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
     /// - [`ContractError::Paused`] if the contract is paused.
     /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
+    /// - [`ContractError::RoleGrantNotReady`] if a `set_role_delay` timelock is
+    ///   armed and `target` does not already actively hold `role`: new grants
+    ///   must go through `set_role` + `activate_role` (Issue #220).
     pub fn set_role_with_expiry(
         env: Env,
         target: Address,
@@ -803,6 +806,13 @@ impl TrustBridgeContract {
 
         let admin = get_admin(&env)?;
         admin.require_auth();
+
+        // With the grant timelock armed (Issue #220), this path must not mint
+        // a role instantly. It may still change the expiry of a grant the
+        // target already actively holds (e.g. to off-board a key early).
+        if storage_get_role_delay(&env) > 0 && storage_get_role(&env, &target) != Some(role) {
+            return Err(ContractError::RoleGrantNotReady);
+        }
 
         crate::storage::set_role_with_expiry(&env, &target, &role, expires_at);
         let timestamp = env.ledger().timestamp();
@@ -11630,6 +11640,9 @@ mod test {
                 Some(5_000),
             )
             .unwrap();
+        });
+        // Separate frame: one `require_auth` per address per frame.
+        env.as_contract(&contract_id, || {
             TrustBridgeContract::remove_role(env.clone(), user.clone()).unwrap();
             assert_eq!(
                 TrustBridgeContract::get_role(env.clone(), user.clone()),
@@ -11692,6 +11705,8 @@ mod test {
                 Vec::new(&env),
             )
             .unwrap();
+        });
+        env.as_contract(&contract_id, || {
             TrustBridgeContract::set_role_with_expiry(
                 env.clone(),
                 verifier.clone(),
@@ -11706,6 +11721,8 @@ mod test {
             // Still active: the expired-role holder can verify normally.
             TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "octocat"))
                 .unwrap();
+        });
+        env.as_contract(&contract_id, || {
             TrustBridgeContract::revoke_verification(
                 env.clone(),
                 admin.clone(),
@@ -11723,6 +11740,8 @@ mod test {
                 username(&env, "octocat"),
             );
             assert_eq!(res, Err(ContractError::RoleExpired));
+        });
+        env.as_contract(&contract_id, || {
             let batch_res = TrustBridgeContract::batch_verify(
                 env.clone(),
                 verifier.clone(),

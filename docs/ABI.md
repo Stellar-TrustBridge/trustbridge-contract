@@ -2673,6 +2673,11 @@ affects the contract admin's own identity.
 Emits `RoleGrantedEvent` (unchanged shape — expiry is not carried on the
 event; read it back with `get_role_expiry`).
 
+While a `set_role_delay` timelock is armed it cannot mint a role instantly:
+it returns `RoleGrantNotReady` (35) unless `target` already actively holds
+`role`, in which case only the expiry changes (e.g. to off-board a key
+early). New grants go through `set_role` + `activate_role` (Issue #220).
+
 #### `get_role_expiry(address: Address) -> Option<u64>`
 
 Read-only; no auth. The raw expiry timestamp for `address`'s current role
