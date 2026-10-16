@@ -109,7 +109,7 @@ fn test_export_and_index_show_canonical_username_form() {
         TrustBridgeContract::register(env.clone(), s(&env, "Alice"), alice.clone(), Vec::new(&env))
             .unwrap();
 
-        let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+        let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         assert_eq!(page.records.len(), 1);
         let (stored_username, _) = page.records.get(0).unwrap();
         assert_eq!(stored_username, s(&env, "alice"));
