@@ -80,7 +80,8 @@ use crate::storage::{
     get_ever_verified_count as storage_get_ever_verified_count,
     get_guardian as storage_get_guardian, get_index,
     get_last_event_ledger as storage_get_last_event_ledger, get_last_upgrade,
-    get_network_id as storage_get_network_id, get_pending_role as storage_get_pending_role,
+    get_network_id as storage_get_network_id, get_pending_reverify,
+    get_pending_role as storage_get_pending_role,
     get_pending_rotation as storage_get_pending_rotation, get_record,
     get_registered_paginated_internal, get_role as storage_get_role,
     get_role_delay as storage_get_role_delay,
@@ -3540,6 +3541,8 @@ impl TrustBridgeContract {
 
         let timestamp = env.ledger().timestamp();
         let verification_cleared = record.verified;
+        // Read before `remove_record` below drops the old name's flag.
+        let reverify_pending = get_pending_reverify(&env, &old_username);
 
         // Verification attested the old handle; it does not follow the rename.
         if verification_cleared {
@@ -3561,8 +3564,8 @@ impl TrustBridgeContract {
         remove_record(&env, &old_username);
         remove_from_index(&env, &old_username);
 
-        clear_pending_reverify(&env, &old_username);
-        if verification_cleared {
+        // An outstanding re-verify flag moves with the registration.
+        if verification_cleared || reverify_pending {
             set_pending_reverify(&env, &new_username, true);
         }
 
