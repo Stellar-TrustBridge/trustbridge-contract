@@ -35,12 +35,13 @@ cargo install --locked stellar-cli@26.1.0
 make check
 ```
 
-This runs the same checks as the two jobs in `.github/workflows/ci.yml`:
+CI runs exactly this target, so local and CI quality gates cannot drift.
+The jobs in `.github/workflows/ci.yml` (pull requests and pushes to `main`):
 
-| CI job | Make targets |
+| CI job | What it runs |
 |---|---|
-| `quality` | `cargo test --test homoglyph_corpus` (named blocking step), then `make check` (`make fmt`, `make lint`, `make test`, `make docs-check`, plus error-codes / event-topics / abi-check / wasm-size) |
-| `build` | `make build` (`stellar contract build`), `make wasm-size`, `make wasm-hash-pin WASM_HASH_STRICT=1` |
+| `Basic checks` | `cargo fmt -- --check` |
+| [`make check`](../.github/workflows/ci.yml) | Installs Stellar CLI `26.1.0` (checksum-verified) and the `wasm32v1-none` target, then runs `make check`: `fmt`, `lint`, `error-codes` (`scripts/check_error_codes.sh`), `event-topics` (`scripts/check_event_topics.sh`), `abi-check`, `test`, `build`, `docs-check`, `wasm-size`. Any failing recipe fails the job. No secrets are needed. |
 
 `make ci` runs the same set with the strict hash gate enabled, so it fails while
 `wasm-hash.pin` still contains `PLACEHOLDER` or does not match the built WASM.

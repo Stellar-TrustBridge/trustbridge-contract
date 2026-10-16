@@ -54,6 +54,7 @@ install-target: ## Install wasm compilation targets
 	rustup target add wasm32v1-none wasm32-unknown-unknown
 
 build: install-target ## Build optimized WASM via Stellar CLI (recommended)
+	@command -v $(STELLAR) >/dev/null 2>&1 || { echo "ERROR: Stellar CLI '$(STELLAR)' not found — install stellar-cli 26.1.0 (see docs/CONTRIBUTING.md)." >&2; exit 1; }
 	$(STELLAR) contract build
 
 build-legacy: install-target ## Build with cargo directly (wasm32-unknown-unknown)

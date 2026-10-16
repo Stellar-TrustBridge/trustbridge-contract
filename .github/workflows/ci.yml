@@ -24,3 +24,40 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt -- --check
+
+  make-check:
+    name: make check
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Keep in sync with docs/CONTRIBUTING.md (Install dependencies).
+      STELLAR_CLI_VERSION: 26.1.0
+      STELLAR_CLI_SHA256: e18d5a7629102e1ccc07241acbcbebfc05b1c02476ce7d3204ba2d7418be5c0c
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32v1-none, wasm32-unknown-unknown
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Stellar CLI
+        run: |
+          curl -fsSL -o stellar-cli.tar.gz \
+            "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${STELLAR_CLI_SHA256}  stellar-cli.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf stellar-cli.tar.gz -C "$HOME/.local/bin" stellar
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/stellar" --version
+
+      # The single local/CI quality gate: fmt, lint, error-codes, event-topics,
+      # abi-check, test, build, docs-check, wasm-size. Make stops on the first
+      # failing recipe and returns non-zero, failing this job.
+      - name: make check
+        run: make check
