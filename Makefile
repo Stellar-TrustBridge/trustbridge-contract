@@ -76,7 +76,7 @@ xdr-fixtures: ## Generate XDR fixtures for differential tests
 	cargo test --test generate_xdr_fixtures -- --ignored --nocapture --exact generate_xdr_fixtures
 
 diff-test: ## Run TypeScript differential tests
-	cd ts-differential-tests && npm install && npm test
+	cd ts-differential-tests && npm ci && npm test
 
 fuzz: ## Run the invariant property fuzzing suite (seeds: tests/fuzz/seeds.txt or FUZZ_SEEDS=0x1,0x2,...)
 	@out=$$(FUZZ_SEEDS="$(FUZZ_SEEDS)" cargo test --lib fuzz -- --nocapture 2>&1) || { echo "$$out"; exit 1; }; \
