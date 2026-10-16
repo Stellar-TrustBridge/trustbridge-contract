@@ -67,7 +67,9 @@ batch_verify,verifier,
 revoke_verification,admin,
 revoke_verification,revoker,
 revoke_verification,verifier,NotAuthorized
+set_bot_status,admin,
 set_bot_status,user,
+set_bot_status,random,NotAuthorized
 rename,user,
 set_rotation_delay,admin,
 request_address_rotation,user,

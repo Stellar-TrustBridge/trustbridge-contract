@@ -3359,3 +3359,31 @@ fn test_issue306_remove_compact_reregister_counter_parity() {
         assert_eq!(seen, all.len() as u32);
     });
 }
+
+// Maps to the set_bot_status rows in auth_matrix.csv: the admin or the
+// record's own registrant may set the flag; anyone else gets NotAuthorized.
+#[test]
+fn test_auth_matrix_set_bot_status_admin_user_random() {
+    let (env, admin, user1, _user2, contract_id) = setup_test_env();
+    let random = Address::generate(&env);
+    let name = s(&env, "bot-matrix");
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(env.clone(), name.clone(), user1.clone(), Vec::new(&env))
+            .unwrap();
+
+        assert_eq!(
+            TrustBridgeContract::set_bot_status(env.clone(), admin.clone(), name.clone(), true),
+            Ok(())
+        );
+        assert_eq!(
+            TrustBridgeContract::set_bot_status(env.clone(), user1.clone(), name.clone(), false),
+            Ok(())
+        );
+        assert_eq!(
+            TrustBridgeContract::set_bot_status(env.clone(), random.clone(), name.clone(), true),
+            Err(ContractError::NotAuthorized)
+        );
+    });
+}
