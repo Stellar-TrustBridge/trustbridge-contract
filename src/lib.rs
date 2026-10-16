@@ -168,6 +168,59 @@ fn event_domain(env: &Env) -> EventDomain {
     EventDomain::new(env, version)
 }
 
+/// Shared tail of `verify` and `verify_with_oracle_proof`: flips `record` to
+/// verified and updates counters, events, and the audit log. Authorization is
+/// the caller's responsibility.
+fn mark_verified(
+    env: &Env,
+    github_username: String,
+    mut record: ContributorRecord,
+    actor: Address,
+) -> Result<(), ContractError> {
+    // Issue #218: an expired prior verification does not block a fresh
+    // one — only a still-active verification does.
+    let was_active =
+        record.verified && !crate::storage::is_verification_expired(env, &github_username);
+    if was_active {
+        return Err(ContractError::AlreadyVerified);
+    }
+
+    let was_verified = record.verified;
+    record.verified = true;
+    set_record(env, &github_username, &record);
+    let timestamp = env.ledger().timestamp();
+    crate::storage::set_verified_at(env, &github_username, timestamp);
+
+    // Only a genuine false→true transition is a new verification for
+    // counting purposes — renewing an expired-but-never-revoked
+    // verification does not touch `verified_count` a second time, since
+    // it was never decremented when the previous grant expired (expiry
+    // is lazy; see `is_verification_expired`).
+    if !was_verified {
+        set_verified_count(env, storage_get_verified_count(env).saturating_add(1));
+        bump_ever_verified_count(env);
+    }
+
+    // Clear pending reverify flag upon successful verification
+    clear_pending_reverify(env, &github_username);
+    VerifiedEvent {
+        github_username: github_username.clone(),
+        stellar_address: record.stellar_address.clone(),
+        timestamp,
+        domain: event_domain(env),
+    }
+    .publish(env);
+
+    push_audit_entry(
+        env,
+        AuditLogEntry::new(AuditEventType::UserVerified, timestamp, Some(actor))
+            .with_username(github_username)
+            .with_address(record.stellar_address),
+    );
+
+    Ok(())
+}
+
 #[contract]
 pub struct TrustBridgeContract;
 
@@ -3232,50 +3285,83 @@ impl TrustBridgeContract {
             charge_verify_rate(&env, &caller, 1)?;
         }
 
-        let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
+        let record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
+        mark_verified(&env, github_username, record, caller)
+    }
 
-        // Issue #218: an expired prior verification does not block a fresh
-        // one — only a still-active verification does.
-        let was_active =
-            record.verified && !crate::storage::is_verification_expired(&env, &github_username);
-        if was_active {
-            return Err(ContractError::AlreadyVerified);
-        }
-
-        let was_verified = record.verified;
-        record.verified = true;
-        set_record(&env, &github_username, &record);
-        let timestamp = env.ledger().timestamp();
-        crate::storage::set_verified_at(&env, &github_username, timestamp);
-
-        // Only a genuine false→true transition is a new verification for
-        // counting purposes — renewing an expired-but-never-revoked
-        // verification does not touch `verified_count` a second time, since
-        // it was never decremented when the previous grant expired (expiry
-        // is lazy; see `is_verification_expired`).
-        if !was_verified {
-            set_verified_count(&env, storage_get_verified_count(&env).saturating_add(1));
-            bump_ever_verified_count(&env);
-        }
-
-        // Clear pending reverify flag upon successful verification
-        clear_pending_reverify(&env, &github_username);
-        VerifiedEvent {
-            github_username: github_username.clone(),
-            stellar_address: record.stellar_address.clone(),
-            timestamp,
-            domain: event_domain(&env),
-        }
-        .publish(&env);
-
-        push_audit_entry(
-            &env,
-            AuditLogEntry::new(AuditEventType::UserVerified, timestamp, Some(caller))
-                .with_username(github_username)
-                .with_address(record.stellar_address),
-        );
-
+    /// Replaces the oracle Ed25519 public keys whose proofs
+    /// `verify_with_oracle_proof` accepts. An empty list disables oracle
+    /// verification entirely.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    pub fn set_oracle_allowlist(env: Env, pubkeys: Vec<BytesN<32>>) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        let admin = get_admin(&env)?;
+        crate::oracle_proof::set_oracle_allowlist(&env, &admin, pubkeys);
         Ok(())
+    }
+
+    /// Returns the oracle public-key allowlist (empty if never set).
+    ///
+    /// Read-only; no auth required.
+    #[must_use]
+    pub fn get_oracle_allowlist(env: Env) -> Vec<BytesN<32>> {
+        crate::oracle_proof::get_oracle_allowlist(&env)
+    }
+
+    /// Marks `github_username` verified on the strength of an allowlisted
+    /// oracle's signed proof instead of an admin/Verifier attestation.
+    ///
+    /// `proof.message` must be the canonical ownership message
+    /// `<github_username>:<stellar_address>:<expires_at>` for the record's
+    /// current `stellar_address` (see `docs/SECURITY.md`). Verification state,
+    /// counters, the `VerifiedEvent`, and the audit row are updated exactly as
+    /// `verify` does.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the registered `stellar_address`.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotRegistered`] if `github_username` is not registered.
+    /// - [`ContractError::OracleProofBadLayout`] if the proof is malformed or
+    ///   its message does not bind this username/address/expiry.
+    /// - [`ContractError::OracleProofNotAllowlisted`] if the signing key is not
+    ///   allowlisted (always, when the allowlist is empty).
+    /// - [`ContractError::OracleProofExpired`] if `expires_at` is non-zero and past.
+    /// - [`ContractError::OracleProofBadSignature`] if the signature is not
+    ///   canonically encoded; an invalid but well-formed signature traps.
+    /// - [`ContractError::AlreadyVerified`] if the record is verified and that
+    ///   verification has not expired.
+    pub fn verify_with_oracle_proof(
+        env: Env,
+        github_username: String,
+        proof: OracleProof,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        let record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
+        record.stellar_address.require_auth();
+
+        crate::oracle_proof::verify_ownership_proof(
+            &env,
+            &github_username,
+            &record.stellar_address,
+            &proof,
+        )?;
+
+        let actor = record.stellar_address.clone();
+        mark_verified(&env, github_username, record, actor)
     }
 
     /// Verifies multiple registered contributors in a single invocation.

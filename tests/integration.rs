@@ -3374,3 +3374,140 @@ fn test_issue306_remove_compact_reregister_counter_parity() {
         assert_eq!(seen, all.len() as u32);
     });
 }
+
+// ── Oracle-proof verification (Issue #584) ──────────────────────────────────
+
+mod oracle_proof {
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        Address, Bytes, BytesN, Env, String, Vec,
+    };
+    use trustbridge_contract::{
+        ContractError, OracleProof, TrustBridgeContract, TrustBridgeContractClient,
+    };
+
+    /// Registrant the fixture signatures below are bound to.
+    const SUBJECT: &str = "CAZOJB42QBRQC44KFDMPWIKO5JBARJ3MBALJQU2T7M2WZUDZ2D3FUXZR";
+    /// Ed25519 key with seed `sha256("trustbridge-oracle-test-key-v1")`.
+    const ORACLE_PUBKEY: [u8; 32] = [
+        179, 58, 29, 50, 177, 220, 29, 101, 34, 2, 132, 169, 155, 83, 4, 194, 225, 186, 125, 165,
+        137, 197, 121, 222, 196, 246, 147, 247, 102, 8, 90, 166,
+    ];
+    /// Signature over `octocat:<SUBJECT>:0`.
+    const SIG_NO_EXPIRY: [u8; 64] = [
+        119, 66, 42, 126, 119, 125, 225, 20, 230, 191, 213, 77, 251, 218, 203, 34, 10, 157, 179,
+        220, 98, 214, 153, 200, 200, 174, 50, 27, 149, 203, 145, 63, 66, 235, 102, 208, 199, 126,
+        244, 182, 206, 237, 117, 9, 78, 162, 99, 94, 177, 163, 60, 90, 109, 100, 224, 66, 183, 239,
+        92, 104, 59, 116, 147, 0,
+    ];
+    /// Signature over `octocat:<SUBJECT>:5000`.
+    const SIG_EXPIRES_5000: [u8; 64] = [
+        86, 209, 38, 134, 210, 30, 34, 108, 245, 182, 124, 84, 93, 101, 21, 94, 26, 79, 211, 205,
+        209, 105, 80, 55, 67, 109, 120, 60, 206, 50, 83, 74, 32, 172, 203, 206, 221, 99, 154, 101,
+        71, 182, 91, 185, 233, 114, 140, 148, 216, 29, 184, 211, 42, 9, 185, 251, 58, 186, 150, 63,
+        84, 13, 198, 12,
+    ];
+
+    fn setup(env: &Env) -> TrustBridgeContractClient<'_> {
+        env.mock_all_auths();
+        let client = TrustBridgeContractClient::new(env, &env.register(TrustBridgeContract, ()));
+        client.initialize(&Address::generate(env));
+        client.register(
+            &String::from_str(env, "octocat"),
+            &Address::from_str(env, SUBJECT),
+            &Vec::new(env),
+        );
+        client
+    }
+
+    fn allowlist(env: &Env) -> Vec<BytesN<32>> {
+        let mut keys = Vec::new(env);
+        keys.push_back(BytesN::from_array(env, &ORACLE_PUBKEY));
+        keys
+    }
+
+    fn proof(env: &Env, expires_at: u64, sig: &[u8; 64]) -> OracleProof {
+        let message = std::format!("octocat:{SUBJECT}:{expires_at}");
+        OracleProof {
+            oracle_pubkey: BytesN::from_array(env, &ORACLE_PUBKEY),
+            message: Bytes::from_slice(env, message.as_bytes()),
+            signature: BytesN::from_array(env, sig),
+            expires_at,
+        }
+    }
+
+    #[test]
+    fn test_verify_with_oracle_proof_marks_record_verified() {
+        let env = Env::default();
+        let client = setup(&env);
+        let octocat = String::from_str(&env, "octocat");
+
+        client.set_oracle_allowlist(&allowlist(&env));
+        assert_eq!(client.get_oracle_allowlist(), allowlist(&env));
+
+        client.verify_with_oracle_proof(&octocat, &proof(&env, 0, &SIG_NO_EXPIRY));
+
+        assert!(client.get_address(&octocat).unwrap().verified);
+        assert_eq!(client.get_stats().verified, 1);
+
+        // Already-verified behaves exactly like `verify`.
+        assert_eq!(
+            client.try_verify_with_oracle_proof(&octocat, &proof(&env, 0, &SIG_NO_EXPIRY)),
+            Err(Ok(ContractError::AlreadyVerified))
+        );
+    }
+
+    #[test]
+    fn test_verify_with_oracle_proof_empty_allowlist_rejects() {
+        let env = Env::default();
+        let client = setup(&env);
+        let octocat = String::from_str(&env, "octocat");
+
+        assert_eq!(client.get_oracle_allowlist().len(), 0);
+        assert_eq!(
+            client.try_verify_with_oracle_proof(&octocat, &proof(&env, 0, &SIG_NO_EXPIRY)),
+            Err(Ok(ContractError::OracleProofNotAllowlisted))
+        );
+        assert!(!client.get_address(&octocat).unwrap().verified);
+    }
+
+    #[test]
+    fn test_verify_with_oracle_proof_honours_expiry() {
+        let env = Env::default();
+        let client = setup(&env);
+        let octocat = String::from_str(&env, "octocat");
+        client.set_oracle_allowlist(&allowlist(&env));
+
+        env.ledger().set_timestamp(6_000);
+        assert_eq!(
+            client.try_verify_with_oracle_proof(&octocat, &proof(&env, 5_000, &SIG_EXPIRES_5000)),
+            Err(Ok(ContractError::OracleProofExpired))
+        );
+
+        env.ledger().set_timestamp(4_000);
+        client.verify_with_oracle_proof(&octocat, &proof(&env, 5_000, &SIG_EXPIRES_5000));
+        assert!(client.get_address(&octocat).unwrap().verified);
+    }
+
+    #[test]
+    fn test_verify_with_oracle_proof_rejects_unbound_message_and_pause() {
+        let env = Env::default();
+        let client = setup(&env);
+        let octocat = String::from_str(&env, "octocat");
+        client.set_oracle_allowlist(&allowlist(&env));
+
+        // Signed for `octocat`, replayed against another registration.
+        let other = String::from_str(&env, "hubot");
+        client.register(&other, &Address::generate(&env), &Vec::new(&env));
+        assert_eq!(
+            client.try_verify_with_oracle_proof(&other, &proof(&env, 0, &SIG_NO_EXPIRY)),
+            Err(Ok(ContractError::OracleProofBadLayout))
+        );
+
+        client.pause(&1);
+        assert_eq!(
+            client.try_verify_with_oracle_proof(&octocat, &proof(&env, 0, &SIG_NO_EXPIRY)),
+            Err(Ok(ContractError::Paused))
+        );
+    }
+}
