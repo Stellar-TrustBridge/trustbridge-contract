@@ -3359,3 +3359,432 @@ fn test_issue306_remove_compact_reregister_counter_parity() {
         assert_eq!(seen, all.len() as u32);
     });
 }
+
+// ── Issue #412: UnauthorizedAttempt audit logging ────────────────────────────
+
+#[test]
+fn test_unauthorized_attempt_logged_on_failed_admin_call() {
+    // A random address calling an admin-only function (pause) should append
+    // an UnauthorizedAttempt entry when log_unauthorized is true (default).
+    let (env, _admin, user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let logs_before = TrustBridgeContract::get_audit_logs(env.clone());
+        let stats_before = TrustBridgeContract::get_audit_stats(env.clone());
+
+        // emergency_pause with a non-admin/non-guardian caller → NotAuthorized
+        let result = TrustBridgeContract::emergency_pause(env.clone(), user1.clone());
+        assert_eq!(result, Err(trustbridge_contract::ContractError::NotAuthorized));
+
+        let logs_after = TrustBridgeContract::get_audit_logs(env.clone());
+        let stats_after = TrustBridgeContract::get_audit_stats(env.clone());
+
+        assert_eq!(
+            logs_after.len(),
+            logs_before.len() + 1,
+            "UnauthorizedAttempt should append one log entry"
+        );
+        assert_eq!(
+            stats_after.unauthorized_attempts,
+            stats_before.unauthorized_attempts + 1,
+            "unauthorized_attempts counter must increment"
+        );
+
+        let entry = logs_after.get(logs_after.len() - 1).unwrap();
+        assert_eq!(
+            entry.event_type,
+            trustbridge_contract::AuditEventType::UnauthorizedAttempt
+        );
+        assert_eq!(entry.actor, Some(user1));
+    });
+}
+
+#[test]
+fn test_successful_call_does_not_log_unauthorized() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let stats_before = TrustBridgeContract::get_audit_stats(env.clone());
+
+        // Admin calling pause → succeeds, no UnauthorizedAttempt
+        TrustBridgeContract::pause(env.clone(), 1).unwrap();
+
+        let stats_after = TrustBridgeContract::get_audit_stats(env.clone());
+        assert_eq!(
+            stats_after.unauthorized_attempts,
+            stats_before.unauthorized_attempts,
+            "successful call must not increment unauthorized_attempts"
+        );
+    });
+    let _ = admin; // suppress unused warning
+}
+
+#[test]
+fn test_unauthorized_attempt_suppressed_when_log_unauthorized_false() {
+    let (env, admin, user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        // Disable unauthorized logging via set_audit_config
+        TrustBridgeContract::set_audit_config(
+            env.clone(),
+            admin.clone(),
+            true,  // enabled
+            1000,  // max_events
+            false, // log_unauthorized = false
+        )
+        .unwrap();
+
+        let stats_before = TrustBridgeContract::get_audit_stats(env.clone());
+        let logs_before = TrustBridgeContract::get_audit_logs(env.clone());
+
+        // Trigger an auth failure
+        let result = TrustBridgeContract::emergency_pause(env.clone(), user1.clone());
+        assert_eq!(result, Err(trustbridge_contract::ContractError::NotAuthorized));
+
+        let stats_after = TrustBridgeContract::get_audit_stats(env.clone());
+        let logs_after = TrustBridgeContract::get_audit_logs(env.clone());
+
+        assert_eq!(
+            stats_after.unauthorized_attempts,
+            stats_before.unauthorized_attempts,
+            "no counter increment when log_unauthorized is false"
+        );
+        assert_eq!(
+            logs_after.len(),
+            logs_before.len(),
+            "no log entry appended when log_unauthorized is false"
+        );
+    });
+}
+
+#[test]
+fn test_unauthorized_attempt_verify_non_verifier() {
+    let (env, _admin, user1, user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        // Register a username so verify has something to act on
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "octocat"),
+            user2.clone(),
+            soroban_sdk::Vec::new(&env),
+        )
+        .unwrap();
+
+        let stats_before = TrustBridgeContract::get_audit_stats(env.clone());
+
+        // user1 has no Verifier role → NotAuthorized
+        let result =
+            TrustBridgeContract::verify(env.clone(), user1.clone(), s(&env, "octocat"));
+        assert_eq!(result, Err(trustbridge_contract::ContractError::NotAuthorized));
+
+        let stats_after = TrustBridgeContract::get_audit_stats(env.clone());
+        assert_eq!(
+            stats_after.unauthorized_attempts,
+            stats_before.unauthorized_attempts + 1
+        );
+    });
+}
+
+// ── Issue #412: set_audit_config / get_audit_config ──────────────────────────
+
+#[test]
+fn test_set_and_get_audit_config_round_trip() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        // Default config
+        let default_cfg = TrustBridgeContract::get_audit_config(env.clone());
+        assert!(default_cfg.enabled);
+        assert_eq!(default_cfg.max_events, 1000);
+        assert!(default_cfg.log_unauthorized);
+
+        // Mutate
+        TrustBridgeContract::set_audit_config(
+            env.clone(),
+            admin.clone(),
+            false, // enabled = false
+            500,   // max_events
+            false, // log_unauthorized = false
+        )
+        .unwrap();
+
+        let cfg = TrustBridgeContract::get_audit_config(env.clone());
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.max_events, 500);
+        assert!(!cfg.log_unauthorized);
+    });
+}
+
+#[test]
+fn test_set_audit_config_non_admin_rejected() {
+    let (env, _admin, user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let result = TrustBridgeContract::set_audit_config(
+            env.clone(),
+            user1.clone(),
+            true,
+            1000,
+            true,
+        );
+        assert_eq!(result, Err(trustbridge_contract::ContractError::NotAuthorized));
+
+        // Config must be unchanged (still default)
+        let cfg = TrustBridgeContract::get_audit_config(env.clone());
+        assert!(cfg.enabled);
+        assert_eq!(cfg.max_events, 1000);
+        assert!(cfg.log_unauthorized);
+    });
+}
+
+#[test]
+fn test_set_audit_config_emits_audit_log_entry() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let logs_before = TrustBridgeContract::get_audit_logs(env.clone());
+
+        TrustBridgeContract::set_audit_config(
+            env.clone(),
+            admin.clone(),
+            true,
+            1000,
+            true,
+        )
+        .unwrap();
+
+        let logs_after = TrustBridgeContract::get_audit_logs(env.clone());
+        assert_eq!(logs_after.len(), logs_before.len() + 1);
+
+        let entry = logs_after.get(logs_after.len() - 1).unwrap();
+        assert_eq!(
+            entry.event_type,
+            trustbridge_contract::AuditEventType::AuditConfigChanged
+        );
+        assert_eq!(entry.actor, Some(admin));
+    });
+}
+
+#[test]
+fn test_set_audit_config_unauthorized_attempt_self_logged() {
+    // When a non-admin calls set_audit_config, an UnauthorizedAttempt entry
+    // should be appended (using the *current* config, before any change).
+    let (env, _admin, user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let stats_before = TrustBridgeContract::get_audit_stats(env.clone());
+
+        let _ = TrustBridgeContract::set_audit_config(
+            env.clone(),
+            user1.clone(),
+            false,
+            0,
+            false,
+        );
+
+        let stats_after = TrustBridgeContract::get_audit_stats(env.clone());
+        assert_eq!(
+            stats_after.unauthorized_attempts,
+            stats_before.unauthorized_attempts + 1
+        );
+    });
+}
+
+// ── Issue #300: staged WASM hash lock integration tests ──────────────────────
+
+fn make_wasm_hash(env: &soroban_sdk::Env, byte: u8) -> soroban_sdk::BytesN<32> {
+    soroban_sdk::BytesN::from_array(env, &[byte; 32])
+}
+
+#[test]
+fn test_stage_then_clear_removes_staged_hash() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let hash = make_wasm_hash(&env, 0xAB);
+
+        // Nothing staged initially
+        assert!(TrustBridgeContract::get_staged(env.clone()).is_none());
+
+        // Stage a hash
+        TrustBridgeContract::stage_wasm(env.clone(), admin.clone(), hash.clone()).unwrap();
+        let staged = TrustBridgeContract::get_staged(env.clone());
+        assert!(staged.is_some());
+        assert_eq!(staged.unwrap().wasm_hash, hash);
+
+        // Clear removes it
+        TrustBridgeContract::clear_staged(env.clone(), admin.clone()).unwrap();
+        assert!(TrustBridgeContract::get_staged(env.clone()).is_none());
+    });
+}
+
+#[test]
+fn test_clear_staged_is_idempotent() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        // No staged hash — clear should be a no-op, not an error
+        let result = TrustBridgeContract::clear_staged(env.clone(), admin.clone());
+        assert!(result.is_ok());
+
+        // Stage then clear twice
+        let hash = make_wasm_hash(&env, 0x01);
+        TrustBridgeContract::stage_wasm(env.clone(), admin.clone(), hash).unwrap();
+        TrustBridgeContract::clear_staged(env.clone(), admin.clone()).unwrap();
+        let result2 = TrustBridgeContract::clear_staged(env.clone(), admin.clone());
+        assert!(result2.is_ok());
+        assert!(TrustBridgeContract::get_staged(env.clone()).is_none());
+    });
+}
+
+#[test]
+fn test_restage_overwrites_previous_hash() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let hash_a = make_wasm_hash(&env, 0x0A);
+        let hash_b = make_wasm_hash(&env, 0x0B);
+
+        TrustBridgeContract::stage_wasm(env.clone(), admin.clone(), hash_a).unwrap();
+        TrustBridgeContract::stage_wasm(env.clone(), admin.clone(), hash_b.clone()).unwrap();
+
+        let staged = TrustBridgeContract::get_staged(env.clone()).unwrap();
+        assert_eq!(staged.wasm_hash, hash_b, "second stage must overwrite first");
+    });
+}
+
+#[test]
+fn test_stage_wasm_non_upgrader_random_rejected() {
+    let (env, _admin, user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let hash = make_wasm_hash(&env, 0xFF);
+
+        let result = TrustBridgeContract::stage_wasm(env.clone(), user1.clone(), hash);
+        assert_eq!(result, Err(trustbridge_contract::ContractError::NotAuthorized));
+
+        // Staging must not have occurred
+        assert!(TrustBridgeContract::get_staged(env.clone()).is_none());
+    });
+}
+
+#[test]
+fn test_stage_wasm_random_caller_increments_unauthorized_attempts() {
+    let (env, _admin, user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let stats_before = TrustBridgeContract::get_audit_stats(env.clone());
+        let hash = make_wasm_hash(&env, 0xCC);
+
+        let _ = TrustBridgeContract::stage_wasm(env.clone(), user1.clone(), hash);
+
+        let stats_after = TrustBridgeContract::get_audit_stats(env.clone());
+        assert_eq!(
+            stats_after.unauthorized_attempts,
+            stats_before.unauthorized_attempts + 1
+        );
+    });
+}
+
+#[test]
+fn test_clear_staged_non_admin_rejected() {
+    let (env, admin, user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        // Stage a hash first
+        let hash = make_wasm_hash(&env, 0x55);
+        TrustBridgeContract::stage_wasm(env.clone(), admin.clone(), hash).unwrap();
+
+        // Non-admin tries to clear → NotAuthorized
+        let result = TrustBridgeContract::clear_staged(env.clone(), user1.clone());
+        assert_eq!(result, Err(trustbridge_contract::ContractError::NotAuthorized));
+
+        // Hash must still be staged
+        assert!(TrustBridgeContract::get_staged(env.clone()).is_some());
+    });
+}
+
+#[test]
+fn test_upgrader_role_can_stage_wasm() {
+    let (env, admin, user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        // Grant Upgrader role to user1
+        TrustBridgeContract::set_role(env.clone(), user1.clone(), Role::Upgrader).unwrap();
+
+        let hash = make_wasm_hash(&env, 0x77);
+        let result = TrustBridgeContract::stage_wasm(env.clone(), user1.clone(), hash.clone());
+        assert!(result.is_ok(), "Upgrader should be allowed to stage WASM");
+
+        let staged = TrustBridgeContract::get_staged(env.clone()).unwrap();
+        assert_eq!(staged.wasm_hash, hash);
+        assert_eq!(staged.staged_by, user1);
+    });
+    let _ = admin;
+}
+
+#[test]
+fn test_clear_staged_admin_only_upgrader_rejected() {
+    // auth_matrix.csv: cancel_staged_wasm (clear_staged) → upgrader = NotAuthorized
+    let (env, admin, user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        // Grant Upgrader and stage a hash
+        TrustBridgeContract::set_role(env.clone(), user1.clone(), Role::Upgrader).unwrap();
+        let hash = make_wasm_hash(&env, 0x88);
+        TrustBridgeContract::stage_wasm(env.clone(), admin.clone(), hash).unwrap();
+
+        // Upgrader cannot clear
+        let result = TrustBridgeContract::clear_staged(env.clone(), user1.clone());
+        assert_eq!(result, Err(trustbridge_contract::ContractError::NotAuthorized));
+
+        // Hash still present
+        assert!(TrustBridgeContract::get_staged(env.clone()).is_some());
+    });
+}
+
+#[test]
+fn test_get_staged_returns_none_on_fresh_contract() {
+    let (env, _admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.as_contract(&contract_id, || {
+        assert!(
+            TrustBridgeContract::get_staged(env.clone()).is_none(),
+            "no staged hash on fresh contract"
+        );
+    });
+}
+
+#[test]
+fn test_staged_wasm_metadata_fields_populated() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        soroban_sdk::testutils::Ledger::set_timestamp(&env.ledger(), 99_000);
+        let hash = make_wasm_hash(&env, 0x42);
+        TrustBridgeContract::stage_wasm(env.clone(), admin.clone(), hash.clone()).unwrap();
+
+        let staged = TrustBridgeContract::get_staged(env.clone()).unwrap();
+        assert_eq!(staged.wasm_hash, hash);
+        assert_eq!(staged.staged_by, admin);
+        assert_eq!(staged.staged_at, 99_000);
+    });
+}

@@ -54,6 +54,8 @@ pub use events::{
     VerifiedEvent,
     // Staged WASM (Issue #300)
     WasmStagedEvent,
+    // Audit config (Issue #412)
+    AuditConfigChangedEvent,
 };
 pub use multisig_upgrade::{UpgradeProposal, MAX_UPGRADE_SIGNERS};
 pub use oracle_proof::{
@@ -101,7 +103,9 @@ use crate::storage::{
     set_role_delay as storage_set_role_delay, set_rotation_delay as storage_set_rotation_delay,
     set_verified_count, set_verify_limit, set_verify_limit as storage_set_verify_limit,
     set_version, set_wasm_attestation, set_wasm_provenance, verifier_allowlist_active,
-    verifier_slots_remaining, PendingRoleGrant as PendingRoleGrantRecord, ADMIN_KEY,
+    verifier_slots_remaining, get_audit_config as storage_get_audit_config,
+    set_audit_config as storage_set_audit_config,
+    PendingRoleGrant as PendingRoleGrantRecord, ADMIN_KEY,
     DEFAULT_CHALLENGE_DELAY_SECS,
 };
 
@@ -417,6 +421,11 @@ impl TrustBridgeContract {
         let caller_is_guardian = is_guardian(&env, &caller);
 
         if !caller_is_admin && !caller_is_guardian {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "emergency_pause"),
+            );
             return Err(ContractError::NotAuthorized);
         }
 
@@ -1446,6 +1455,11 @@ impl TrustBridgeContract {
         let role = storage_get_role(&env, &caller);
         let is_upgrader = matches!(role, Some(crate::storage::Role::Upgrader));
         if caller != admin && !is_upgrader {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "stage_wasm"),
+            );
             return Err(ContractError::NotAuthorized);
         }
 
@@ -1494,6 +1508,11 @@ impl TrustBridgeContract {
 
         let admin = get_admin(&env)?;
         if caller != admin {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "clear_staged"),
+            );
             return Err(ContractError::NotAuthorized);
         }
 
@@ -1535,6 +1554,11 @@ impl TrustBridgeContract {
 
         let admin = get_admin(&env)?;
         if caller != admin {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "set_upgrade_threshold"),
+            );
             return Err(ContractError::NotAuthorized);
         }
 
@@ -1583,6 +1607,11 @@ impl TrustBridgeContract {
         let role = storage_get_role(&env, &caller);
         let is_upgrader = matches!(role, Some(crate::storage::Role::Upgrader));
         if caller != admin && !is_upgrader {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "propose_multisig_upgrade"),
+            );
             return Err(ContractError::NotAuthorized);
         }
 
@@ -1635,6 +1664,11 @@ impl TrustBridgeContract {
         let role = storage_get_role(&env, &caller);
         let is_upgrader = matches!(role, Some(crate::storage::Role::Upgrader));
         if caller != admin && !is_upgrader {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "approve_upgrade"),
+            );
             return Err(ContractError::NotAuthorized);
         }
 
@@ -1686,6 +1720,11 @@ impl TrustBridgeContract {
         let role = storage_get_role(&env, &caller);
         let is_upgrader = matches!(role, Some(crate::storage::Role::Upgrader));
         if caller != admin && !is_upgrader {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "execute_upgrade"),
+            );
             return Err(ContractError::NotAuthorized);
         }
 
@@ -1775,6 +1814,11 @@ impl TrustBridgeContract {
 
         let admin = get_admin(&env)?;
         if caller != admin {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "cancel_upgrade_proposal"),
+            );
             return Err(ContractError::NotAuthorized);
         }
 
@@ -1848,6 +1892,11 @@ impl TrustBridgeContract {
 
         let admin = get_admin(&env)?;
         if caller != admin {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "config_verification"),
+            );
             return Err(ContractError::NotAuthorized);
         }
 
@@ -1941,6 +1990,116 @@ impl TrustBridgeContract {
     #[must_use]
     pub fn get_audit_stats(env: Env) -> AuditStats {
         get_audit_stats(&env)
+    }
+
+    // ── Audit configuration (Issue #412) ─────────────────────────────────────
+
+    /// Returns the current on-chain audit configuration.
+    ///
+    /// Falls back to [`AuditConfig::default`] when no config has been
+    /// explicitly stored yet, so callers always get a well-formed value.
+    ///
+    /// Read-only; no auth required.
+    #[must_use]
+    pub fn get_audit_config(env: Env) -> AuditConfig {
+        storage_get_audit_config(&env)
+    }
+
+    /// Stores a new audit configuration. Admin-only.
+    ///
+    /// Operators use this to tune the on-chain audit trail without redeploying:
+    ///
+    /// - `enabled` — globally enables or disables audit logging. When `false`,
+    ///   `push_audit_entry` calls are no-ops (the audit log does not grow).
+    /// - `max_events` — ring-buffer size (capped to `MAX_AUDIT_LOG_ENTRIES`).
+    ///   Lowering it does not truncate existing entries until the next write.
+    /// - `log_unauthorized` — whether failed auth attempts are recorded as
+    ///   `AuditEventType::UnauthorizedAttempt`. Set to `false` to suppress
+    ///   spam from probing bots; the event counter in `AuditStats` still
+    ///   increments.
+    ///
+    /// Persists the config and emits [`AuditConfigChangedEvent`].
+    /// Also appends an `AuditConfigChanged` log entry so the change itself
+    /// is auditable.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if `caller` is not the contract admin.
+    pub fn set_audit_config(
+        env: Env,
+        caller: Address,
+        enabled: bool,
+        max_events: u32,
+        log_unauthorized: bool,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        caller.require_auth();
+
+        let admin = get_admin(&env)?;
+        if caller != admin {
+            // Record the unauthorized attempt before returning, gated on the
+            // *current* config so that a disable-then-probe pattern cannot
+            // suppress its own trace.
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "set_audit_config"),
+            );
+            return Err(ContractError::NotAuthorized);
+        }
+
+        let new_config = AuditConfig::custom(enabled, max_events, log_unauthorized);
+        storage_set_audit_config(&env, &new_config);
+
+        let timestamp = env.ledger().timestamp();
+        crate::events::AuditConfigChangedEvent {
+            admin: admin.clone(),
+            enabled,
+            max_events,
+            log_unauthorized,
+            timestamp,
+        }
+        .publish(&env);
+
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(AuditEventType::AuditConfigChanged, timestamp, Some(admin)),
+        );
+
+        Ok(())
+    }
+
+    /// Internal helper — records an `UnauthorizedAttempt` audit entry when the
+    /// current [`AuditConfig`] has `log_unauthorized = true`.
+    ///
+    /// Call this immediately before returning
+    /// `Err(ContractError::NotAuthorized)` at any role-gated entry point.
+    /// The write is gated on the stored config so operators can suppress the
+    /// entries (e.g. during a spam campaign) via `set_audit_config`.
+    ///
+    /// The helper is deliberately non-recursive: it calls `push_audit_entry`
+    /// directly without re-entering any auth-gated path, and `push_audit_entry`
+    /// itself has no auth checks.
+    fn record_unauthorized_attempt(env: &Env, actor: &Address, operation: String) {
+        let config = storage_get_audit_config(env);
+        if !config.log_unauthorized {
+            return;
+        }
+        let timestamp = env.ledger().timestamp();
+        push_audit_entry(
+            env,
+            AuditLogEntry::new(
+                AuditEventType::UnauthorizedAttempt,
+                timestamp,
+                Some(actor.clone()),
+            )
+            .with_details(operation),
+        );
     }
 
     /// Advances the on-chain schema version and runs any applicable data-migration steps. Admin-only.
@@ -2416,6 +2575,11 @@ impl TrustBridgeContract {
         // Admin must be the caller for batch_remove (stricter than single remove).
         let admin = get_admin(&env)?;
         if caller != admin {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "batch_remove"),
+            );
             return Err(ContractError::NotAuthorized);
         }
 
@@ -2476,6 +2640,11 @@ impl TrustBridgeContract {
 
         let admin = get_admin(&env)?;
         if caller != admin {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "propose_batch_remove"),
+            );
             return Err(ContractError::NotAuthorized);
         }
 
@@ -2558,6 +2727,11 @@ impl TrustBridgeContract {
         let is_admin_equivalent =
             caller == admin || storage_get_role(&env, &caller) == Some(Role::Admin);
         if !is_admin_equivalent || caller == proposal.proposed_by {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "execute_batch_remove"),
+            );
             return Err(ContractError::NotAuthorized);
         }
         crate::storage::clear_pending_batch_remove(&env);
@@ -2600,6 +2774,11 @@ impl TrustBridgeContract {
 
         let admin = get_admin(&env)?;
         if caller != admin {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "cancel_batch_remove"),
+            );
             return Err(ContractError::NotAuthorized);
         }
 
@@ -2855,7 +3034,14 @@ impl TrustBridgeContract {
         let admin = get_admin(&env)?;
 
         caller.require_auth();
-        Self::require_remove_auth(&caller, &admin, &record.stellar_address)?;
+        if let Err(e) = Self::require_remove_auth(&caller, &admin, &record.stellar_address) {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "remove"),
+            );
+            return Err(e);
+        }
 
         let timestamp = env.ledger().timestamp();
         let stellar_address = record.stellar_address.clone();
@@ -3220,6 +3406,11 @@ impl TrustBridgeContract {
             storage_get_role(&env, &caller) == Some(Role::Verifier)
         };
         if !is_admin && !is_verifier {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "verify"),
+            );
             return Err(ContractError::NotAuthorized);
         }
         // Per-verifier, per-ledger anti-grief cap (Issue #292). Charged before
@@ -3343,6 +3534,11 @@ impl TrustBridgeContract {
         }
         let is_revoker = storage_get_role(&env, &caller) == Some(Role::Revoker);
         if !is_admin && !is_revoker {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "revoke_verification"),
+            );
             return Err(ContractError::NotAuthorized);
         }
         // Revoke shares the per-actor, per-ledger cap with verify (Issue #292):
@@ -3413,6 +3609,11 @@ impl TrustBridgeContract {
         let admin = get_admin(&env)?;
 
         if caller != admin && caller != record.stellar_address {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "set_bot_status"),
+            );
             return Err(ContractError::NotAuthorized);
         }
 
@@ -3494,7 +3695,14 @@ impl TrustBridgeContract {
         let admin = get_admin(&env)?;
 
         caller.require_auth();
-        Self::require_remove_auth(&caller, &admin, &record.stellar_address)?;
+        if let Err(e) = Self::require_remove_auth(&caller, &admin, &record.stellar_address) {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "rename"),
+            );
+            return Err(e);
+        }
 
         if !is_valid_github_username(&new_username) {
             return Err(ContractError::InvalidUsername);
@@ -3821,6 +4029,11 @@ impl TrustBridgeContract {
         caller.require_auth();
         let admin = get_admin(&env)?;
         if caller != record.stellar_address && caller != admin {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "cancel_address_rotation"),
+            );
             return Err(ContractError::NotAuthorized);
         }
 
@@ -3974,6 +4187,11 @@ impl TrustBridgeContract {
 
         let admin = get_admin(&env)?;
         if caller != admin {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "start_challenge"),
+            );
             return Err(ContractError::NotAuthorized);
         }
 
@@ -4039,6 +4257,11 @@ impl TrustBridgeContract {
 
         let admin = get_admin(&env)?;
         if caller != admin {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "cancel_challenge"),
+            );
             return Err(ContractError::NotAuthorized);
         }
 
@@ -4090,6 +4313,11 @@ impl TrustBridgeContract {
 
         let admin = get_admin(&env)?;
         if caller != admin {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "complete_challenge"),
+            );
             return Err(ContractError::NotAuthorized);
         }
 

@@ -113,6 +113,12 @@ pub const ATTEST_KEY: Symbol = symbol_short!("attest");
 pub const AUDIT_LOG_KEY: Symbol = symbol_short!("adt_log");
 /// Key for audit stats.
 pub const AUDIT_STATS_KEY: Symbol = symbol_short!("adt_stat");
+/// Key for the persisted AuditConfig (Issue #412).
+///
+/// Absent means no operator has written a config yet; callers fall back to
+/// [`crate::audit::AuditConfig::default()`]. Present means an admin explicitly
+/// applied settings via `set_audit_config`.
+pub const AUDIT_CONFIG_KEY: Symbol = symbol_short!("adt_cfg");
 /// Key prefix for per-username challenge records (Issue #214).
 pub const CHALLENGE_KEY: Symbol = symbol_short!("chllng");
 /// Default challenge delay in seconds: 48 hours gives the registrant time to
@@ -1060,6 +1066,22 @@ pub fn get_audit_stats(env: &Env) -> crate::audit::AuditStats {
 
 pub fn set_audit_stats(env: &Env, stats: &crate::audit::AuditStats) {
     env.storage().instance().set(&AUDIT_STATS_KEY, stats);
+}
+
+// ── AuditConfig persistence (Issue #412) ─────────────────────────────────────
+
+/// Returns the persisted [`AuditConfig`][crate::audit::AuditConfig], falling
+/// back to the default when no config has been written yet.
+pub fn get_audit_config(env: &Env) -> crate::audit::AuditConfig {
+    env.storage()
+        .instance()
+        .get(&AUDIT_CONFIG_KEY)
+        .unwrap_or_default()
+}
+
+/// Persists `config` to instance storage under [`AUDIT_CONFIG_KEY`].
+pub fn set_audit_config(env: &Env, config: &crate::audit::AuditConfig) {
+    env.storage().instance().set(&AUDIT_CONFIG_KEY, config);
 }
 
 // ── Migration step registry (Issue #207) ─────────────────────────────────────

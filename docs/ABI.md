@@ -37,23 +37,63 @@ consumers can reason about audit trails without reading the contract source.
 
 - **Fields (in encoding order):**
   1. `enabled` (`bool`) — whether audit event recording is active. **Default:** `true`
-  2. `retention_epochs` (`u32`) — number of epochs audit records are retained before pruning. **Default:** `30`
-  3. `max_events_per_epoch` (`u32`) — upper bound on audit events recorded per epoch. **Default:** `1024`
-  4. `require_actor` (`bool`) — whether each audit event must carry a non-empty actor. **Default:** `true`
+  2. `max_events` (`u32`) — ring-buffer size: maximum number of audit events retained
+     in instance storage before the oldest is evicted. **Default:** `1000`
+  3. `log_unauthorized` (`bool`) — whether failed authorization attempts are recorded
+     as `AuditEventType::UnauthorizedAttempt` (code 6). Set to `false` to suppress
+     spam from probing bots; `AuditStats.unauthorized_attempts` still increments.
+     **Default:** `true`
+
+> **ABI note:** Earlier drafts of this document listed `retention_epochs`,
+> `max_events_per_epoch`, and `require_actor`. Those fields **do not exist** in
+> the implementation. The canonical field list above matches `src/audit.rs`
+> exactly. Codes are append-only — do not renumber existing fields.
 
 ### Defaults
 
-When no `AuditConfig` has been explicitly stored, the contract MUST behave as if
-the defaults above are in effect. Defaults are chosen to keep audit trails on by
+When no `AuditConfig` has been explicitly stored (i.e. `set_audit_config` has
+never been called), the contract behaves as if the defaults above are in effect
+via `AuditConfig::default()`. Defaults are chosen to keep audit trails on by
 default and to bound storage growth; disabling auditing or lowering retention is
 an explicit, authorized action.
 
+### Entry points
+
+| Function | Auth | Notes |
+|---|---|---|
+| `get_audit_config() -> AuditConfig` | None | Returns stored config or default |
+| `set_audit_config(caller, enabled, max_events, log_unauthorized)` | Admin only | Persists config, emits `AuditConfigChangedEvent`, appends `AuditConfigChanged` log entry |
+
 ### Mutation authorization
 
-`AuditConfig` may only be mutated by authorized roles. Unauthorized callers MUST
-be rejected and the stored configuration MUST remain unchanged. The authorization
-check is enforced in the contract (see `src/audit.rs` / `src/lib.rs`) and is
-covered by tests that assert unauthorized mutation attempts are rejected.
+`AuditConfig` may only be mutated by the contract admin. Unauthorized callers are
+rejected with `NotAuthorized` (code 3) and the stored configuration remains
+unchanged. The authorization check is enforced in `src/lib.rs` and covered by
+tests asserting unauthorized mutation attempts are rejected and themselves logged
+as `UnauthorizedAttempt` entries (using the pre-change config so an
+attacker cannot suppress their own trace via a failed disable-then-probe).
+
+### AuditEventType codes (append-only)
+
+| Code | Name | Description |
+|------|------|-------------|
+| 1 | `ContractInitialized` | `initialize` called |
+| 2 | `UserRegistered` | `register` / `register_sponsored` succeeded |
+| 3 | `UserRemoved` | `remove` / `batch_remove` removed a record |
+| 4 | `UserVerified` | `verify` / `batch_verify` verified a record |
+| 5 | `AdminAction` | Generic admin operation |
+| 6 | `UnauthorizedAttempt` | Auth check failed; gated on `log_unauthorized` |
+| 7 | `DataExported` | Paginated export operation |
+| 8 | `VerificationRevoked` | `revoke_verification` revoked a record |
+| 9 | `UserRenamed` | `rename` moved a registration |
+| 10 | `ContractPaused` | `pause` / `emergency_pause` / `set_paused` |
+| 11 | `ContractUnpaused` | `unpause` / `clear_emergency_pause` |
+| 12 | `RoleChanged` | `set_role` / `activate_role` granted a role |
+| 13 | `ContractUpgraded` | `upgrade` replaced the WASM |
+| 14 | `AuditConfigChanged` | `set_audit_config` mutated the config |
+
+> Codes are **append-only**. Indexers store the numeric discriminant; renumbering
+> silently re-labels historical entries. New variants must be added at the end.
 
 `tests/testdata/bindings/get_address_simulate.v1.json` is a versioned golden of
 the `ScVal` XDR that `simulateTransaction` returns for `get_address` (hit and
