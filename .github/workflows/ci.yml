@@ -48,3 +48,22 @@ jobs:
       - name: cargo test
         run: cargo test
 
+  homoglyph_corpus:
+    name: homoglyph_corpus
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Blocking: same command as `make test-homoglyph`.
+      - name: cargo test --test homoglyph_corpus
+        run: cargo test --test homoglyph_corpus

@@ -44,6 +44,7 @@ build / wasm-size). Every pull request and push to `main` runs these jobs from
 |---|---|---|
 | `Basic checks` | `cargo fmt -- --check` | `make fmt` |
 | `smoke` | `cargo check --all-targets`, then `cargo test` (stable toolchain, cached `target/`, 20 min timeout, no secrets or deploy steps) | `cargo check --all-targets && make test` |
+| `homoglyph_corpus` | `cargo test --test homoglyph_corpus` | `make test-homoglyph` |
 
 `make ci` runs the same set with the strict hash gate enabled, so it fails while
 `wasm-hash.pin` still contains `PLACEHOLDER` or does not match the built WASM.
@@ -394,11 +395,12 @@ cargo test --test homoglyph_corpus
 # equivalent: make test-homoglyph
 ```
 
-CI runs this target as a named blocking step on every pull request: the
-`quality` job in `.github/workflows/ci.yml` executes
-`cargo test --test homoglyph_corpus` (no path filters, no `continue-on-error`).
-A failing corpus test fails the quality check. The same job then runs
-`make check`, whose `cargo test` also includes this suite.
+CI runs this target as a dedicated blocking job on every pull request and
+push to `main`: the `homoglyph_corpus` job in `.github/workflows/ci.yml`
+executes `cargo test --test homoglyph_corpus` (no path filters, no
+`continue-on-error`), so a failing corpus test fails the `homoglyph_corpus`
+check. Maintainers should mark `homoglyph_corpus` as a required status check
+in branch protection. The `smoke` job's `cargo test` also includes this suite.
 
 ### WASM Integration Tests
 
