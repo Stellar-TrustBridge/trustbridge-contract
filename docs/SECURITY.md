@@ -733,7 +733,9 @@ Dashboard operators and auditors need the full failure surface of the dual-contr
 invalid state transition across all six entrypoints. Each cell maps to a test in
 `tests/batch_remove_dual_control.rs`.
 
-Cross-reference: [`tests/auth_matrix.csv`](../tests/auth_matrix.csv) ·
+Cross-reference: [`tests/auth_matrix.csv`](../tests/auth_matrix.csv) (every row is
+executed by [`tests/auth_matrix.rs`](../tests/auth_matrix.rs); see
+[CONTRIBUTING — Authorization matrix](CONTRIBUTING.md#authorization-matrix)) ·
 [ABI reference](ABI.md) · [ADMIN_RUNBOOK.md — Dual-Control batch_remove](ADMIN_RUNBOOK.md)
 
 Auth rules in brief:

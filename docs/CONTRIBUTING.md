@@ -503,14 +503,23 @@ CI does not compare snapshots against a baseline — snapshots are gitignored an
 
 The checked-in [auth matrix](../tests/auth_matrix.csv) is the source of truth
 for actor coverage across public mutating entrypoints. Each row contains an
-entrypoint, an actor class (`admin`, `verifier`, `revoker`, `upgrader`, `user`,
-`random`, or `none`), and an optional expected `ContractError` variant.
+entrypoint, an actor class (`admin`, `second_admin`, `guardian`, `verifier`,
+`revoker`, `upgrader`, `user`, `random`, or `none`), and an optional expected
+`ContractError` variant.
 
-When adding a mutating public function, add it to the matrix and to the
-coverage list in `tests/integration.rs`. Add rows for every meaningful actor
-boundary, especially Admin, Verifier, Revoker, Upgrader, registrant, and an
-unrelated address. Leave `expected_error` empty for a successful cell. The
-driver fails when an entrypoint is missing from the table.
+[`tests/auth_matrix.rs`](../tests/auth_matrix.rs) executes every row
+(`cargo test --test auth_matrix`): it builds a fresh fixture, sets up the
+operation's preconditions, and invokes the entrypoint with only that actor
+signing. An empty `expected_error` must return `Ok`; `NotAuthorized` also
+matches a host auth failure for entrypoints that `require_auth` a fixed
+identity such as the stored admin. Failures cite the CSV line, operation, and
+actor.
+
+When adding a mutating public function, add rows for every meaningful actor
+boundary (especially Admin, Verifier, Revoker, Upgrader, registrant, and an
+unrelated address) and a dispatcher arm in `plan()` in `tests/auth_matrix.rs`.
+The driver fails when an entrypoint that calls `require_auth` has no row, or a
+row has no dispatcher arm.
 
 This repo uses the Soroban SDK test host. Tests live in `src/lib.rs` inside `#[cfg(test)] mod test` for unit tests and in `tests/integration.rs` for integration tests.
 
