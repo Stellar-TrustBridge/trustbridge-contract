@@ -257,7 +257,8 @@ wasm-hash-update: build ## Recompute and update wasm-hash.pin with the current b
 	echo "Updated wasm-hash.pin to $$HASH"
 
 ci: ## Alias for CI-equivalent checks (fmt + lint + test + build + docs + wasm-size + strict hash pin)
-	$(MAKE) check WASM_HASH_STRICT=1
+	$(MAKE) wasm-hash-pin WASM_HASH_STRICT=1
+	$(MAKE) check
 
 clean: ## Remove build artifacts
 	cargo clean

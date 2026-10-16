@@ -41,7 +41,7 @@ The jobs in `.github/workflows/ci.yml` (pull requests and pushes to `main`):
 | CI job | What it runs |
 |---|---|
 | `Basic checks` | `cargo fmt -- --check` |
-| [`make check`](../.github/workflows/ci.yml) | Installs Stellar CLI `26.1.0` (checksum-verified) and the `wasm32v1-none` target, then runs `make check`: `fmt`, `lint`, `error-codes` (`scripts/check_error_codes.sh`), `event-topics` (`scripts/check_event_topics.sh`), `abi-check`, `test`, `build`, `docs-check`, `wasm-size`. Any failing recipe fails the job. No secrets are needed. |
+| [`make check`](../.github/workflows/ci.yml) | Installs the pinned Rust toolchain, Stellar CLI `26.1.0` (checksum-verified), and the `wasm32v1-none` target; runs `make wasm-hash-pin WASM_HASH_STRICT=1` (release WASM must match `wasm-hash.pin`), then `make check`: `fmt`, `lint`, `error-codes` (`scripts/check_error_codes.sh`), `event-topics` (`scripts/check_event_topics.sh`), `abi-check`, `test`, `build`, `docs-check`, `wasm-size`. Any failing recipe fails the job. No secrets are needed. |
 
 `make ci` runs the same set with the strict hash gate enabled, so it fails while
 `wasm-hash.pin` still contains `PLACEHOLDER` or does not match the built WASM.

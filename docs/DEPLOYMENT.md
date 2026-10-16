@@ -144,7 +144,7 @@ Before every mainnet deploy, complete both confirmation steps:
    ```bash
    make wasm-hash-pin
    # or manually:
-   sha256sum target/wasm32v1-none/release/trustbridge-contract.wasm
+   sha256sum target/wasm32v1-none/release/trustbridge_contract.wasm
    ```
    CI enforces this check automatically via the _Compute and verify WASM hash pin_ step.
    If the hash has intentionally changed (new release), run `make wasm-hash-update`, commit
@@ -589,12 +589,28 @@ artifact hash does not match the pinned value, preventing silent deploy of a wro
 
 ### How it works
 
-1. CI builds the WASM via `stellar contract build`.
-2. The _Compute and verify WASM hash pin_ CI step runs `sha256sum` on the artifact.
+1. The CI `make check` job builds the WASM via `stellar contract build`.
+2. Its _Compute and verify WASM hash pin_ step runs `make wasm-hash-pin WASM_HASH_STRICT=1`,
+   which runs `sha256sum` on `target/wasm32v1-none/release/trustbridge_contract.wasm`.
 3. The computed hash is compared to the value in `wasm-hash.pin`.
 4. A mismatch fails CI with clear instructions to update the pin.
 5. CI runs the gate with `WASM_HASH_STRICT=1`, so an unpinned `PLACEHOLDER` value also
    fails. The computed hash is written to the job summary so it can be copied into the pin.
+
+### Reproducible inputs
+
+The hash is only stable across machines when every input that ends up in the
+WASM is pinned. `stellar contract build` embeds the rustc version (`rsver`),
+the soroban-sdk version (`rssdkver`), and the CLI version (`cliver`) as
+contract metadata, so the pin depends on:
+
+- the Rust toolchain in `rust-toolchain.toml` (pinned, not `stable`),
+- Stellar CLI `26.1.0` (the CI `make check` job installs this exact release),
+- the committed `Cargo.lock` (dependency versions).
+
+Changing any of these is a WASM change: re-pin in the same commit. The build
+output does not depend on the checkout path, so a Linux workstation with the
+same three inputs reproduces the CI hash.
 
 ### Operator flow for (re)pinning
 
@@ -616,6 +632,17 @@ make wasm-hash-update
 git add wasm-hash.pin
 git commit -m "chore: bump wasm-hash.pin after <feature>"
 ```
+
+### Operator verification before deploy
+
+On the release commit, with the pinned toolchain and Stellar CLI 26.1.0:
+
+```bash
+make wasm-hash-pin WASM_HASH_STRICT=1   # must print "OK: WASM hash matches pin."
+```
+
+After uploading, `stellar contract fetch --id <CONTRACT_ID> --network <NETWORK> --out-file deployed.wasm`
+followed by `sha256sum deployed.wasm` must print the same value as `wasm-hash.pin`.
 
 ### Explorer verification
 

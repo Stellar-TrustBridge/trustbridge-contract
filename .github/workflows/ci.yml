@@ -37,8 +37,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Same version as rust-toolchain.toml: the WASM hash depends on it.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: rustfmt, clippy
           targets: wasm32v1-none, wasm32-unknown-unknown
@@ -55,6 +56,19 @@ jobs:
           tar -xzf stellar-cli.tar.gz -C "$HOME/.local/bin" stellar
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           "$HOME/.local/bin/stellar" --version
+
+      # Release gate: fails on a stale pin or PLACEHOLDER (WASM_HASH_STRICT=1).
+      # Runs before `make check` so it is enforced on its own.
+      - name: Compute and verify WASM hash pin
+        run: make wasm-hash-pin WASM_HASH_STRICT=1
+
+      - name: Report WASM hash
+        if: always()
+        run: |
+          wasm=target/wasm32v1-none/release/trustbridge_contract.wasm
+          if [ -f "$wasm" ]; then
+            echo "Release WASM SHA-256: \`$(sha256sum "$wasm" | awk '{print $1}')\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # The single local/CI quality gate: fmt, lint, error-codes, event-topics,
       # abi-check, test, build, docs-check, wasm-size. Make stops on the first
