@@ -407,8 +407,11 @@ goldens. It needs Node.js 20 (the version CI pins) and uses the committed
 make diff-test   # cd ts-differential-tests && npm ci && npm test
 ```
 
-CI runs the same target in the `diff-test` job. When a fixture changes, update
-the Rust golden and the TypeScript side in the same PR.
+CI runs the same target in the `diff-test` job and uploads the test log as the
+`diff-test-output` artifact on failure. When a fixture changes, update the Rust
+golden and the TypeScript side in the same PR — on pull requests
+`scripts/check_fixture_pairing.sh` fails the job if only one side changed. Run
+it locally with `scripts/check_fixture_pairing.sh origin/main`.
 
 ### WASM Integration Tests
 

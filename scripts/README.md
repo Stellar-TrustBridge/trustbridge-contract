@@ -11,6 +11,7 @@ out of the repo, and default to **testnet** (never mainnet).
 | `event_indexer.sh` | **Reference event indexer** — tails contract events into local JSONL with an on-disk resume cursor (Issue #288) and classifies topic symbols (Issue #399). See below. |
 | `check_event_topics.sh` | Fails if the indexer's topic table drifts from `src/events.rs`, and asserts replay idempotency (Issue #399). |
 | `check_error_codes.sh` | Fails if `ContractError` discriminants disagree across the enum, `from_code`, the golden file, and `docs/ABI.md` (Issue #402). |
+| `check_fixture_pairing.sh` | Fails if Rust differential fixtures change without a `ts-differential-tests/` update, or the reverse (Issue #577). |
 | `export_registry.sh` | Page the admin export into a single registry JSON snapshot. |
 | `validate_registry.sh` | Diff an export JSON against live on-chain state. |
 | `ttl_keeper.sh` | Walk the index and bump persistent-entry TTLs. |

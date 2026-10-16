@@ -31,6 +31,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check Rust/TS fixture pairing
+        if: github.event_name == 'pull_request'
+        run: scripts/check_fixture_pairing.sh "origin/${{ github.base_ref }}"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -40,4 +46,12 @@ jobs:
           cache-dependency-path: ts-differential-tests/package-lock.json
 
       - name: Run differential tests
-        run: make diff-test
+        run: set -o pipefail; make diff-test 2>&1 | tee diff-test-output.txt
+
+      - name: Upload differential test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diff-test-output
+          path: diff-test-output.txt
+          retention-days: 14
