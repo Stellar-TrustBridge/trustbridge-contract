@@ -44,6 +44,7 @@ This runs the same checks as the two jobs in `.github/workflows/ci.yml`:
 | `abi-consistency` | `./scripts/check_error_codes.sh` (`make error-codes`) and `./scripts/check_event_topics.sh` (`make event-topics`) — fails on any `ContractError` / event-topic drift |
 | `oracle-proof-tests` | `cargo test --lib oracle_proof` |
 | `cargo-deny` | `cargo deny --config deny.toml check` (see [Supply-chain checks](#supply-chain-checks)) |
+| `mutants` | `cargo mutants --config mutants.toml --file src/utils.rs` — nightly and `workflow_dispatch` only (see [Mutation Testing](#mutation-testing--utilsrs-issue-243)) |
 
 `make ci` runs the same set with the strict hash gate enabled, so it fails while
 `wasm-hash.pin` still contains `PLACEHOLDER` or does not match the built WASM.
@@ -233,17 +234,30 @@ Configuration lives in `mutants.toml` at the repository root. The scope is
 intentionally limited to `src/utils.rs`; the rest of the crate is excluded to
 keep job time bounded.
 
+The `mutants` job in `.github/workflows/ci.yml` runs nightly (03:00 UTC) and
+on demand via **Actions → CI → Run workflow**; it does not run on pull
+requests because a full run is long: about 60 mutants, each needing an
+incremental build plus a test run (~18 minutes on an 8-core workstation;
+expect 30–60 minutes on a GitHub-hosted runner, hence the 90-minute job
+timeout). It fails when any mutant survives and uploads
+`mutants.out/missed.txt` (the survived list) and `outcomes.json` as the
+`mutants-survived` artifact. Each mutant is
+tested against the `utils::` unit tests and `tests/homoglyph_corpus.rs` only
+(`additional_cargo_test_args` in `mutants.toml`), which keeps runs short and
+independent of unrelated test failures elsewhere in the crate.
+
 ### Running locally
 
 ```bash
-# Install (one-time)
-cargo install cargo-mutants
+# Install (one-time; same version as CI)
+cargo install --locked cargo-mutants@27.1.0
 
-# Run mutations on utils.rs only
-cargo mutants --file src/utils.rs
+# Run mutations on utils.rs only (same command as CI; --config is required
+# because cargo-mutants otherwise only reads .cargo/mutants.toml)
+cargo mutants --config mutants.toml --file src/utils.rs
 
-# View survived mutants
-cat mutants-out/survived.txt
+# View survived mutants (cargo-mutants calls them "missed")
+cat mutants.out/missed.txt
 ```
 
 ### Interpreting results

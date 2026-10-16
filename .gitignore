@@ -45,3 +45,6 @@ issues*.md
 issues.d/
 .agents/
 .codex/
+
+# cargo-mutants output
+/mutants.out*/
