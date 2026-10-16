@@ -948,22 +948,28 @@ hash for upgrades, not an identity claim.)
 - `get_oracle_allowlist(env)` — public read of the current allowlist.
 - `OracleProof { oracle_pubkey, message, signature, expires_at }` — a signed
   attestation from an off-chain oracle.
-- `verify_with_proof(env, proof)` — checks, in order: the signing key is on
-  the allowlist (`NotAuthorized` if not, including an empty allowlist),
-  the proof has not expired (`expires_at == 0` disables the check —
-  production callers should always set a real value), and finally that
+- `verify_with_proof(env, proof)` — checks, in order: the proof is
+  structurally well-formed (`OracleProofBadLayout`, 58: empty `message` or
+  all-zero `signature`), the signing key is on the allowlist
+  (`OracleProofNotAllowlisted`, 59, including an empty allowlist), the proof
+  has not expired (`OracleProofExpired`, 60; `expires_at == 0` disables the
+  check — production callers should always set a real value), the signature
+  is a canonical encoding (`OracleProofBadSignature`, 61), and finally that
   `signature` is a valid Ed25519 signature over `message` under
   `oracle_pubkey`.
 
-**Invalid proof fails.** An unallowlisted key or an expired proof returns
-`Err(ContractError::NotAuthorized)`. An allowlisted key with a signature that
-does not verify traps the host invocation instead of returning `Err` —
-`soroban_sdk`'s `Env::crypto().ed25519_verify` has no non-panicking form, so
-this fails the exact same way an invalid `require_auth()` signature already
-does everywhere else in this contract. Tests in `src/oracle_proof.rs` cover
-both failure shapes with a fixed test keypair (`valid_allowlisted_proof_passes`,
+**Invalid proof fails.** Each rejection above returns its own `Err` code. An
+allowlisted key with a canonically encoded signature that does not verify
+traps the host invocation (`Error(Crypto, InvalidInput)`) instead of
+returning `Err` — `soroban_sdk`'s `Env::crypto().ed25519_verify` has no
+non-panicking form, so this fails the exact same way an invalid
+`require_auth()` signature already does everywhere else in this contract.
+Tests in `src/oracle_proof.rs` cover every path with a fixed test keypair
+(`valid_allowlisted_proof_passes`, `bad_layout_is_rejected_with_layout_code`,
 `non_allowlisted_key_is_rejected`, `expired_proof_is_rejected`,
-`tampered_signature_traps`).
+`bad_signature_is_rejected_with_signature_code`,
+`wellformed_invalid_signature_traps`); run them with
+`cargo test oracle_proof`.
 
 **This is a signature-check interface, not GitHub verification.** The
 contract has no way to talk to the GitHub API and this change does not give
