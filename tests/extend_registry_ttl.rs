@@ -177,14 +177,14 @@ fn test_extend_registry_ttl_at_max_batch_size() {
     // Register 100 users
     for i in 0..100 {
         let user = Address::generate(&env);
-        let username = alloc::format!("user{:03}", i);
+        let username = std::format!("user{:03}", i);
         register_user(&env, &contract_id, &username, &user);
     }
 
     env.as_contract(&contract_id, || {
         let mut usernames = Vec::new(&env);
         for i in 0..100 {
-            let username = alloc::format!("user{:03}", i);
+            let username = std::format!("user{:03}", i);
             usernames.push_back(s(&env, &username));
         }
 
@@ -205,7 +205,7 @@ fn test_extend_registry_ttl_over_max_batch_size_rejected() {
         let mut usernames = Vec::new(&env);
         for i in 0..=100 {
             // 101 items
-            let username = alloc::format!("user{:03}", i);
+            let username = std::format!("user{:03}", i);
             usernames.push_back(s(&env, &username));
         }
 
@@ -495,14 +495,14 @@ fn test_extend_registry_ttl_large_batch_50_usernames() {
     // Register 50 users
     for i in 0..50 {
         let user = Address::generate(&env);
-        let username = alloc::format!("user{:02}", i);
+        let username = std::format!("user{:02}", i);
         register_user(&env, &contract_id, &username, &user);
     }
 
     env.as_contract(&contract_id, || {
         let mut usernames = Vec::new(&env);
         for i in 0..50 {
-            let username = alloc::format!("user{:02}", i);
+            let username = std::format!("user{:02}", i);
             usernames.push_back(s(&env, &username));
         }
 
@@ -517,10 +517,10 @@ fn test_extend_registry_ttl_varying_username_lengths() {
     let (env, _admin, contract_id) = setup();
 
     let usernames_to_register = vec![
-        "a",                               // 1 char
-        "alice",                           // 5 chars
-        "very-long-username-with-hyphens", // 32 chars
-        "a".repeat(39).as_str(),           // 39 chars (max)
+        "a",                                       // 1 char
+        "alice",                                   // 5 chars
+        "very-long-username-with-hyphens",         // 32 chars
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // 39 chars (max)
     ];
 
     for username in &usernames_to_register {

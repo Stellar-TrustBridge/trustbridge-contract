@@ -215,7 +215,7 @@ fn test_valid_address_register_succeeds_with_mock_all_auths() {
 
         // Confirm the record was actually written
         let record = TrustBridgeContract::get_address(env.clone(), s(&env, "octocat"));
-        assert_eq!(record, Some(valid_user));
+        assert_eq!(record.map(|r| r.stellar_address), Some(valid_user));
     });
 }
 
