@@ -24,3 +24,17 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt -- --check
+
+  abi-consistency:
+    name: Error codes and event topics
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Same scripts as `make error-codes` / `make event-topics`.
+      - name: Check error codes
+        run: ./scripts/check_error_codes.sh
+
+      - name: Check event topics
+        run: ./scripts/check_event_topics.sh

@@ -246,9 +246,114 @@
       "description": "`assert_build` given a hash that does not match stored provenance (Issue #225)"
     },
     {
+      "code": 39,
+      "name": "StagedWasmMismatch",
+      "description": "`upgrade` / `execute_upgrade` was given a WASM hash that does not match the staged-WASM slot (Issue #300)"
+    },
+    {
+      "code": 40,
+      "name": "UpgradeProposalAlreadyPending",
+      "description": "`propose_multisig_upgrade` was called while a proposal is already live (Issue #301)"
+    },
+    {
+      "code": 41,
+      "name": "NoUpgradeProposalPending",
+      "description": "`approve_upgrade` / `execute_upgrade` / `cancel_upgrade_proposal` was called with no live proposal (or a proposal id that does not match) (Issue #301)"
+    },
+    {
+      "code": 42,
+      "name": "UpgradeProposalAlreadyApproved",
+      "description": "`approve_upgrade` was called by an address that already approved this proposal (Issue #301)"
+    },
+    {
+      "code": 43,
+      "name": "UpgradeProposalDelayActive",
+      "description": "`execute_upgrade` was called before the proposal's delay elapsed (Issue #301)"
+    },
+    {
+      "code": 44,
+      "name": "UpgradeProposalInsufficientApprovals",
+      "description": "`execute_upgrade` was called before the approval threshold was met (Issue #301)"
+    },
+    {
+      "code": 46,
+      "name": "FallbackListFull",
+      "description": "`register` was given more fallback addresses than `MAX_FALLBACK_ADDRESSES`"
+    },
+    {
+      "code": 47,
+      "name": "UsernameTaken",
+      "description": "`rename` was called with a `new_username` that is already registered"
+    },
+    {
+      "code": 48,
+      "name": "RotationRequired",
+      "description": "`register` was asked to change the registered address while the rotation delay is armed (Issue #234) \u2014 use the request/execute rotation flow"
+    },
+    {
+      "code": 49,
+      "name": "RotationPending",
+      "description": "A rotation is already pending for this username (Issue #234)"
+    },
+    {
+      "code": 50,
+      "name": "NoRotationPending",
+      "description": "`execute_address_rotation` / `cancel_address_rotation` was called with no pending rotation (Issue #234)"
+    },
+    {
+      "code": 51,
+      "name": "RotationNotReady",
+      "description": "`execute_address_rotation` was called before the delay has elapsed (Issue #234)"
+    },
+    {
+      "code": 52,
+      "name": "InvalidCursor",
+      "description": "A pagination cursor no longer decodes against the current registry state (Issue #215)"
+    },
+    {
+      "code": 53,
+      "name": "VerifyRateLimited",
+      "description": "A non-admin caller would exceed its per-ledger verify/revoke cap (Issue #292)"
+    },
+    {
+      "code": 54,
+      "name": "DualControlRequired",
+      "description": "`batch_remove` was called with a batch larger than the configured dual-control threshold (Issue #219) \u2014 use `propose_batch_remove` / `execute_batch_remove` instead"
+    },
+    {
+      "code": 55,
+      "name": "BatchRemoveProposalPending",
+      "description": "`propose_batch_remove` was called while a proposal is already pending (Issue #219)"
+    },
+    {
+      "code": 56,
+      "name": "NoPendingBatchRemove",
+      "description": "`execute_batch_remove` / `cancel_batch_remove` was called with no live (or already-expired) proposal (Issue #219)"
+    },
+    {
       "code": 57,
       "name": "RoleExpired",
       "description": "A role-gated privileged invocation was made at or after the role's expiry timestamp"
+    },
+    {
+      "code": 58,
+      "name": "OracleProofBadLayout",
+      "description": "`verify_with_proof`: empty `message` or all-zero `signature` (structurally malformed proof)"
+    },
+    {
+      "code": 59,
+      "name": "OracleProofNotAllowlisted",
+      "description": "`verify_with_proof`: `oracle_pubkey` is not on the oracle allowlist (always, when it is empty)"
+    },
+    {
+      "code": 60,
+      "name": "OracleProofExpired",
+      "description": "`verify_with_proof`: non-zero `expires_at` is earlier than the ledger timestamp"
+    },
+    {
+      "code": 61,
+      "name": "OracleProofBadSignature",
+      "description": "`verify_with_proof`: signature is not a canonical Ed25519 encoding"
     }
   ],
   "events": [
