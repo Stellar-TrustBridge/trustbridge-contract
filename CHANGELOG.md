@@ -17,6 +17,7 @@ compatible corrections.
 
 ### Changed
 
+- Documented the `set_bot_status` auth policy consistently as admin-or-registrant across `tests/auth_matrix.csv`, `docs/ABI.md` and `docs/ADMIN_RUNBOOK.md` (the runbook previously said admin only). No contract behaviour change.
 - Fixed `calculate_verification_percentage` and `BatchSummary::new` rounding at boundary and fractional values (0%, 100%, 1/3, 2/3) to use standard round-half-up semantics.
 - Fixed `NetworkMismatch` error code by moving its discriminant from 21 to 30 to avoid overlap with `InvalidPauseReason` (see [ContractError](docs/ABI.md#contracterror-u32-discriminant)).
 - Added new error codes `VerifierAllowlistFull` (31), `VerifierNotAllowlisted` (32), `VerifierExpiryInPast` (33), `NoPendingRoleGrant` (34), `RoleGrantNotReady` (35), `ProvenanceMissing` (36), and `ProvenanceMismatch` (37).

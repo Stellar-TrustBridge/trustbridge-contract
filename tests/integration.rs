@@ -3387,3 +3387,59 @@ fn test_auth_matrix_set_bot_status_admin_user_random() {
         );
     });
 }
+
+// set_bot_status: a registrant may only flag their own record.
+#[test]
+fn test_set_bot_status_rejects_other_registrant() {
+    let (env, _admin, user1, user2, contract_id) = setup_test_env();
+    let name = s(&env, "bot-owner-only");
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(env.clone(), name.clone(), user1.clone(), Vec::new(&env))
+            .unwrap();
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "bot-other"),
+            user2.clone(),
+            Vec::new(&env),
+        )
+        .unwrap();
+
+        assert_eq!(
+            TrustBridgeContract::set_bot_status(env.clone(), user2.clone(), name.clone(), true),
+            Err(ContractError::NotAuthorized)
+        );
+    });
+}
+
+#[test]
+fn test_set_bot_status_unknown_username_is_not_registered() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::set_bot_status(env.clone(), admin.clone(), s(&env, "ghost"), true),
+            Err(ContractError::NotRegistered)
+        );
+    });
+}
+
+#[test]
+fn test_set_bot_status_rejected_while_paused() {
+    let (env, admin, user1, _user2, contract_id) = setup_test_env();
+    let name = s(&env, "bot-paused");
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(env.clone(), name.clone(), user1.clone(), Vec::new(&env))
+            .unwrap();
+        TrustBridgeContract::pause(env.clone(), 1).unwrap();
+
+        assert_eq!(
+            TrustBridgeContract::set_bot_status(env.clone(), admin.clone(), name.clone(), true),
+            Err(ContractError::Paused)
+        );
+    });
+}
