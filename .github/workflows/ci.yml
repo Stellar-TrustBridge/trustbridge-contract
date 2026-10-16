@@ -54,3 +54,31 @@ jobs:
 
       - name: Run oracle_proof module tests
         run: cargo test --lib oracle_proof
+
+  cargo-deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Caches the installed cargo-deny binary between runs.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny@0.20.2
+
+      # Advisory DB cache; cargo-deny refreshes it on every run.
+      - name: Cache advisory database
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/advisory-dbs
+          key: advisory-db-${{ github.run_id }}
+          restore-keys: advisory-db-
+
+      - name: cargo deny check
+        run: cargo deny --config deny.toml check

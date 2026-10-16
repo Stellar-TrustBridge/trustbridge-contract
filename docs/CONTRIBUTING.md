@@ -43,6 +43,7 @@ This runs the same checks as the two jobs in `.github/workflows/ci.yml`:
 | `build` | `make build` (`stellar contract build`), `make wasm-size`, `make wasm-hash-pin WASM_HASH_STRICT=1` |
 | `abi-consistency` | `./scripts/check_error_codes.sh` (`make error-codes`) and `./scripts/check_event_topics.sh` (`make event-topics`) — fails on any `ContractError` / event-topic drift |
 | `oracle-proof-tests` | `cargo test --lib oracle_proof` |
+| `cargo-deny` | `cargo deny --config deny.toml check` (see [Supply-chain checks](#supply-chain-checks)) |
 
 `make ci` runs the same set with the strict hash gate enabled, so it fails while
 `wasm-hash.pin` still contains `PLACEHOLDER` or does not match the built WASM.
@@ -320,7 +321,11 @@ rejected in code review.
 
 ---
 
-CI runs `cargo audit` and `cargo deny check` on every PR. These catch:
+## Supply-chain checks
+
+The `cargo-deny` CI job runs `cargo deny --config deny.toml check` on every
+pull request (including fork PRs) and push to `main`; any `deny`-level finding
+fails the job. These catch:
 
 - **Known vulnerabilities** in dependencies (via RustSec advisory database)
 - **Yanked crates** that should not be in the dependency tree
@@ -330,9 +335,8 @@ CI runs `cargo audit` and `cargo deny check` on every PR. These catch:
 ### Running locally
 
 ```bash
-cargo install --locked cargo-audit cargo-deny
-cargo audit
-cargo deny check
+cargo install --locked cargo-deny@0.20.2
+cargo deny --config deny.toml check
 ```
 
 ### Adding an exception
