@@ -284,13 +284,12 @@ fn load_fuzz_seeds() -> alloc::vec::Vec<u64> {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let value = if let Some(hex) =
-                line.strip_prefix("0x").or_else(|| line.strip_prefix("0X"))
-            {
-                u64::from_str_radix(hex, 16).ok()
-            } else {
-                line.parse::<u64>().ok()
-            };
+            let value =
+                if let Some(hex) = line.strip_prefix("0x").or_else(|| line.strip_prefix("0X")) {
+                    u64::from_str_radix(hex, 16).ok()
+                } else {
+                    line.parse::<u64>().ok()
+                };
             if let Some(v) = value {
                 seeds.push(v);
             }
@@ -389,10 +388,7 @@ fn test_soak_export_cursor_decode_never_panics() {
         let max_limit = 100u32; // mirrors storage::MAX_PAGE_LIMIT
 
         let seeds = load_fuzz_seeds();
-        assert!(
-            seeds.len() >= 4,
-            "seed corpus tests/fuzz/seeds.txt must hold at least 4 seeds"
-        );
+        assert!(seeds.len() >= 4, "seed corpus tests/fuzz/seeds.txt must hold at least 4 seeds");
         let iters = soak_iterations();
 
         for (si, seed) in seeds.iter().enumerate() {
