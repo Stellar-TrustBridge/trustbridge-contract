@@ -1539,6 +1539,14 @@ impl TrustBridgeContract {
         }
 
         crate::multisig_upgrade::set_upgrade_threshold(&env, threshold);
+
+        let timestamp = env.ledger().timestamp();
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(AuditEventType::AdminAction, timestamp, Some(caller))
+                .with_details(soroban_sdk::String::from_str(&env, "set_upgrade_threshold")),
+        );
+
         Ok(())
     }
 
@@ -1596,11 +1604,17 @@ impl TrustBridgeContract {
         crate::events::UpgradeProposedEvent {
             proposal_id: proposal.id,
             wasm_hash,
-            proposed_by: caller,
+            proposed_by: caller.clone(),
             executable_at: proposal.executable_at,
             timestamp: proposal.proposed_at,
         }
         .publish(&env);
+
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(AuditEventType::AdminAction, proposal.proposed_at, Some(caller))
+                .with_details(soroban_sdk::String::from_str(&env, "propose_multisig_upgrade")),
+        );
 
         Ok(())
     }
@@ -1642,11 +1656,21 @@ impl TrustBridgeContract {
 
         crate::events::UpgradeApprovedEvent {
             proposal_id,
-            approved_by: caller,
+            approved_by: caller.clone(),
             approval_count: proposal.approvers.len(),
             timestamp: env.ledger().timestamp(),
         }
         .publish(&env);
+
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(
+                AuditEventType::AdminAction,
+                env.ledger().timestamp(),
+                Some(caller),
+            )
+            .with_details(soroban_sdk::String::from_str(&env, "approve_upgrade")),
+        );
 
         Ok(())
     }
@@ -1748,6 +1772,11 @@ impl TrustBridgeContract {
         }
         .publish(&env);
 
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(AuditEventType::ContractUpgraded, now, Some(caller)),
+        );
+
         Ok(())
     }
 
@@ -1789,10 +1818,20 @@ impl TrustBridgeContract {
         crate::events::UpgradeProposalCancelledEvent {
             proposal_id,
             wasm_hash: proposal.wasm_hash,
-            cancelled_by: caller,
+            cancelled_by: caller.clone(),
             timestamp: env.ledger().timestamp(),
         }
         .publish(&env);
+
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(
+                AuditEventType::AdminAction,
+                env.ledger().timestamp(),
+                Some(caller),
+            )
+            .with_details(soroban_sdk::String::from_str(&env, "cancel_upgrade_proposal")),
+        );
 
         Ok(())
     }

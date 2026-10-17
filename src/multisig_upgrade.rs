@@ -517,4 +517,229 @@ mod tests {
         let after_cap = record_approval(&env, proposal.id, extra_signer).unwrap();
         assert_eq!(after_cap.approvers.len(), MAX_UPGRADE_SIGNERS);
     }
+
+    // ── Error-path tests ──────────────────────────────────────────────────────
+    //
+    // The tests below focus on error paths and boundary conditions that the
+    // integration tests in `tests/multisig_upgrade.rs` do not reach because
+    // they operate at the `TrustBridgeContract` entry-point level (which
+    // requires auth, initialization, etc.). These unit tests call the storage
+    // helpers directly and pin the exact `ContractError` returned in every
+    // failure branch.
+
+    /// `require_proposal_executable` at the exact boundary timestamp (one
+    /// second before `executable_at`) returns `UpgradeProposalDelayActive`,
+    /// and at exactly `executable_at` it succeeds.
+    #[test]
+    fn test_executable_at_boundary_is_exclusive_before_inclusive_at() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000);
+        let proposer = Address::generate(&env);
+        // delay_secs = 3_600 → executable_at = 4_600
+        let proposal =
+            create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 3_600).unwrap();
+
+        // One second before executable_at: still blocked.
+        env.ledger().set_timestamp(4_599);
+        assert_eq!(
+            require_proposal_executable(&env, proposal.id),
+            Err(ContractError::UpgradeProposalDelayActive),
+            "timestamp == executable_at - 1 must still be inside the delay window"
+        );
+
+        // Exactly at executable_at: now allowed.
+        env.ledger().set_timestamp(4_600);
+        assert!(
+            require_proposal_executable(&env, proposal.id).is_ok(),
+            "timestamp == executable_at must be executable"
+        );
+    }
+
+    /// A zero-delay proposal is immediately executable (no ledger advance
+    /// needed): `executable_at == proposed_at` and the condition is
+    /// `timestamp >= executable_at`.
+    #[test]
+    fn test_zero_delay_proposal_is_immediately_executable() {
+        let env = Env::default();
+        env.ledger().set_timestamp(500);
+        let proposer = Address::generate(&env);
+        let proposal = create_upgrade_proposal(&env, proposer, hash(&env, 0xAA), 0).unwrap();
+
+        assert_eq!(
+            proposal.executable_at, 500,
+            "zero delay: executable_at must equal proposed_at"
+        );
+        assert!(
+            require_proposal_executable(&env, proposal.id).is_ok(),
+            "zero-delay proposal must be executable at the same timestamp it was proposed"
+        );
+    }
+
+    /// After `clear_upgrade_proposal`, `require_proposal_executable` returns
+    /// `NoUpgradeProposalPending` for the old id — consumed proposals cannot
+    /// be re-executed.
+    #[test]
+    fn test_require_executable_after_clear_returns_not_pending() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000);
+        let proposer = Address::generate(&env);
+        let proposal = create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 0).unwrap();
+        let id = proposal.id;
+
+        clear_upgrade_proposal(&env);
+
+        assert_eq!(
+            require_proposal_executable(&env, id),
+            Err(ContractError::NoUpgradeProposalPending),
+            "cleared proposal must not be executable"
+        );
+    }
+
+    /// `record_approval` on the stale id of a cancelled proposal (where a new
+    /// proposal with a different id is now live) returns `NoUpgradeProposalPending`.
+    #[test]
+    fn test_approval_on_stale_id_after_cancel_and_repropose_fails() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000);
+        let proposer = Address::generate(&env);
+        let signer = Address::generate(&env);
+
+        // Proposal 0.
+        let p0 = create_upgrade_proposal(&env, proposer.clone(), hash(&env, 0x01), 0).unwrap();
+        assert_eq!(p0.id, 0);
+        clear_upgrade_proposal(&env);
+
+        // Proposal 1 is now live.
+        let p1 = create_upgrade_proposal(&env, proposer, hash(&env, 0x02), 0).unwrap();
+        assert_eq!(p1.id, 1);
+
+        // Attempting to approve on the old id (0) must fail.
+        assert_eq!(
+            record_approval(&env, 0, signer.clone()),
+            Err(ContractError::NoUpgradeProposalPending),
+            "approving the stale proposal id must return NoUpgradeProposalPending"
+        );
+
+        // Approving on the live id (1) succeeds.
+        assert!(record_approval(&env, 1, signer).is_ok());
+    }
+
+    /// `require_proposal_executable` with a wrong id while a different
+    /// proposal is live returns `NoUpgradeProposalPending` (not an id-mismatch
+    /// variant), consistent with the "proposal not found" semantics.
+    #[test]
+    fn test_executable_wrong_id_while_proposal_is_live() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000);
+        let proposer = Address::generate(&env);
+        let proposal = create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 0).unwrap();
+
+        // Any id other than `proposal.id` is treated as "not found".
+        for bad_id in [proposal.id + 1, proposal.id + 100, u32::MAX] {
+            assert_eq!(
+                require_proposal_executable(&env, bad_id),
+                Err(ContractError::NoUpgradeProposalPending),
+                "wrong id {bad_id} must return NoUpgradeProposalPending"
+            );
+        }
+    }
+
+    /// Threshold clamped to 1 means a single proposer is immediately past the
+    /// threshold — `has_enough_approvals` is true right after proposal creation.
+    #[test]
+    fn test_threshold_one_means_proposer_alone_is_sufficient() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000);
+        set_upgrade_threshold(&env, 1);
+        let proposer = Address::generate(&env);
+        let proposal = create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 0).unwrap();
+
+        assert!(
+            has_enough_approvals(&env, &proposal),
+            "threshold=1: proposer alone must satisfy the approval requirement"
+        );
+    }
+
+    /// When the threshold exceeds the hard cap `MAX_UPGRADE_SIGNERS`, the cap
+    /// itself becomes the limit: once `MAX_UPGRADE_SIGNERS` approvers have
+    /// signed, further `record_approval` calls are silently ignored (the
+    /// approver vec does not grow past the cap), so `has_enough_approvals`
+    /// can only become true if `threshold <= MAX_UPGRADE_SIGNERS`.
+    #[test]
+    fn test_threshold_above_max_signers_cap_is_never_reachable() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000);
+        // Set threshold higher than the hard cap — no realistic deployment
+        // would do this, but the system must not panic.
+        set_upgrade_threshold(&env, MAX_UPGRADE_SIGNERS + 1);
+        let proposer = Address::generate(&env);
+        let proposal = create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 0).unwrap();
+
+        // Fill all MAX_UPGRADE_SIGNERS slots.
+        let mut p = proposal.clone();
+        for _ in 0..(MAX_UPGRADE_SIGNERS - 1) {
+            let signer = Address::generate(&env);
+            p = record_approval(&env, proposal.id, signer).unwrap();
+        }
+        assert_eq!(p.approvers.len(), MAX_UPGRADE_SIGNERS);
+
+        // Even with all slots filled, threshold > MAX_UPGRADE_SIGNERS means
+        // `has_enough_approvals` is false — the threshold is unreachable.
+        assert!(
+            !has_enough_approvals(&env, &p),
+            "threshold above MAX_UPGRADE_SIGNERS must never be reachable"
+        );
+
+        // A further attempt adds nothing past the cap.
+        let extra = Address::generate(&env);
+        let after_extra = record_approval(&env, proposal.id, extra).unwrap();
+        assert_eq!(
+            after_extra.approvers.len(),
+            MAX_UPGRADE_SIGNERS,
+            "approver count must stay at MAX_UPGRADE_SIGNERS after cap is hit"
+        );
+    }
+
+    /// Duplicate approval by the same address is rejected regardless of how
+    /// many other approvers have already signed.
+    #[test]
+    fn test_duplicate_approval_rejected_at_any_position() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000);
+        let proposer = Address::generate(&env);
+        let signer_a = Address::generate(&env);
+        let signer_b = Address::generate(&env);
+
+        let proposal = create_upgrade_proposal(&env, proposer.clone(), hash(&env, 0x01), 0).unwrap();
+        record_approval(&env, proposal.id, signer_a.clone()).unwrap();
+        record_approval(&env, proposal.id, signer_b.clone()).unwrap();
+
+        // All three addresses already on the list — all three must be rejected.
+        for dup in [&proposer, &signer_a, &signer_b] {
+            assert_eq!(
+                record_approval(&env, proposal.id, dup.clone()),
+                Err(ContractError::UpgradeProposalAlreadyApproved),
+                "duplicate approval by {dup:?} must be rejected"
+            );
+        }
+    }
+
+    /// A proposal with `delay_secs` that would overflow `u64` is safely
+    /// clamped by `saturating_add` — `executable_at` saturates to `u64::MAX`
+    /// rather than wrapping, so the delay never accidentally becomes zero.
+    #[test]
+    fn test_saturating_add_prevents_delay_overflow() {
+        let env = Env::default();
+        // Set proposed_at near the maximum so adding any delay would overflow.
+        env.ledger().set_timestamp(u64::MAX - 1);
+        let proposer = Address::generate(&env);
+        let proposal =
+            create_upgrade_proposal(&env, proposer, hash(&env, 0x01), u64::MAX).unwrap();
+
+        assert_eq!(
+            proposal.executable_at,
+            u64::MAX,
+            "saturating_add must clamp executable_at to u64::MAX, not wrap to 0"
+        );
+    }
 }

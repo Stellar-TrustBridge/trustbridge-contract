@@ -1630,3 +1630,31 @@ pub fn repair_index(env: &Env, apply: bool) -> RepairReport {
         drifted,
     }
 }
+
+// ── Oracle-proof verified-by-address state ────────────────────────────────────
+//
+// A lightweight boolean flag stored per `Address` in instance storage,
+// written by `oracle_proof::verify_with_oracle_proof` when an oracle
+// signature check passes. This is intentionally separate from the
+// username-keyed `ContributorRecord.verified` flag used by `verify()` —
+// this flag tracks "an allowlisted oracle attested to this Stellar address"
+// at the address level, without requiring a username lookup.
+
+const ORACLE_VERIFIED_KEY: Symbol = symbol_short!("orc_ver");
+
+/// Records that `subject` has been oracle-verified.
+pub fn set_oracle_verified(env: &Env, subject: &Address) {
+    env.storage()
+        .instance()
+        .set(&(ORACLE_VERIFIED_KEY, subject.clone()), &true);
+}
+
+/// Returns `true` if `subject` has been marked oracle-verified via
+/// `verify_with_oracle_proof`.
+#[must_use]
+pub fn is_verified(env: &Env, subject: &Address) -> bool {
+    env.storage()
+        .instance()
+        .get(&(ORACLE_VERIFIED_KEY, subject.clone()))
+        .unwrap_or(false)
+}
