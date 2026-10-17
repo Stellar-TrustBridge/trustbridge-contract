@@ -3490,7 +3490,10 @@ fn test_timelocked_role_grant_cancel_before_activation() {
 
         // Queued, not active: no role yet, but a pending grant is visible via
         // get_pending_role with activate_at = now + delay.
-        assert_eq!(TrustBridgeContract::get_role(env.clone(), target.clone()), None);
+        assert_eq!(
+            TrustBridgeContract::get_role(env.clone(), target.clone()),
+            None
+        );
         let pending = TrustBridgeContract::get_pending_role(env.clone(), target.clone())
             .expect("grant must be queued behind the timelock");
         assert_eq!(pending.role, Role::Verifier);
@@ -3541,12 +3544,18 @@ fn test_timelocked_role_grant_cancel_before_activation() {
         );
 
         // The queue is gone: activation is impossible and no role was granted.
-        assert_eq!(TrustBridgeContract::get_pending_role(env.clone(), target.clone()), None);
+        assert_eq!(
+            TrustBridgeContract::get_pending_role(env.clone(), target.clone()),
+            None
+        );
         assert_eq!(
             TrustBridgeContract::activate_role(env.clone(), target.clone()),
             Err(ContractError::NoPendingRoleGrant)
         );
-        assert_eq!(TrustBridgeContract::get_role(env.clone(), target.clone()), None);
+        assert_eq!(
+            TrustBridgeContract::get_role(env.clone(), target.clone()),
+            None
+        );
 
         // Double cancel reports the empty queue rather than trapping.
         assert_eq!(
@@ -3571,7 +3580,10 @@ fn test_role_grant_delay_zero_skips_pending_queue() {
             TrustBridgeContract::get_role(env.clone(), target.clone()),
             Some(Role::Verifier)
         );
-        assert_eq!(TrustBridgeContract::get_pending_role(env.clone(), target.clone()), None);
+        assert_eq!(
+            TrustBridgeContract::get_pending_role(env.clone(), target.clone()),
+            None
+        );
         // Nothing queued means nothing to cancel.
         assert_eq!(
             TrustBridgeContract::cancel_role_grant(env.clone(), target.clone()),
