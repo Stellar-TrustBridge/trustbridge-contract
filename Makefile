@@ -19,6 +19,7 @@ THRESHOLD   ?=
 USERNAMES   ?=
 FUZZ_SEEDS  ?=
 FUZZ_RUNS   ?= 1000
+CURSOR_SOAK_ITERATIONS ?= 512
 BENCH_OUT   ?= bench-results.txt
 NORM_BENCH_OUT ?= bench-username-normalization.txt
 REGISTER_BUDGET_CPU_MAX ?= 25000000
@@ -35,7 +36,7 @@ FUTURENET_FRIENDBOT_URL ?= https://friendbot-futurenet.stellar.org
 FUTURENET_IDENTITY ?= $(SOURCE)
 FUTURENET_DRY_RUN ?= false
 
-.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser storage-keys-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
+.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser soak-cursor storage-keys-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
         invoke-verify invoke-revoke-verification invoke-get-all-registered invoke-export-paginated \
@@ -87,6 +88,9 @@ fuzz: ## Run the invariant property fuzzing suite (seeds: tests/fuzz/seeds.txt o
 
 fuzz-parser: ## Fuzz export cursor parsing (install cargo-fuzz + nightly; FUZZ_RUNS=1000 for CI smoke, 0 for continuous)
 	cargo +nightly fuzz run export_cursor -- -runs=$(FUZZ_RUNS) -max_len=9 -timeout=5 -rss_limit_mb=1024
+
+soak-cursor: ## Run the deterministic export_cursor soak property test (CURSOR_SOAK_ITERATIONS=20000 for a long local soak)
+	CURSOR_SOAK_ITERATIONS="$(CURSOR_SOAK_ITERATIONS)" cargo test --test cursor_pagination soak -- --nocapture
 
 storage-keys-check: ## Fail if a storage.rs key is missing from docs/STORAGE_KEYS.md
 	./scripts/check_storage_keys.sh
