@@ -37,23 +37,111 @@ consumers can reason about audit trails without reading the contract source.
 
 - **Fields (in encoding order):**
   1. `enabled` (`bool`) — whether audit event recording is active. **Default:** `true`
-  2. `retention_epochs` (`u32`) — number of epochs audit records are retained before pruning. **Default:** `30`
-  3. `max_events_per_epoch` (`u32`) — upper bound on audit events recorded per epoch. **Default:** `1024`
-  4. `require_actor` (`bool`) — whether each audit event must carry a non-empty actor. **Default:** `true`
+  2. `max_events` (`u32`) — ring-buffer size: maximum number of audit events retained
+     in instance storage before the oldest is evicted. **Default:** `1000`
+  3. `log_unauthorized` (`bool`) — whether failed authorization attempts are recorded
+     as `AuditEventType::UnauthorizedAttempt` (code 6). Set to `false` to suppress
+     spam from probing bots; `AuditStats.unauthorized_attempts` still increments.
+     **Default:** `true`
+
+> **ABI note:** Earlier drafts of this document listed `retention_epochs`,
+> `max_events_per_epoch`, and `require_actor`. Those fields **do not exist** in
+> the implementation. The canonical field list above matches `src/audit.rs`
+> exactly. Codes are append-only — do not renumber existing fields.
 
 ### Defaults
 
-When no `AuditConfig` has been explicitly stored, the contract MUST behave as if
-the defaults above are in effect. Defaults are chosen to keep audit trails on by
+When no `AuditConfig` has been explicitly stored (i.e. `set_audit_config` has
+never been called), the contract behaves as if the defaults above are in effect
+via `AuditConfig::default()`. Defaults are chosen to keep audit trails on by
 default and to bound storage growth; disabling auditing or lowering retention is
 an explicit, authorized action.
 
+### Entry points
+
+| Function | Auth | Notes |
+|---|---|---|
+| `get_audit_config() -> AuditConfig` | None | Returns stored config or default |
+| `set_audit_config(caller, enabled, max_events, log_unauthorized)` | Admin only | Persists config, emits `AuditConfigChangedEvent`, appends `AuditConfigChanged` log entry |
+
 ### Mutation authorization
 
-`AuditConfig` may only be mutated by authorized roles. Unauthorized callers MUST
-be rejected and the stored configuration MUST remain unchanged. The authorization
-check is enforced in the contract (see `src/audit.rs` / `src/lib.rs`) and is
-covered by tests that assert unauthorized mutation attempts are rejected.
+`AuditConfig` may only be mutated by the contract admin. Unauthorized callers are
+rejected with `NotAuthorized` (code 3) and the stored configuration remains
+unchanged. The authorization check is enforced in `src/lib.rs` and covered by
+tests asserting unauthorized mutation attempts are rejected and themselves logged
+as `UnauthorizedAttempt` entries (using the pre-change config so an
+attacker cannot suppress their own trace via a failed disable-then-probe).
+
+### AuditEventType codes (append-only)
+
+| Code | Name | Description |
+|------|------|-------------|
+| 1 | `ContractInitialized` | `initialize` called |
+| 2 | `UserRegistered` | `register` / `register_sponsored` succeeded |
+| 3 | `UserRemoved` | `remove` / `batch_remove` removed a record |
+| 4 | `UserVerified` | `verify` / `batch_verify` verified a record |
+| 5 | `AdminAction` | Generic admin operation |
+| 6 | `UnauthorizedAttempt` | Auth check failed; gated on `log_unauthorized` |
+| 7 | `DataExported` | Paginated export operation |
+| 8 | `VerificationRevoked` | `revoke_verification` revoked a record |
+| 9 | `UserRenamed` | `rename` moved a registration |
+| 10 | `ContractPaused` | `pause` / `emergency_pause` / `set_paused` |
+| 11 | `ContractUnpaused` | `unpause` / `clear_emergency_pause` |
+| 12 | `RoleChanged` | `set_role` / `activate_role` granted a role |
+| 13 | `ContractUpgraded` | `upgrade` replaced the WASM |
+| 14 | `AuditConfigChanged` | `set_audit_config` mutated the config |
+
+> Codes are **append-only**. Indexers store the numeric discriminant; renumbering
+> silently re-labels historical entries. New variants must be added at the end.
+
+### Audit reads
+
+`get_audit_logs() -> Vec<AuditLogEntry>` returns the retained audit entries
+**oldest-first** with no server-side offset/limit parameters — dashboards and
+indexers paginate client-side by slicing `[offset..offset+limit)` over the
+returned vector (see `audit_page` in `tests/integration.rs` for the reference
+slicing convention, and Issue #646 for the edge-case tests):
+
+| Rule | Behavior |
+|------|----------|
+| Retention | At most `MAX_AUDIT_LOG_ENTRIES` (`100`) entries are retained; each push past the cap evicts the oldest entry (FIFO) |
+| Ordering | Oldest first — index `0` is the oldest retained entry |
+| Empty log | A deployed-but-uninitialized instance returns an empty vector |
+| `offset >= len` | Empty page, not an error |
+| `limit == 0` | Empty page (client convention) |
+| Over-long window | Truncated to the retained tail, not an error |
+
+`get_audit_stats() -> AuditStats` returns monotonic counters
+(`total_events`, `registrations`, …) that **include evicted entries**, so
+stats totals can exceed the 100 retained rows — read the retained window to
+answer "what happened", and the stats to answer "how many ever happened".
+Both reads are permissionless and available while paused (see the conformance
+matrix in `docs/ARCHITECTURE.md`).
+
+### Audit reads
+
+`get_audit_logs() -> Vec<AuditLogEntry>` returns the retained audit entries
+**oldest-first** with no server-side offset/limit parameters — dashboards and
+indexers paginate client-side by slicing `[offset..offset+limit)` over the
+returned vector (see `audit_page` in `tests/integration.rs` for the reference
+slicing convention, and Issue #646 for the edge-case tests):
+
+| Rule | Behavior |
+|------|----------|
+| Retention | At most `MAX_AUDIT_LOG_ENTRIES` (`100`) entries are retained; each push past the cap evicts the oldest entry (FIFO) |
+| Ordering | Oldest first — index `0` is the oldest retained entry |
+| Empty log | A deployed-but-uninitialized instance returns an empty vector |
+| `offset >= len` | Empty page, not an error |
+| `limit == 0` | Empty page (client convention) |
+| Over-long window | Truncated to the retained tail, not an error |
+
+`get_audit_stats() -> AuditStats` returns monotonic counters
+(`total_events`, `registrations`, …) that **include evicted entries**, so
+stats totals can exceed the 100 retained rows — read the retained window to
+answer "what happened", and the stats to answer "how many ever happened".
+Both reads are permissionless and available while paused (see the conformance
+matrix in `docs/ARCHITECTURE.md`).
 
 `tests/testdata/bindings/get_address_simulate.v1.json` is a versioned golden of
 the `ScVal` XDR that `simulateTransaction` returns for `get_address` (hit and
@@ -904,7 +992,7 @@ that budget while still allowing full export via a cursor loop.
 | Field | Type | Semantics |
 |-------|------|-----------|
 | `records` | `Vec<(String, ContributorRecord)>` | Current page |
-| `next_cursor` | `Option<u32>` | Next zero-based index offset, or `None` when done |
+| `next_cursor` | `Option<BytesN<8>>` | Opaque cursor for the next call, or `None` when done |
 | `total` | `u32` | Live registration count |
 | `has_more` | `bool` | `true` when another page exists |
 | `merkle_root` | `BytesN<32>` | Merkle root over `records`, in page order (Issue #216) |
@@ -969,6 +1057,37 @@ must pass with the updated golden before release.
 
 ### `get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
 
+
+### `set_oracle_allowlist(pubkeys: Vec<BytesN<32>>) -> Result<(), ContractError>`
+
+Replaces the Ed25519 oracle public keys whose proofs
+`verify_with_oracle_proof` accepts (Issue #584). An empty list disables oracle
+verification. **Auth:** contract admin.
+
+**Errors:** `NotInitialized`.
+
+### `get_oracle_allowlist() -> Vec<BytesN<32>>`
+
+Returns the current oracle allowlist (empty if never set). Read-only, no auth.
+
+### `verify_with_oracle_proof(github_username: String, proof: OracleProof) -> Result<(), ContractError>`
+
+Marks a registered username verified on the strength of an allowlisted
+oracle's signature instead of an admin/Verifier call. `proof` is
+`OracleProof { oracle_pubkey: BytesN<32>, message: Bytes, signature: BytesN<64>, expires_at: u64 }`,
+and `message` must be exactly
+`<github_username>:<stellar_address strkey>:<expires_at decimal>` for the
+record's current `stellar_address` — see
+[SECURITY.md](SECURITY.md#oracle-signed-proof-interface-signature-check).
+`expires_at = 0` skips the expiry check. On success the record, counters,
+`VerifiedEvent`, and audit log update exactly as for `verify`.
+
+**Auth:** the registered `stellar_address`.
+
+**Errors:** `NotInitialized`, `Paused`, `NotRegistered`,
+`OracleProofBadLayout` (58), `OracleProofNotAllowlisted` (59),
+`OracleProofExpired` (60), `OracleProofBadSignature` (61), `AlreadyVerified`.
+A well-formed signature that does not verify traps the invocation.
 
 ---
 
@@ -1189,45 +1308,25 @@ footprint limit. Same shape as `get_all_registered` — no `verified` flag; use
 
 ---
 
-### `get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
+### `get_registered_paginated` / `get_public_paginated` (cursor-based export)
 
-Admin-gated paginated export. Each entry is a full `ContributorRecord`, so the
-`verified` bit travels with every row — no second call or cross-reference
-against `get_address` is needed to know verification status (Issue #96).
-
-| | |
-|---|---|
-| **Auth** | Admin |
-| **Mutates** | No |
-| **Errors** | `NotInitialized` |
-
-`limit = 0` defaults to `DEFAULT_PAGE_LIMIT` (20); any value above
-`MAX_PAGE_LIMIT` (100) is clamped down to it. `next_cursor` is `Some` while
-`has_more` is true; pass it back as `cursor` to continue.
+Documented once under [Pagination API Selection
+Guide](#pagination-api-selection-guide-issue-302):
+`get_registered_paginated(cursor: Option<BytesN<8>>, limit)` (admin) and
+`get_public_paginated(cursor: Option<BytesN<8>>, limit)` (permissionless).
+Cursors are opaque `BytesN<8>` tokens — never construct or parse one yourself;
+start from `None` and pass back each page's `next_cursor`. A cursor issued
+before a registry removal fails with `InvalidCursor` (see
+`tests/cursor_pagination.rs` and the soak notes in
+`docs/REGISTRY_INVARIANTS.md`). `limit = 0` defaults to `DEFAULT_PAGE_LIMIT`
+(20); values above `MAX_PAGE_LIMIT` (100) clamp down to it. `next_cursor` is
+`Some` while `has_more` is true; pass it back as `cursor` to continue.
 
 ```bash
 stellar contract invoke --id $ID --source admin --network testnet \
-  -- get_registered_paginated --cursor 0 --limit 50
-```
-
----
-
-### `get_public_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
-
-Same `ExportPage` shape as `get_registered_paginated` — including the
-`verified` flag per record — but callable by anyone. This is the
-unauthenticated read path for dashboards and indexers that need
-username + address + verified without an admin key (Issue #96).
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Mutates** | No |
-| **Errors** | `NotInitialized`, `Paused` |
-
-```bash
-stellar contract invoke --id $ID --source deployer --network testnet \
-  -- get_public_paginated --cursor 0 --limit 50
+  -- get_registered_paginated --cursor null --limit 50
+stellar contract invoke --id $ID --network testnet \
+  -- get_public_paginated --cursor null --limit 50
 ```
 
 ---
@@ -2694,6 +2793,11 @@ affects the contract admin's own identity.
 Emits `RoleGrantedEvent` (unchanged shape — expiry is not carried on the
 event; read it back with `get_role_expiry`).
 
+While a `set_role_delay` timelock is armed it cannot mint a role instantly:
+it returns `RoleGrantNotReady` (35) unless `target` already actively holds
+`role`, in which case only the expiry changes (e.g. to off-board a key
+early). New grants go through `set_role` + `activate_role` (Issue #220).
+
 #### `get_role_expiry(address: Address) -> Option<u64>`
 
 Read-only; no auth. The raw expiry timestamp for `address`'s current role
@@ -2746,7 +2850,7 @@ not configured, `expires_in == 0`, or revoked).
 
 ### Signed export attestation (Issue #223)
 
-#### `export_attestation(cursor: u32, limit: u32) -> Result<ExportAttestation, ContractError>`
+#### `export_attestation(cursor: Option<BytesN<8>>, limit: u32) -> Result<ExportAttestation, ContractError>`
 
 Admin-only; unaffected by the normal pause flag (same as
 `get_registered_paginated` / `get_all_registered` — admin export tooling

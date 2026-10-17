@@ -21,7 +21,7 @@
 //!   which binds a WASM hash for upgrades. This binds an oracle signature to
 //!   an arbitrary message for identity/ownership proofs.
 
-use soroban_sdk::{contracttype, symbol_short, Address, Bytes, BytesN, Env, Symbol, Vec};
+use soroban_sdk::{contracttype, symbol_short, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
 use crate::error::ContractError;
 
@@ -119,6 +119,65 @@ pub fn verify_with_proof(env: &Env, proof: &OracleProof) -> Result<(), ContractE
     Ok(())
 }
 
+/// Builds the canonical ownership message an oracle signs for
+/// `verify_with_oracle_proof`:
+///
+/// ```text
+/// <github_username>:<stellar_address strkey>:<expires_at as decimal>
+/// ```
+///
+/// e.g. `octocat:GAAA…WHF:1700000000`. Binding all three fields means a proof
+/// issued for one username/address pair cannot be replayed against another,
+/// and its expiry cannot be altered without invalidating the signature.
+#[must_use]
+pub fn ownership_message(
+    env: &Env,
+    github_username: &String,
+    stellar_address: &Address,
+    expires_at: u64,
+) -> Bytes {
+    let mut msg = github_username.to_bytes();
+    msg.push_back(b':');
+    msg.append(&stellar_address.to_string().to_bytes());
+    msg.push_back(b':');
+
+    // u64::MAX has 20 decimal digits.
+    let mut digits = [0u8; 20];
+    let mut n = expires_at;
+    let mut i = digits.len();
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    msg.append(&Bytes::from_slice(env, &digits[i..]));
+    msg
+}
+
+/// Checks that `proof` vouches for `stellar_address` owning `github_username`:
+/// `proof.message` must equal [`ownership_message`] for that pair and
+/// `proof.expires_at`, then [`verify_with_proof`] runs its allowlist, expiry,
+/// and signature checks.
+///
+/// # Errors
+/// - [`ContractError::OracleProofBadLayout`] if `proof.message` is not the
+///   canonical ownership message for this subject, plus every error of
+///   [`verify_with_proof`].
+pub fn verify_ownership_proof(
+    env: &Env,
+    github_username: &String,
+    stellar_address: &Address,
+    proof: &OracleProof,
+) -> Result<(), ContractError> {
+    if proof.message != ownership_message(env, github_username, stellar_address, proof.expires_at) {
+        return Err(ContractError::OracleProofBadLayout);
+    }
+    verify_with_proof(env, proof)
+}
+
 /// Returns `true` if every byte of `sig` is zero (a placeholder / unset
 /// signature rather than a real one).
 fn is_zero_signature(sig: &BytesN<64>) -> bool {
@@ -141,6 +200,30 @@ fn is_zero_signature(sig: &BytesN<64>) -> bool {
 fn is_valid_signature_shape(sig: &BytesN<64>) -> bool {
     let bytes = sig.to_array();
     bytes[63] & 0xE0 == 0
+}
+
+/// Verifies an [`OracleProof`] and, on success, records `subject` as
+/// oracle-verified in instance storage.
+///
+/// This is the wired entry point: it runs the same checks as
+/// [`verify_with_proof`] (allowlist → expiry → signature) and then persists
+/// the verification so callers can query it with
+/// `crate::storage::is_verified`. On any proof failure it returns the same
+/// error codes as `verify_with_proof` mapped to
+/// [`ContractError::NotAuthorized`] so that the caller's error handling is
+/// uniform with the existing admin-auth path.
+///
+/// # Errors
+/// - [`ContractError::NotAuthorized`] if the proof is invalid for any reason
+///   (not allowlisted, expired, bad signature, or bad layout).
+pub fn verify_with_oracle_proof(
+    env: &Env,
+    subject: &Address,
+    proof: &OracleProof,
+) -> Result<(), ContractError> {
+    verify_with_proof(env, proof).map_err(|_| ContractError::NotAuthorized)?;
+    crate::storage::set_oracle_verified(env, subject);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -215,6 +298,8 @@ mod tests {
             assert!(verify_with_proof(&env, &proof).is_ok());
         });
     }
+
+    const SUBJECT: &str = "GAZOJB42QBRQC44KFDMPWIKO5JBARJ3MBALJQU2T7M2WZUDZ2D3FVT4I";
 
     #[test]
     fn non_allowlisted_key_is_rejected() {

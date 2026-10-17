@@ -514,7 +514,7 @@ tests validate this property against 78+ known confusable characters and ensure
 no bypass path exists at the `register()` entry point.
 
 Run the full corpus: `cargo test homoglyph` or `cargo test unicode`
-(CI: `cargo test --test homoglyph_corpus` on every pull request).
+(CI: the `homoglyph_corpus` job runs `cargo test --test homoglyph_corpus` on every pull request).
 
 ### Performance
 
@@ -733,7 +733,9 @@ Dashboard operators and auditors need the full failure surface of the dual-contr
 invalid state transition across all six entrypoints. Each cell maps to a test in
 `tests/batch_remove_dual_control.rs`.
 
-Cross-reference: [`tests/auth_matrix.csv`](../tests/auth_matrix.csv) ·
+Cross-reference: [`tests/auth_matrix.csv`](../tests/auth_matrix.csv) (every row is
+executed by [`tests/auth_matrix.rs`](../tests/auth_matrix.rs); see
+[CONTRIBUTING — Authorization matrix](CONTRIBUTING.md#authorization-matrix)) ·
 [ABI reference](ABI.md) · [ADMIN_RUNBOOK.md — Dual-Control batch_remove](ADMIN_RUNBOOK.md)
 
 Auth rules in brief:
@@ -973,19 +975,13 @@ Tests in `src/oracle_proof.rs` cover every path with a fixed test keypair
 
 **This is a signature-check interface, not GitHub verification.** The
 contract has no way to talk to the GitHub API and this change does not give
-it one — see **Out of Scope** above, which still applies unchanged. What an
-oracle signs, and how it constructs `message` (e.g. binding a specific
-`github_username` + `stellar_address` + expiry into the signed bytes so a
-proof can't be replayed against a different subject), is an off-chain
-contract between the oracle operator and whoever consumes its proofs; it is
-not parsed or enforced by `verify_with_proof` itself.
+it one — see **Out of Scope** above, which still applies unchanged. How the
+oracle confirms ownership before signing is an off-chain contract between the
+oracle operator and the admin who allowlists its key.
 
 **Explicitly out of scope:**
 
-- Wiring a valid `OracleProof` into `verify()`/`batch_verify()` as an
-  alternative to admin/`Role::Verifier` auth. This module ships the
-  primitive and its tests; integrating it into the verification entry
-  points is separate follow-up work.
+- Accepting oracle proofs in `batch_verify()`.
 - Running a production GitHub oracle service that produces these proofs.
 
 ---
@@ -1205,7 +1201,17 @@ them were not recorded at all.
 | 10 | `CONTRACT_PAUSED` | `pause`, `emergency_pause`, `set_paused(true)` |
 | 11 | `CONTRACT_UNPAUSED` | `unpause`, `clear_emergency_pause`, `set_paused(false)` |
 | 12 | `ROLE_CHANGED` | `set_role`, `activate_role` |
-| 13 | `CONTRACT_UPGRADED` | `upgrade` |
+| 13 | `CONTRACT_UPGRADED` | `upgrade`, `execute_upgrade` (multisig path) |
+| 14 | `AUDIT_CONFIG_CHANGED` | `set_audit_config` |
+
+`AdminAction` entries are also written for the multisig upgrade governance
+paths: `set_upgrade_threshold`, `propose_multisig_upgrade`,
+`approve_upgrade`, and `cancel_upgrade_proposal` each record an
+`AuditEventType::AdminAction` entry with a `details` field naming the
+function, so an audit reader can distinguish governance configuration from
+other admin actions. `execute_upgrade` records `ContractUpgraded` (code 13)
+because the WASM was actually swapped, matching the single-admin `upgrade`
+path for indexer consistency.
 
 Codes and strings are **append-only**, for the same reason `ContractError`'s
 are: an indexer stores them, so renumbering or renaming silently re-labels
@@ -1247,6 +1253,102 @@ whether the contract had gone down or come back up.
 - **An unbounded historical store**: with a 100-entry cap, long-term history is
   the indexer's job. On a busy contract the on-chain log is a recent window,
   not an archive — do not design a compliance process that assumes otherwise.
+
+---
+
+## Unauthorized Attempt Logging (Issue #412)
+
+Every role-gated entry point that returns `ContractError::NotAuthorized` now
+calls the internal `record_unauthorized_attempt` helper before returning.  This
+appends an `AuditEventType::UnauthorizedAttempt` (code 6) entry to the audit
+log, recording the actor address and the name of the operation they attempted.
+
+### Why this matters
+
+Forensics needs a structured, queryable record of probing activity that
+**never** resulted in a successful state mutation.  Without these entries the
+audit log only tells an operator what succeeded — a gap that makes it
+impossible to detect a credential-stuffing campaign or a compromised key that
+is being tested before it is used.
+
+### Design choices
+
+| Property | Decision |
+|---|---|
+| **Gated on `AuditConfig.log_unauthorized`** | Operators can suppress entries during a spam campaign without redeploying. The `AuditStats.unauthorized_attempts` counter still increments regardless. |
+| **Uses the pre-call config** | An attacker calling `set_audit_config` to disable logging would itself require admin auth; the very failure to pass that check is logged under the current config before the call returns. |
+| **Non-recursive** | `record_unauthorized_attempt` calls `push_audit_entry` directly — no auth check, no re-entry into any role-gated path. |
+| **No reentrant loop** | The helper reads config and appends; it cannot trigger another auth check. |
+| **Storage spam guard** | The ring buffer evicts the oldest entry when full (cap = 100). A bot flooding `emergency_pause` or `verify` cannot grow storage beyond that bound. |
+
+### Covered entry points
+
+All public entry points that return `NotAuthorized` are covered:
+
+`emergency_pause`, `stage_wasm`, `clear_staged`, `set_upgrade_threshold`,
+`propose_multisig_upgrade`, `approve_upgrade`, `execute_upgrade`,
+`cancel_upgrade_proposal`, `config_verification`, `set_audit_config`,
+`batch_remove`, `propose_batch_remove`, `execute_batch_remove`,
+`cancel_batch_remove`, `verify`, `revoke_verification`,
+`start_challenge`, `cancel_challenge`, `complete_challenge`,
+`cancel_address_rotation`, `set_bot_status`, `remove`, `rename`.
+
+The private `require_remove_auth` helper (used by `remove` and `rename`) has
+no `&Env`, so logging is done at the call site rather than inside the helper.
+Admin-gated functions that call `admin.require_auth()` directly (e.g. `pause`,
+`set_role`, `upgrade`) do not need this hook because Soroban's own
+`require_auth` traps the transaction if the signature is missing — there is no
+`NotAuthorized` error path in those functions.
+
+### Reading the log
+
+```bash
+stellar contract invoke --id $CONTRACT_ID --network testnet \
+  -- get_audit_stats
+# Look at unauthorized_attempts field
+
+stellar contract invoke --id $CONTRACT_ID --network testnet \
+  -- get_audit_logs
+# Filter entries where event_type == 6 (UNAUTHORIZED_ATTEMPT)
+```
+
+---
+
+## Audit Configuration (Issue #412)
+
+The on-chain audit trail is configurable via `set_audit_config` (admin-only)
+and readable by anyone via `get_audit_config`.
+
+### AuditConfig fields
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | `bool` | `true` | Global switch for audit logging |
+| `max_events` | `u32` | `1000` | Ring-buffer capacity |
+| `log_unauthorized` | `bool` | `true` | Record `UnauthorizedAttempt` entries |
+
+When no config has been stored, `AuditConfig::default()` is used — all
+defaults apply automatically without an explicit `set_audit_config` call.
+
+### Authorization
+
+Only the contract admin may call `set_audit_config`. A non-admin caller
+receives `NotAuthorized` and the stored config is not modified.
+The failed attempt is itself logged as an `UnauthorizedAttempt` entry using
+the **current** config, preventing a disable-then-probe attack.
+
+### Config changes while paused
+
+`set_audit_config` does not call `require_not_paused` — operators need to
+be able to adjust audit settings during an incident freeze without first
+unpausing (which may be undesirable while a security review is underway).
+
+### Event
+
+Every successful `set_audit_config` emits an `AuditConfigChangedEvent` with
+topics `[admin]` and body fields `enabled`, `max_events`, `log_unauthorized`,
+`timestamp`. The change is also appended to the audit log as an
+`AuditConfigChanged` (code 14) entry.
 
 ---
 

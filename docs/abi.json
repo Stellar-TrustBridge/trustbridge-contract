@@ -57,6 +57,18 @@
     {
       "name": "get_registered_paginated",
       "signature": "get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>"
+    },
+    {
+      "name": "set_oracle_allowlist",
+      "signature": "set_oracle_allowlist(pubkeys: Vec<BytesN<32>>) -> Result<(), ContractError>"
+    },
+    {
+      "name": "get_oracle_allowlist",
+      "signature": "get_oracle_allowlist() -> Vec<BytesN<32>>"
+    },
+    {
+      "name": "verify_with_oracle_proof",
+      "signature": "verify_with_oracle_proof(github_username: String, proof: OracleProof) -> Result<(), ContractError>"
     }
   ],
   "errors": [

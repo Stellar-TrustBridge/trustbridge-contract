@@ -23,11 +23,12 @@ review the resulting diff alongside the TypeScript decoder.
 
 ## CI entry point
 
-The existing `quality` job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
-runs `npm ci` and `npm test` on pull requests to `main` (and pushes to `main`).
-The two named Node tests must pass; an XDR decoding or golden-value mismatch
-fails the quality job. Keep that job required in the repository's branch
-protection rules to block merges until it passes.
+The `diff-test` job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
+runs `make diff-test` (`npm ci` + `npm test`, Node.js 20, npm cache keyed on
+`package-lock.json`) on pull requests to `main` and pushes to `main`. The
+`node --test` output names the failing test, so an XDR decoding or
+golden-value mismatch shows which fixture diverged. Keep that job required in
+the repository's branch protection rules to block merges until it passes.
 
 The older `fixtures/get_address_octocat.*` files are placeholders and are not
 used by the CI entry point. The shared Rust golden above is the source of
