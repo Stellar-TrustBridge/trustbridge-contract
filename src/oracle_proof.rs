@@ -202,6 +202,30 @@ fn is_valid_signature_shape(sig: &BytesN<64>) -> bool {
     bytes[63] & 0xE0 == 0
 }
 
+/// Verifies an [`OracleProof`] and, on success, records `subject` as
+/// oracle-verified in instance storage.
+///
+/// This is the wired entry point: it runs the same checks as
+/// [`verify_with_proof`] (allowlist → expiry → signature) and then persists
+/// the verification so callers can query it with
+/// `crate::storage::is_verified`. On any proof failure it returns the same
+/// error codes as `verify_with_proof` mapped to
+/// [`ContractError::NotAuthorized`] so that the caller's error handling is
+/// uniform with the existing admin-auth path.
+///
+/// # Errors
+/// - [`ContractError::NotAuthorized`] if the proof is invalid for any reason
+///   (not allowlisted, expired, bad signature, or bad layout).
+pub fn verify_with_oracle_proof(
+    env: &Env,
+    subject: &Address,
+    proof: &OracleProof,
+) -> Result<(), ContractError> {
+    verify_with_proof(env, proof).map_err(|_| ContractError::NotAuthorized)?;
+    crate::storage::set_oracle_verified(env, subject);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -473,6 +497,32 @@ mod tests {
                 verify_with_proof(&env, &proof),
                 Err(ContractError::OracleProofBadSignature)
             );
+        });
+    }
+
+    /// A canonically encoded signature that does not verify cannot become an
+    /// `Err`: `ed25519_verify` has no fallible form, so the host traps.
+    #[test]
+    #[should_panic(expected = "Error(Crypto, InvalidInput)")]
+    fn wellformed_invalid_signature_traps() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+
+            // Allowlisted key, but the attacker's (well-formed) signature.
+            let proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
+                message: Bytes::from_array(&env, &MESSAGE),
+                signature: BytesN::from_array(&env, &ATTACKER_SIG),
+                expires_at: 0,
+            };
+            let _ = verify_with_proof(&env, &proof);
         });
     }
 }

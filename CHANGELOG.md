@@ -15,12 +15,20 @@ compatible corrections.
 - Added oracle-proof verification: `set_oracle_allowlist`, `get_oracle_allowlist`, and `verify_with_oracle_proof` (see [verify_with_oracle_proof](docs/ABI.md#verify_with_oracle_proofgithub_username-string-proof-oracleproof---result-contracterror)).
 - Added typed export page bindings (`ExportRecord`, `ExportPage`, `EXPORT_PAGE_LAYOUT_VERSION = 2`) and updated `abi/export_page.layout.golden` layout regression fixtures.
 - Added TypeScript export page decoding and typed parser helpers in `ts-differential-tests`.
+- Added `set_audit_config(caller, enabled, max_events, log_unauthorized)` — admin-gated entry point to persist `AuditConfig` on-chain. Emits `AuditConfigChangedEvent` and appends an `AuditConfigChanged` (code 14) log entry (Issue #412).
+- Added `get_audit_config()` — public read of the stored `AuditConfig`, falling back to defaults when none has been set (Issue #412).
+- Added `AuditConfigChangedEvent` with topic `admin` and body fields `enabled`, `max_events`, `log_unauthorized`, `timestamp` (Issue #412).
+- Added `UnauthorizedAttempt` (code 6) audit log entries: every public entry point that returns `NotAuthorized` now calls `record_unauthorized_attempt` before returning, gated on `AuditConfig.log_unauthorized`. Actors and operation names are recorded for forensics (Issue #412).
+- `AuditStats.unauthorized_attempts` counter now increments on every failed auth regardless of `log_unauthorized` flag.
 
 ### Changed
 
+- Documented the `set_bot_status` auth policy consistently as admin-or-registrant across `tests/auth_matrix.csv`, `docs/ABI.md` and `docs/ADMIN_RUNBOOK.md` (the runbook previously said admin only). No contract behaviour change.
 - Fixed `calculate_verification_percentage` and `BatchSummary::new` rounding at boundary and fractional values (0%, 100%, 1/3, 2/3) to use standard round-half-up semantics.
 - Fixed `NetworkMismatch` error code by moving its discriminant from 21 to 30 to avoid overlap with `InvalidPauseReason` (see [ContractError](docs/ABI.md#contracterror-u32-discriminant)).
 - Added new error codes `VerifierAllowlistFull` (31), `VerifierNotAllowlisted` (32), `VerifierExpiryInPast` (33), `NoPendingRoleGrant` (34), `RoleGrantNotReady` (35), `ProvenanceMissing` (36), and `ProvenanceMismatch` (37).
+- **`docs/ABI.md` AuditConfig section**: corrected field list to match `src/audit.rs` exactly. Previous docs listed non-existent fields (`retention_epochs`, `max_events_per_epoch`, `require_actor`); actual fields are `enabled`, `max_events`, `log_unauthorized`. Added `AuditEventType` code table and entry-point reference (Issue #412).
+- **`scripts/event_indexer.sh`**: added `audit_config_changed_event|audit_config_changed|audit` row to `TOPIC_TABLE` so the indexer classifies the new event instead of labelling it `unknown`.
 
 ## [1.1.0] - 2026-09-26
 

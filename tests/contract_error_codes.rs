@@ -50,6 +50,29 @@ fn variant_for_name(name: &str) -> ContractError {
         "RoleExpired" => ContractError::RoleExpired,
         "ProvenanceMissing" => ContractError::ProvenanceMissing,
         "ProvenanceMismatch" => ContractError::ProvenanceMismatch,
+        "StagedWasmMismatch" => ContractError::StagedWasmMismatch,
+        "UpgradeProposalAlreadyPending" => ContractError::UpgradeProposalAlreadyPending,
+        "NoUpgradeProposalPending" => ContractError::NoUpgradeProposalPending,
+        "UpgradeProposalAlreadyApproved" => ContractError::UpgradeProposalAlreadyApproved,
+        "UpgradeProposalDelayActive" => ContractError::UpgradeProposalDelayActive,
+        "UpgradeProposalInsufficientApprovals" => {
+            ContractError::UpgradeProposalInsufficientApprovals
+        }
+        "FallbackListFull" => ContractError::FallbackListFull,
+        "UsernameTaken" => ContractError::UsernameTaken,
+        "RotationRequired" => ContractError::RotationRequired,
+        "RotationPending" => ContractError::RotationPending,
+        "NoRotationPending" => ContractError::NoRotationPending,
+        "RotationNotReady" => ContractError::RotationNotReady,
+        "InvalidCursor" => ContractError::InvalidCursor,
+        "VerifyRateLimited" => ContractError::VerifyRateLimited,
+        "DualControlRequired" => ContractError::DualControlRequired,
+        "BatchRemoveProposalPending" => ContractError::BatchRemoveProposalPending,
+        "NoPendingBatchRemove" => ContractError::NoPendingBatchRemove,
+        "OracleProofBadLayout" => ContractError::OracleProofBadLayout,
+        "OracleProofNotAllowlisted" => ContractError::OracleProofNotAllowlisted,
+        "OracleProofExpired" => ContractError::OracleProofExpired,
+        "OracleProofBadSignature" => ContractError::OracleProofBadSignature,
         _ => panic!(
             "unknown ContractError in golden file: {name}. \
              Add the variant to variant_for_name, or fix the golden entry."

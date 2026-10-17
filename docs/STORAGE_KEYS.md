@@ -47,6 +47,7 @@ These keys live in Soroban's **instance** storage partition. Each key is a `Symb
 | `"brm_pend"` | `PENDING_BATCH_REMOVE_KEY` | `Option<PendingBatchRemove>` | Pending large batch_remove proposal (Issue #219) |
 | `"vfylimit"` | `VERIFY_LIMIT_KEY` | `u32` | Per-ledger verify/revoke rate limit (Issue #292) |
 | `"vfyallow"` | `VERIFIER_ALLOWLIST_KEY` | `Vec<VerifierAllowEntry>` | Verifier allowlist with expiry (Issue #293) |
+| `"evtledger"` | `LAST_EVENT_LEDGER_KEY` | `u32` | Ledger sequence of the most recent event emitted (`0` if none) |
 
 ### Not used as direct instance keys (prefixes only)
 
@@ -71,7 +72,7 @@ These keys use **tuples** as storage keys, where the first element is a `Symbol`
 | `"chunk"` | `CHUNK_KEY` | `u32` (chunk index) | `Vec<String>` | Chunked slice of the username index for paginated reads |
 | `"lastact"` | `LAST_ACT_KEY` | `String` (GitHub username) | `u64` (ledger timestamp) | Per-user cooldown tracking for rate-limiting |
 | `"pendrot"` | `PENDING_ROT_KEY` | `String` (GitHub username) | `PendingRotation` | Pending address rotation with delay (Issue #234) |
-| `"pend_rev"` | `PENDING_REVERIFY_KEY` | `String` (GitHub username) | `bool` | Flag indicating re-verification needed after address change (Issue #208) |
+| `"pend_rev"` | `PENDING_REVERIFY_KEY` | `String` (GitHub username, canonical lower-case) | `bool` | Flag indicating re-verification needed after address change (Issue #208). Set (TTL-extended) when a verified record changes address; cleared by `verify`/`batch_verify` and whenever the record is removed; moved to the new name by `rename` |
 | `"chllng"` | `CHALLENGE_KEY` | `String` (GitHub username) | `ChallengeRecord` | Squatter challenge record (Issue #214) |
 | `"pendrole"` | `PENDING_ROLE_KEY` | `Address` | `PendingRoleGrant` | Timelocked role grant awaiting activation (Issue #220) |
 | `"role_exp"` | `ROLE_EXPIRY_KEY` | `Address` | `u64` (timestamp) | Expiry timestamp for role grant (Issue #221) |
@@ -135,6 +136,7 @@ numbers are informational and are not linted.
 | `"rotdelay"` | `ROT_DELAY_KEY` | 55 | Seconds a requested address rotation must wait before it can execute (Issue #234) |
 | `"pendrot"` | `PENDING_ROT_KEY` | 57 | Key prefix for a username's pending address rotation (Issue #234). |
 | `"pend_rev"` | `PENDING_REVERIFY_KEY` | 59 | — |
+| `"evtledger"` | `LAST_EVENT_LEDGER_KEY` | 107 | Ledger sequence of the last emitted event |
 | `"emrg_ps"` | `EMERGENCY_PAUSE_KEY` | 61 | — |
 | `"emerg_ts"` | `EMERGENCY_PAUSE_TS_KEY` | 62 | — |
 | `"guardian"` | `GUARDIAN_KEY` | 65 | Storage key for the designated guardian address (Issue #196) |

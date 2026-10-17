@@ -13,8 +13,10 @@
 
 use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, String, Vec};
 
-use soroban_sdk::testutils::Ledger as _;
-use trustbridge_contract::{ContractError, Role, TrustBridgeContract};
+use trustbridge_contract::{
+    AuditEventType, AuditLogEntry, ContractError, Role, RoleGrantCancelledEvent,
+    RoleGrantPendingEvent, TrustBridgeContract,
+};
 
 fn setup_test_env() -> (Env, Address, Address, Address, Address) {
     let env = Env::default();

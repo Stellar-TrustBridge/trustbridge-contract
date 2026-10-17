@@ -351,8 +351,13 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   -- set_bot_status --caller "$ADMIN" --github-username ci-bot --is_bot true
 ```
 
-- **Auth:** admin only. Dashboards exclude `is_bot == true` records from human
-  contributor stats. Note the arg is `--is_bot` (underscore), matching the ABI.
+- **Auth:** the contract admin **or the record's own registrant** (the
+  `stellar_address` on the record). Any other caller gets `NotAuthorized`; an
+  unknown username gets `NotRegistered`; the call is rejected with `Paused`
+  while the contract is paused. This matches the `set_bot_status` rows in
+  `tests/auth_matrix.csv` and the ABI reference.
+- Dashboards exclude `is_bot == true` records from human contributor stats.
+  Note the arg is `--is_bot` (underscore), matching the ABI.
 
 #### `adopt_network_tag` — tag a pre-network-tagging instance
 

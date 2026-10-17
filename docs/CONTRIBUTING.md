@@ -234,17 +234,30 @@ Configuration lives in `mutants.toml` at the repository root. The scope is
 intentionally limited to `src/utils.rs`; the rest of the crate is excluded to
 keep job time bounded.
 
+The `mutants` job in `.github/workflows/ci.yml` runs nightly (03:00 UTC) and
+on demand via **Actions → CI → Run workflow**; it does not run on pull
+requests because a full run is long: about 60 mutants, each needing an
+incremental build plus a test run (~18 minutes on an 8-core workstation;
+expect 30–60 minutes on a GitHub-hosted runner, hence the 90-minute job
+timeout). It fails when any mutant survives and uploads
+`mutants.out/missed.txt` (the survived list) and `outcomes.json` as the
+`mutants-survived` artifact. Each mutant is
+tested against the `utils::` unit tests and `tests/homoglyph_corpus.rs` only
+(`additional_cargo_test_args` in `mutants.toml`), which keeps runs short and
+independent of unrelated test failures elsewhere in the crate.
+
 ### Running locally
 
 ```bash
-# Install (one-time)
-cargo install cargo-mutants
+# Install (one-time; same version as CI)
+cargo install --locked cargo-mutants@27.1.0
 
-# Run mutations on utils.rs only
-cargo mutants --file src/utils.rs
+# Run mutations on utils.rs only (same command as CI; --config is required
+# because cargo-mutants otherwise only reads .cargo/mutants.toml)
+cargo mutants --config mutants.toml --file src/utils.rs
 
-# View survived mutants
-cat mutants-out/survived.txt
+# View survived mutants (cargo-mutants calls them "missed")
+cat mutants.out/missed.txt
 ```
 
 ### Interpreting results
@@ -322,7 +335,11 @@ rejected in code review.
 
 ---
 
-CI runs `cargo audit` and `cargo deny check` on every PR. These catch:
+## Supply-chain checks
+
+The `cargo-deny` CI job runs `cargo deny --config deny.toml check` on every
+pull request (including fork PRs) and push to `main`; any `deny`-level finding
+fails the job. These catch:
 
 - **Known vulnerabilities** in dependencies (via RustSec advisory database)
 - **Yanked crates** that should not be in the dependency tree
@@ -332,9 +349,8 @@ CI runs `cargo audit` and `cargo deny check` on every PR. These catch:
 ### Running locally
 
 ```bash
-cargo install --locked cargo-audit cargo-deny
-cargo audit
-cargo deny check
+cargo install --locked cargo-deny@0.20.2
+cargo deny --config deny.toml check
 ```
 
 ### Adding an exception

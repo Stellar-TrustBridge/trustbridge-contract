@@ -144,7 +144,7 @@ Before every mainnet deploy, complete both confirmation steps:
    ```bash
    make wasm-hash-pin
    # or manually:
-   sha256sum target/wasm32v1-none/release/trustbridge-contract.wasm
+   sha256sum target/wasm32v1-none/release/trustbridge_contract.wasm
    ```
    CI enforces this check automatically via the _Compute and verify WASM hash pin_ step.
    If the hash has intentionally changed (new release), run `make wasm-hash-update`, commit
@@ -589,12 +589,28 @@ artifact hash does not match the pinned value, preventing silent deploy of a wro
 
 ### How it works
 
-1. CI builds the WASM via `stellar contract build`.
-2. The _Compute and verify WASM hash pin_ CI step runs `sha256sum` on the artifact.
+1. The CI `make check` job builds the WASM via `stellar contract build`.
+2. Its _Compute and verify WASM hash pin_ step runs `make wasm-hash-pin WASM_HASH_STRICT=1`,
+   which runs `sha256sum` on `target/wasm32v1-none/release/trustbridge_contract.wasm`.
 3. The computed hash is compared to the value in `wasm-hash.pin`.
 4. A mismatch fails CI with clear instructions to update the pin.
 5. CI runs the gate with `WASM_HASH_STRICT=1`, so an unpinned `PLACEHOLDER` value also
    fails. The computed hash is written to the job summary so it can be copied into the pin.
+
+### Reproducible inputs
+
+The hash is only stable across machines when every input that ends up in the
+WASM is pinned. `stellar contract build` embeds the rustc version (`rsver`),
+the soroban-sdk version (`rssdkver`), and the CLI version (`cliver`) as
+contract metadata, so the pin depends on:
+
+- the Rust toolchain in `rust-toolchain.toml` (pinned, not `stable`),
+- Stellar CLI `26.1.0` (the CI `make check` job installs this exact release),
+- the committed `Cargo.lock` (dependency versions).
+
+Changing any of these is a WASM change: re-pin in the same commit. The build
+output does not depend on the checkout path, so a Linux workstation with the
+same three inputs reproduces the CI hash.
 
 ### Operator flow for (re)pinning
 
@@ -616,6 +632,17 @@ make wasm-hash-update
 git add wasm-hash.pin
 git commit -m "chore: bump wasm-hash.pin after <feature>"
 ```
+
+### Operator verification before deploy
+
+On the release commit, with the pinned toolchain and Stellar CLI 26.1.0:
+
+```bash
+make wasm-hash-pin WASM_HASH_STRICT=1   # must print "OK: WASM hash matches pin."
+```
+
+After uploading, `stellar contract fetch --id <CONTRACT_ID> --network <NETWORK> --out-file deployed.wasm`
+followed by `sha256sum deployed.wasm` must print the same value as `wasm-hash.pin`.
 
 ### Explorer verification
 
@@ -738,6 +765,66 @@ If intentional feature growth pushes the binary past 200 KB:
    - `.github/workflows/ci.yml` — the `WASM_SIZE_LIMIT:` env variable
 4. Document the new limit and the feature that required the bump in this table.
 5. Include before/after sizes in the PR description.
+
+### Local wasm-size gate
+
+Before opening a PR, always run the wasm size check locally to catch oversized
+builds early:
+
+```bash
+make wasm-size
+```
+
+This command builds the optimized release WASM and compares its size against
+`WASM_SIZE_LIMIT` in the Makefile. If the build exceeds the budget, the command
+exits with a non-zero status and prints the current size vs. the limit.
+
+**Important**: Always run `make wasm-size` after making changes to the contract
+code, especially when adding new features or dependencies. CI runs this check
+immediately after the release build, so a size increase beyond the budget will
+fail the CI job.
+
+### Intentional limit bump process
+
+If a new feature legitimately requires increasing the WASM size budget, follow
+this process:
+
+1. **Document the reason** in the PR description: explain why the size increase
+   is necessary and reference the relevant benchmark data (see
+   [BENCHMARK_BUDGETS.md](./BENCHMARK_BUDGETS.md)).
+2. **Update the Makefile**: increase `WASM_SIZE_LIMIT` in the Makefile.
+3. **Update CI**: increase the corresponding limit in
+   `.github/workflows/ci.yml`.
+4. **Update documentation**: update this section (DEPLOYMENT.md) to reflect the
+   new budget.
+5. **Get approval**: the PR must be reviewed and approved by maintainers before
+   merging.
+
+**Note**: Debug builds are not compared against the release limit. Only
+optimized release builds are checked.
+
+### Troubleshooting
+
+If `make wasm-size` reports a size that differs from what you expect:
+
+- **Stellar contract build vs. cargo build**: The check uses
+  `stellar contract build` (the same command used for deployment), not plain
+  `cargo build`. If you see a size discrepancy, ensure you're comparing release
+  builds, not debug builds.
+- **Feature flags**: Size can vary based on enabled feature flags. Check the
+  Makefile for any feature flags that affect the build.
+- **wasm-opt**: The release build runs wasm-opt for size optimization. If you're
+  building locally without wasm-opt, the size will be larger.
+- **wasm-hash.pin**: The wasm hash pin is separate from the size check. See the
+  [WASM Hash Verification](#wasm-hash-verification) section for details.
+
+### Related documentation
+
+- [BENCHMARK_BUDGETS.md](./BENCHMARK_BUDGETS.md) — Benchmark data and size
+  budgets for different features
+- [CONTRIBUTING.md](./CONTRIBUTING.md) — Contribution guidelines and quality
+  gates
+- [DEPLOYMENT.md](./DEPLOYMENT.md) — This file (deployment guide)
 
 ## Provenance digests: SBOM and source (Issue #224)
 

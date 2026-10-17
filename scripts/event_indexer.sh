@@ -244,6 +244,7 @@ upgrade_proposal_cancelled_event|upgrade_proposal_cancelled|upgrade
 batch_remove_proposed_event|batch_remove_proposed|batch
 batch_remove_executed_event|batch_remove_executed|batch
 batch_remove_cancelled_event|batch_remove_cancelled|batch
+audit_config_changed_event|audit_config_changed|audit
 TOPICS
 )"
 
