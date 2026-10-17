@@ -218,3 +218,203 @@ fn test_registering_more_after_a_cursor_is_issued_does_not_invalidate_it() {
         assert!(page2.records.len() >= 1);
     });
 }
+
+// ── INDEX_GEN_KEY after batch_remove mutations (Issue #215 / #219) ────────────
+//
+// `batch_remove` removes multiple entries in one call. Every removal must bump
+// INDEX_GEN_KEY so that any cursor issued before the call is invalidated.
+// These tests confirm:
+//   1. A cursor issued before `batch_remove` is rejected with `InvalidCursor`.
+//   2. Restarting from `cursor = None` after the batch succeeds and visits
+//      only the surviving records.
+//   3. A cursor issued *after* `batch_remove` works normally across pages.
+//   4. `batch_remove` of all remaining records leaves the registry empty and
+//      any old cursor invalid.
+
+#[test]
+fn test_batch_remove_invalidates_outstanding_cursor() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 10);
+
+        // Obtain a cursor pointing into the middle of the registry.
+        let page1 =
+            TrustBridgeContract::get_registered_paginated(env.clone(), None, 4).unwrap();
+        assert!(page1.has_more);
+        let stale = page1.next_cursor.clone().unwrap();
+
+        // Remove three entries via batch_remove — INDEX_GEN_KEY must be bumped.
+        let to_remove = soroban_sdk::vec![
+            &env,
+            s(&env, "user000"),
+            s(&env, "user001"),
+            s(&env, "user002"),
+        ];
+        TrustBridgeContract::batch_remove(env.clone(), admin.clone(), to_remove).unwrap();
+
+        // The pre-removal cursor must now be invalid.
+        let result =
+            TrustBridgeContract::get_registered_paginated(env.clone(), Some(stale), 4);
+        assert_eq!(
+            result,
+            Err(ContractError::InvalidCursor),
+            "cursor issued before batch_remove must be rejected"
+        );
+    });
+}
+
+#[test]
+fn test_batch_remove_cursor_restart_visits_survivors_exactly_once() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 8);
+
+        // Issue a cursor then remove two entries.
+        let page1 =
+            TrustBridgeContract::get_registered_paginated(env.clone(), None, 3).unwrap();
+        assert!(page1.has_more);
+
+        let to_remove = soroban_sdk::vec![
+            &env,
+            s(&env, "user000"),
+            s(&env, "user007"),
+        ];
+        TrustBridgeContract::batch_remove(env.clone(), admin.clone(), to_remove).unwrap();
+
+        // Restart from None and collect every surviving username.
+        let mut seen: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+        let mut cursor = None;
+        loop {
+            let page =
+                TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 3)
+                    .unwrap();
+            for i in 0..page.records.len() {
+                let (username, _) = page.records.get(i).unwrap();
+                seen.push(username);
+            }
+            if !page.has_more {
+                break;
+            }
+            cursor = page.next_cursor;
+        }
+
+        assert_eq!(seen.len(), 6, "6 records must survive after removing 2 of 8");
+        assert!(
+            !seen.iter().any(|u| *u == s(&env, "user000")),
+            "user000 must not appear after batch_remove"
+        );
+        assert!(
+            !seen.iter().any(|u| *u == s(&env, "user007")),
+            "user007 must not appear after batch_remove"
+        );
+    });
+}
+
+#[test]
+fn test_cursor_issued_after_batch_remove_works_normally() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 9);
+
+        // Remove three entries first.
+        let to_remove = soroban_sdk::vec![
+            &env,
+            s(&env, "user000"),
+            s(&env, "user001"),
+            s(&env, "user002"),
+        ];
+        TrustBridgeContract::batch_remove(env.clone(), admin.clone(), to_remove).unwrap();
+
+        // Now issue a fresh cursor and page through the remaining 6 records.
+        let mut seen: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+        let mut cursor = None;
+        loop {
+            let page =
+                TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 2)
+                    .unwrap();
+            for i in 0..page.records.len() {
+                let (username, _) = page.records.get(i).unwrap();
+                seen.push(username);
+            }
+            if !page.has_more {
+                break;
+            }
+            cursor = page.next_cursor;
+        }
+
+        assert_eq!(
+            seen.len(),
+            6,
+            "cursor issued after batch_remove must walk all 6 survivors"
+        );
+    });
+}
+
+#[test]
+fn test_batch_remove_all_records_leaves_empty_registry_and_invalidates_cursor() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 4);
+
+        // Capture a cursor before we wipe everything.
+        let page1 =
+            TrustBridgeContract::get_registered_paginated(env.clone(), None, 2).unwrap();
+        assert!(page1.has_more);
+        let stale = page1.next_cursor.clone().unwrap();
+
+        let to_remove = soroban_sdk::vec![
+            &env,
+            s(&env, "user000"),
+            s(&env, "user001"),
+            s(&env, "user002"),
+            s(&env, "user003"),
+        ];
+        TrustBridgeContract::batch_remove(env.clone(), admin.clone(), to_remove).unwrap();
+
+        // Stale cursor must be invalid.
+        let result =
+            TrustBridgeContract::get_registered_paginated(env.clone(), Some(stale), 2);
+        assert_eq!(result, Err(ContractError::InvalidCursor));
+
+        // Fresh walk of the now-empty registry must succeed and return 0 records.
+        let empty =
+            TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
+        assert_eq!(empty.records.len(), 0);
+        assert!(!empty.has_more);
+        assert!(empty.next_cursor.is_none());
+    });
+}
+
+#[test]
+fn test_index_gen_increments_once_per_batch_remove_call() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 5);
+
+        // Read the generation before any removal.
+        let gen_before =
+            trustbridge_contract::storage::get_index_gen(&env);
+
+        // batch_remove 2 entries — regardless of how many entries are removed,
+        // the generation must advance (at least once).
+        let to_remove = soroban_sdk::vec![
+            &env,
+            s(&env, "user000"),
+            s(&env, "user001"),
+        ];
+        TrustBridgeContract::batch_remove(env.clone(), admin.clone(), to_remove).unwrap();
+
+        let gen_after =
+            trustbridge_contract::storage::get_index_gen(&env);
+
+        assert!(
+            gen_after > gen_before,
+            "INDEX_GEN_KEY must be bumped by batch_remove (before={gen_before}, after={gen_after})"
+        );
+    });
+}

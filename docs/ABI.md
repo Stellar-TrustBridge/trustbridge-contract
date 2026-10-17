@@ -241,7 +241,28 @@ struct ChallengeRecord {
 | 35 | `RoleGrantNotReady` | `activate_role` before the grant's timelock elapsed (Issue #220) |
 | 36 | `ProvenanceMissing` | `assert_build` / `set_provenance_digests` before any provenance record exists (Issue #225) |
 | 37 | `ProvenanceMismatch` | `assert_build` given a hash that does not match stored provenance (Issue #225) |
-| 57 | `RoleExpired` | A role-gated privileged invocation was made at or after the role's expiry timestamp |
+| 39 | `StagedWasmMismatch` | `upgrade` / `execute_upgrade` given a WASM hash that does not match the staged-WASM slot (Issue #300) |
+| 40 | `UpgradeProposalAlreadyPending` | `propose_multisig_upgrade` called while a proposal is already live (Issue #301) |
+| 41 | `NoUpgradeProposalPending` | `approve_upgrade` / `execute_upgrade` / `cancel_upgrade_proposal` called with no live proposal (Issue #301) |
+| 42 | `UpgradeProposalAlreadyApproved` | `approve_upgrade` called by an address that already approved this proposal (Issue #301) |
+| 43 | `UpgradeProposalDelayActive` | `execute_upgrade` called before the proposal's delay elapsed (Issue #301) |
+| 44 | `UpgradeProposalInsufficientApprovals` | `execute_upgrade` called before the approval threshold was met (Issue #301) |
+| 46 | `FallbackListFull` | `register` given more fallback addresses than `MAX_FALLBACK_ADDRESSES` (Issue #238) |
+| 47 | `UsernameTaken` | `rename` called with a `new_username` that is already registered (Issue #233) |
+| 48 | `RotationRequired` | `register` asked to change the registered address while the rotation delay is armed (Issue #234) |
+| 49 | `RotationPending` | A rotation is already pending for this username (Issue #234) |
+| 50 | `NoRotationPending` | `execute_address_rotation` / `cancel_address_rotation` called with no pending rotation (Issue #234) |
+| 51 | `RotationNotReady` | `execute_address_rotation` called before the delay has elapsed (Issue #234) |
+| 52 | `InvalidCursor` | A pagination cursor no longer decodes against the current registry state (Issue #215) |
+| 53 | `VerifyRateLimited` | A non-admin caller would exceed its per-ledger verify/revoke cap (Issue #292) |
+| 54 | `DualControlRequired` | `batch_remove` called with a batch larger than the dual-control threshold — use `propose_batch_remove` / `execute_batch_remove` (Issue #219) |
+| 55 | `BatchRemoveProposalPending` | `propose_batch_remove` called while a proposal is already pending (Issue #219) |
+| 56 | `NoPendingBatchRemove` | `execute_batch_remove` / `cancel_batch_remove` called with no live proposal (Issue #219) |
+| 57 | `RoleExpired` | A role-gated privileged invocation was made at or after the role's expiry timestamp (Issue #428) |
+| 58 | `OracleProofBadLayout` | `verify_with_proof` given a proof whose XDR layout is invalid |
+| 59 | `OracleProofNotAllowlisted` | `verify_with_proof` oracle address is not on the allowlist |
+| 60 | `OracleProofExpired` | `verify_with_proof` proof timestamp is past its validity window |
+| 61 | `OracleProofBadSignature` | `verify_with_proof` Ed25519 signature does not verify against the oracle key |
 
 > **`NetworkMismatch` moved from 21 to 30.** This table previously listed it at
 > code 21 while the enum had `InvalidPauseReason` there and no `NetworkMismatch`
