@@ -168,7 +168,7 @@ fn test_merkle_root_present_on_export_page() {
         }
         TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
 
-        let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+        let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         assert_eq!(page.records.len(), 3);
         assert_ne!(page.merkle_root, BytesN::from_array(&env, &[0u8; 32]));
     });
@@ -179,7 +179,7 @@ fn test_empty_registry_export_has_all_zero_root() {
     let (env, _admin, contract_id) = setup();
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+        let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         assert_eq!(page.records.len(), 0);
         assert_eq!(page.merkle_root, BytesN::from_array(&env, &[0u8; 32]));
     });
@@ -230,7 +230,7 @@ fn test_included_member_proves_inclusion_and_non_member_fails() {
         }
         TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "carol")).unwrap();
 
-        let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+        let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         assert_eq!(page.records.len(), 5);
 
         // Rebuild the leaf set exactly as documented, independent of the
@@ -294,7 +294,7 @@ fn test_single_record_page_root_equals_its_own_leaf() {
         )
         .unwrap();
 
-        let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+        let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         assert_eq!(page.records.len(), 1);
         let expected = leaf_hash(&env, &s(&env, "octocat"), &addr, false);
         assert_eq!(page.merkle_root, expected);
@@ -361,11 +361,11 @@ fn test_v1_export_merkle_golden_vectors() {
             expected_carol
         );
 
-        let single = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 1).unwrap();
+        let single = TrustBridgeContract::get_registered_paginated(env.clone(), None, 1).unwrap();
         assert_eq!(single.records.len(), 1);
         assert_eq!(single.merkle_root, expected_alice);
 
-        let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+        let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         assert_eq!(page.records.len(), 3);
         assert_eq!(
             page.merkle_root,

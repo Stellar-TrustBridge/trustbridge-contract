@@ -396,17 +396,21 @@ mod tests {
         env.mock_all_auths();
 
         env.as_contract(&contract_id, || {
-            let _page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+            let _page =
+                TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         });
 
         // Verify that get_registered_paginated indeed checked the admin's authorization
         let auths = env.auths();
         assert_eq!(auths.len(), 1);
-        let (auth_addr, invocation) = auths.get(0).unwrap();
-        assert_eq!(auth_addr, admin);
-        assert_eq!(
-            invocation.function.name,
-            soroban_sdk::Symbol::new(&env, "get_registered_paginated")
-        );
+        let (auth_addr, invocation) = auths.first().unwrap();
+        assert_eq!(*auth_addr, admin);
+        match &invocation.function {
+            soroban_sdk::testutils::AuthorizedFunction::Contract((_, name, _)) => assert_eq!(
+                *name,
+                soroban_sdk::Symbol::new(&env, "get_registered_paginated")
+            ),
+            other => panic!("unexpected authorized function: {other:?}"),
+        }
     }
 }

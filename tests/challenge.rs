@@ -61,16 +61,15 @@ fn start_challenge(env: &Env, contract_id: &Address, admin: &Address, name: &str
 /// True when the contract emitted an event whose first topic (the event-type
 /// symbol) equals `symbol` — e.g. `"challenge_started_event"`.
 fn has_event(env: &Env, contract_id: &Address, symbol: Symbol) -> bool {
-    for (source, topics, _data) in env.events().all() {
-        if source == *contract_id {
-            if let Some(topic) = topics.get(0) {
-                if Symbol::try_from_val(env, &topic).unwrap() == symbol {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+    let want = soroban_sdk::xdr::ScVal::try_from_val(env, &symbol.to_val()).unwrap();
+    env.events()
+        .all()
+        .filter_by_contract(contract_id)
+        .events()
+        .iter()
+        .any(|e| match &e.body {
+            soroban_sdk::xdr::ContractEventBody::V0(v0) => v0.topics.first() == Some(&want),
+        })
 }
 
 // ── Happy path ────────────────────────────────────────────────────────────────

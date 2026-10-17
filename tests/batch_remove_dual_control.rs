@@ -23,11 +23,13 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    testutils::{Address as _, Events as _, Ledger as _},
-    Address, Env, String, Symbol, TryFromVal, Vec,
+    testutils::{Address as _, Events as _, Ledger as _, MockAuth, MockAuthInvoke},
+    Address, Env, IntoVal, String, Symbol, TryFromVal, Vec,
 };
 
-use trustbridge_contract::{BatchSummary, ContractError, Role, TrustBridgeContract};
+use trustbridge_contract::{
+    BatchSummary, ContractError, Role, TrustBridgeContract, TrustBridgeContractClient,
+};
 
 /// 24 h proposal TTL, kept in sync with
 /// `storage::BATCH_REMOVE_PROPOSAL_TTL_SECS`.
@@ -81,16 +83,15 @@ fn register_n(env: &Env, contract_id: &Address, n: u32) -> Vec<String> {
 /// True when the contract emitted an event whose first topic (the event-type
 /// symbol) equals `symbol` — e.g. `"batch_remove_proposed_event"`.
 fn has_event(env: &Env, contract_id: &Address, symbol: Symbol) -> bool {
-    for (source, topics, _data) in env.events().all() {
-        if source == *contract_id {
-            if let Some(topic) = topics.get(0) {
-                if Symbol::try_from_val(env, &topic).unwrap() == symbol {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+    let want = soroban_sdk::xdr::ScVal::try_from_val(env, &symbol.to_val()).unwrap();
+    env.events()
+        .all()
+        .filter_by_contract(contract_id)
+        .events()
+        .iter()
+        .any(|e| match &e.body {
+            soroban_sdk::xdr::ContractEventBody::V0(v0) => v0.topics.first() == Some(&want),
+        })
 }
 
 // ── Threshold behaviour ───────────────────────────────────────────────────────
@@ -554,16 +555,23 @@ fn vec_from(env: &Env, names: Vec<String>, start: u32, len: usize) -> Vec<String
 fn test_auth_matrix_set_batch_remove_threshold_random() {
     let (env, _admin, _second, contract_id) = setup();
     let random = Address::generate(&env);
+    let client = TrustBridgeContractClient::new(&env, &contract_id);
 
-    env.mock_all_auths();
-    env.as_contract(&contract_id, || {
-        let res = TrustBridgeContract::set_batch_remove_threshold(env.clone(), random);
-        assert_eq!(
-            res,
-            Err(ContractError::NotAuthorized),
-            "set_batch_remove_threshold must reject a non-admin caller with NotAuthorized"
-        );
-    });
+    // Only `random` signs; the entry point requires the contract admin's auth.
+    env.mock_auths(&[MockAuth {
+        address: &random,
+        invoke: &MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_batch_remove_threshold",
+            args: (5u32,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(
+        client.try_set_batch_remove_threshold(&5).is_err(),
+        "set_batch_remove_threshold must reject a non-admin signer"
+    );
+    assert_eq!(client.get_batch_remove_threshold(), 0);
 }
 
 /// PB2: A `Role::Admin` holder that is **not** the contract admin cannot propose.

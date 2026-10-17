@@ -33,16 +33,28 @@ reference and migration guide from manual probing.
 
 ## Contract Modules
 
+Every `src/*.rs` file on disk is listed here — no more, no fewer
+(`audit.rs`, `batch.rs`, `domain.rs`, `error.rs`, `events.rs`, `lib.rs`,
+`merkle.rs`, `multisig_upgrade.rs`, `oracle_proof.rs`, `staged_wasm.rs`,
+`storage.rs`, `utils.rs`, `version.rs`). `src/lib.rs` owns the public
+contract interface (`TrustBridgeContract`) and all business logic; every
+other module is a helper it composes. Test-only code lives outside `src/`
+(see below) — no `src/` module exists solely for tests.
+
 | Module | Responsibility |
 |--------|----------------|
 | `src/lib.rs` | Public contract interface (`TrustBridgeContract`), business logic, unit tests |
-| `src/storage.rs` | Storage keys, `ContributorRecord` / `Stats` types, persistence helpers |
-| `src/events.rs` | Soroban contract events with topics |
+| `src/storage.rs` | Storage keys, `ContributorRecord` / `Stats` types, persistence helpers, flat/chunked index maintenance, opaque cursor pagination internals (Issue #215) |
+| `src/events.rs` | Soroban contract events with topics (`#[contractevent]` structs) |
 | `src/error.rs` | Typed error enum (`ContractError`) and off-chain retry classification (`ErrorCategory`) |
-| `src/audit.rs` | Append-only audit-log entry type and helpers |
+| `src/audit.rs` | Append-only audit-log entry type (`AuditLogEntry`, `AuditConfig`, `AuditStats`) and helpers |
 | `src/batch.rs` | Batch verification implementation, configuration, limits, and tests |
+| `src/merkle.rs` | Export-page Merkle leaf/node hashing and root construction (Issue #216) |
+| `src/multisig_upgrade.rs` | M-of-N multisig upgrade proposal flow (Issue #301) |
+| `src/oracle_proof.rs` | Oracle allowlist and signed proof-of-ownership verification |
+| `src/staged_wasm.rs` | Staged-WASM intent slot gating `upgrade` (Issue #300) |
 | `src/domain.rs` | `EventDomain` (contract id, network id, version) attached to every event |
-| `src/utils.rs` | Username validation and other pure helpers |
+| `src/utils.rs` | Username validation (incl. case folding) and other pure helpers |
 | `src/version.rs` | Contract version type, compatibility checks, cross-contract read gating |
 
 > There is no separate registry-read module. During a migration window the
@@ -50,6 +62,85 @@ reference and migration guide from manual probing.
 > it directly through the public read surface (see `docs/ABI.md` §
 > Cross-Contract Read Interface); a `registry_read_stub.rs` trait fixture was
 > staged for this and removed as unused (Issue #297).
+
+### `lib.rs` re-export strategy
+
+Submodules stay private (`mod audit; mod batch; …` in `lib.rs`) and the
+cross-crate surface is re-exported with `pub use`: contract types
+(`AuditConfig`, `AuditLogEntry`, `Role`, `Stats`, `PendingRoleGrant`,
+`ExportPage`, …), all events, `ContractError`, and the `OracleProof` /
+`StagedWasm` / `Version` helpers. External consumers (integration tests, SDK
+bindings) import everything from the crate root
+(`trustbridge_contract::{TrustBridgeContract, Role, …}`) and never address a
+submodule path — so a future module split only touches `lib.rs` imports, not
+downstream callers.
+
+### Module dependencies
+
+```mermaid
+flowchart TD
+    lib[lib.rs<br/>TrustBridgeContract] --> storage
+    lib --> events
+    lib --> error
+    lib --> audit
+    lib --> batch
+    lib --> merkle
+    lib --> multisig_upgrade
+    lib --> oracle_proof
+    lib --> staged_wasm
+    lib --> domain
+    lib --> utils
+    lib --> version
+    storage --> audit
+    storage --> error
+    storage --> utils
+    batch --> storage
+    batch --> utils
+    batch --> audit
+    batch --> error
+    events --> domain
+    merkle --> storage
+    oracle_proof --> storage
+    oracle_proof --> error
+    staged_wasm --> storage
+```
+
+`storage.rs` is the hub: index/counter/cursor/audit persistence plus the key
+constants everything else names. `events.rs` only depends on `domain.rs`
+(the `EventDomain` stamped on each event). Nothing depends on `lib.rs`.
+
+### Test locations by domain
+
+| Domain | Tests |
+|--------|-------|
+| Cursor pagination (Issues #215, #650) | `tests/cursor_pagination.rs`, `fuzz/fuzz_targets/export_cursor.rs`, `tests/fuzz/seeds.txt` |
+| Pagination parity across the three export APIs (Issue #302) | `tests/pagination_parity.rs` |
+| Export page layout golden | `tests/export_page_layout.rs`, `abi/export_page.layout.golden` |
+| Timelocked role grants (Issues #220, #648) | `tests/integration.rs`, `tests/auth_matrix.csv` |
+| Audit reads (Issue #646) | `tests/integration.rs`, `src/lib.rs` unit tests |
+| Dual-control batch_remove (Issue #219) | `tests/batch_remove_dual_control.rs` |
+| Challenge flow (Issue #214) | `tests/challenge.rs` |
+| Merkle proofs (Issue #216) | `tests/merkle_export.rs` |
+| Error-code stability (Issue #402) | `tests/contract_error_codes.rs`, `abi/contract_error_codes.golden` |
+| Bindings golden | `tests/bindings_golden.rs` |
+| Counter model proofs (Issue #241) | `tests/counter_proofs.rs` |
+| Property fuzz suite | `src/lib.rs` unit tests, `tests/fuzz/seeds.txt` — see `docs/REGISTRY_INVARIANTS.md` |
+
+Related docs: [ABI](ABI.md) (entry-point reference, pagination selection
+guide, audit reads) · [REGISTRY_INVARIANTS](REGISTRY_INVARIANTS.md)
+(counter/export invariants I1–I10, fuzzing) ·
+[ADMIN_RUNBOOK](ADMIN_RUNBOOK.md) (operator flows).
+
+### Notes
+
+- The contract crate is `#![no_std]` (`src/lib.rs`): `no_std`-incompatible
+  crates (e.g. `proptest`) cannot be used in-contract, so the property suite
+  uses a small xorshift generator instead (see
+  `docs/REGISTRY_INVARIANTS.md`). Integration tests under `tests/` link std
+  normally.
+- When splitting a module (e.g. a future pagination or governance module),
+  update this table, the sketch above, and the `pub use` list in `lib.rs` in
+  the same PR.
 
 ---
 

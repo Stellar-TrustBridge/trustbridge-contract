@@ -514,7 +514,7 @@ tests validate this property against 78+ known confusable characters and ensure
 no bypass path exists at the `register()` entry point.
 
 Run the full corpus: `cargo test homoglyph` or `cargo test unicode`
-(CI: `cargo test --test homoglyph_corpus` on every pull request).
+(CI: the `homoglyph_corpus` job runs `cargo test --test homoglyph_corpus` on every pull request).
 
 ### Performance
 
@@ -733,7 +733,9 @@ Dashboard operators and auditors need the full failure surface of the dual-contr
 invalid state transition across all six entrypoints. Each cell maps to a test in
 `tests/batch_remove_dual_control.rs`.
 
-Cross-reference: [`tests/auth_matrix.csv`](../tests/auth_matrix.csv) ·
+Cross-reference: [`tests/auth_matrix.csv`](../tests/auth_matrix.csv) (every row is
+executed by [`tests/auth_matrix.rs`](../tests/auth_matrix.rs); see
+[CONTRIBUTING — Authorization matrix](CONTRIBUTING.md#authorization-matrix)) ·
 [ABI reference](ABI.md) · [ADMIN_RUNBOOK.md — Dual-Control batch_remove](ADMIN_RUNBOOK.md)
 
 Auth rules in brief:
@@ -948,38 +950,38 @@ hash for upgrades, not an identity claim.)
 - `get_oracle_allowlist(env)` — public read of the current allowlist.
 - `OracleProof { oracle_pubkey, message, signature, expires_at }` — a signed
   attestation from an off-chain oracle.
-- `verify_with_proof(env, proof)` — checks, in order: the signing key is on
-  the allowlist (`NotAuthorized` if not, including an empty allowlist),
-  the proof has not expired (`expires_at == 0` disables the check —
-  production callers should always set a real value), and finally that
+- `verify_with_proof(env, proof)` — checks, in order: the proof is
+  structurally well-formed (`OracleProofBadLayout`, 58: empty `message` or
+  all-zero `signature`), the signing key is on the allowlist
+  (`OracleProofNotAllowlisted`, 59, including an empty allowlist), the proof
+  has not expired (`OracleProofExpired`, 60; `expires_at == 0` disables the
+  check — production callers should always set a real value), the signature
+  is a canonical encoding (`OracleProofBadSignature`, 61), and finally that
   `signature` is a valid Ed25519 signature over `message` under
   `oracle_pubkey`.
 
-**Invalid proof fails.** An unallowlisted key or an expired proof returns
-`Err(ContractError::NotAuthorized)`. An allowlisted key with a signature that
-does not verify traps the host invocation instead of returning `Err` —
-`soroban_sdk`'s `Env::crypto().ed25519_verify` has no non-panicking form, so
-this fails the exact same way an invalid `require_auth()` signature already
-does everywhere else in this contract. Tests in `src/oracle_proof.rs` cover
-both failure shapes with a fixed test keypair (`valid_allowlisted_proof_passes`,
+**Invalid proof fails.** Each rejection above returns its own `Err` code. An
+allowlisted key with a canonically encoded signature that does not verify
+traps the host invocation (`Error(Crypto, InvalidInput)`) instead of
+returning `Err` — `soroban_sdk`'s `Env::crypto().ed25519_verify` has no
+non-panicking form, so this fails the exact same way an invalid
+`require_auth()` signature already does everywhere else in this contract.
+Tests in `src/oracle_proof.rs` cover every path with a fixed test keypair
+(`valid_allowlisted_proof_passes`, `bad_layout_is_rejected_with_layout_code`,
 `non_allowlisted_key_is_rejected`, `expired_proof_is_rejected`,
-`tampered_signature_traps`).
+`bad_signature_is_rejected_with_signature_code`,
+`wellformed_invalid_signature_traps`); run them with
+`cargo test oracle_proof`.
 
 **This is a signature-check interface, not GitHub verification.** The
 contract has no way to talk to the GitHub API and this change does not give
-it one — see **Out of Scope** above, which still applies unchanged. What an
-oracle signs, and how it constructs `message` (e.g. binding a specific
-`github_username` + `stellar_address` + expiry into the signed bytes so a
-proof can't be replayed against a different subject), is an off-chain
-contract between the oracle operator and whoever consumes its proofs; it is
-not parsed or enforced by `verify_with_proof` itself.
+it one — see **Out of Scope** above, which still applies unchanged. How the
+oracle confirms ownership before signing is an off-chain contract between the
+oracle operator and the admin who allowlists its key.
 
 **Explicitly out of scope:**
 
-- Wiring a valid `OracleProof` into `verify()`/`batch_verify()` as an
-  alternative to admin/`Role::Verifier` auth. This module ships the
-  primitive and its tests; integrating it into the verification entry
-  points is separate follow-up work.
+- Accepting oracle proofs in `batch_verify()`.
 - Running a production GitHub oracle service that produces these proofs.
 
 ---
@@ -1199,7 +1201,17 @@ them were not recorded at all.
 | 10 | `CONTRACT_PAUSED` | `pause`, `emergency_pause`, `set_paused(true)` |
 | 11 | `CONTRACT_UNPAUSED` | `unpause`, `clear_emergency_pause`, `set_paused(false)` |
 | 12 | `ROLE_CHANGED` | `set_role`, `activate_role` |
-| 13 | `CONTRACT_UPGRADED` | `upgrade` |
+| 13 | `CONTRACT_UPGRADED` | `upgrade`, `execute_upgrade` (multisig path) |
+| 14 | `AUDIT_CONFIG_CHANGED` | `set_audit_config` |
+
+`AdminAction` entries are also written for the multisig upgrade governance
+paths: `set_upgrade_threshold`, `propose_multisig_upgrade`,
+`approve_upgrade`, and `cancel_upgrade_proposal` each record an
+`AuditEventType::AdminAction` entry with a `details` field naming the
+function, so an audit reader can distinguish governance configuration from
+other admin actions. `execute_upgrade` records `ContractUpgraded` (code 13)
+because the WASM was actually swapped, matching the single-admin `upgrade`
+path for indexer consistency.
 
 Codes and strings are **append-only**, for the same reason `ContractError`'s
 are: an indexer stores them, so renumbering or renaming silently re-labels

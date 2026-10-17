@@ -17,7 +17,13 @@
 #![cfg(test)]
 
 use soroban_sdk::{Env, String};
-use trustbridge_contract::utils::is_valid_github_username;
+use trustbridge_contract::TrustBridgeContract;
+
+/// Routes through the public `is_username_valid` entry point, which delegates
+/// to `utils::is_valid_github_username` (the `utils` module is crate-private).
+fn is_valid_github_username(username: &String) -> bool {
+    TrustBridgeContract::is_username_valid(username.env().clone(), username.clone())
+}
 
 fn s(env: &Env, text: &str) -> String {
     String::from_str(env, text)

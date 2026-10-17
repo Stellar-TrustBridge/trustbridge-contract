@@ -6,10 +6,12 @@
 # To update this pin after an intentional WASM change:
 #   1. Build the WASM: make build
 #   2. Run: make wasm-hash-update
-#      (or manually: sha256sum target/wasm32v1-none/release/trustbridge-contract.wasm)
+#      (or manually: sha256sum target/wasm32v1-none/release/trustbridge_contract.wasm)
 #   3. Copy the new hash here, replacing the line below.
 #   4. Commit the updated pin alongside the WASM-changing commit.
 #
 # Never update the pin without a corresponding intentional code change.
+# Reproducible only with rust-toolchain.toml's pinned rustc, Stellar CLI
+# 26.1.0, and the committed Cargo.lock (all three are embedded in the WASM).
 # See docs/DEPLOYMENT.md#wasm-hash-verification for operator verification steps.
-PLACEHOLDER
+da94f06adb42560232352ba1b88ab5f3dd9275b684a80056883630ab9a45004d

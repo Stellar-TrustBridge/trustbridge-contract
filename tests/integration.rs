@@ -11,10 +11,12 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, String};
+use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, String, Vec};
 
-use soroban_sdk::testutils::Ledger as _;
-use trustbridge_contract::{ContractError, Role, TrustBridgeContract};
+use trustbridge_contract::{
+    AuditEventType, AuditLogEntry, ContractError, Role, RoleGrantCancelledEvent,
+    RoleGrantPendingEvent, TrustBridgeContract,
+};
 
 fn setup_test_env() -> (Env, Address, Address, Address, Address) {
     let env = Env::default();
@@ -35,6 +37,7 @@ fn s(env: &Env, text: &str) -> String {
 }
 
 fn record_ttl(env: &Env, contract_id: &Address, username: &String) -> u32 {
+    use soroban_sdk::testutils::storage::Persistent as _;
     env.as_contract(contract_id, || {
         env.storage()
             .persistent()
@@ -98,7 +101,7 @@ fn test_near_expiry_record_is_revived_by_keeper_extension() {
         usernames.push_back(username.clone());
         assert_eq!(
             TrustBridgeContract::extend_registry_ttl(env.clone(), usernames),
-            1
+            Ok(1)
         );
     });
 
@@ -821,7 +824,7 @@ fn test_integration_get_registered_paginated_not_initialized() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         assert_eq!(
-            TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10),
+            TrustBridgeContract::get_registered_paginated(env.clone(), None, 10),
             Err(ContractError::NotInitialized),
             "get_registered_paginated before init"
         );
@@ -835,7 +838,7 @@ fn test_integration_get_public_paginated_not_initialized() {
     let contract_id = env.register(TrustBridgeContract, ());
     env.as_contract(&contract_id, || {
         assert_eq!(
-            TrustBridgeContract::get_public_paginated(env.clone(), 0, 10),
+            TrustBridgeContract::get_public_paginated(env.clone(), None, 10),
             Err(ContractError::NotInitialized),
             "get_public_paginated before init"
         );
@@ -882,7 +885,7 @@ fn test_integration_guards_lifted_after_initialization() {
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+        let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         assert_eq!(page.records.len(), 1);
     });
 }
@@ -923,7 +926,7 @@ fn test_integration_paginated_export_after_multiple_removals() {
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+        let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         assert_eq!(page.records.len(), 2);
         assert_eq!(page.total, 2);
         assert!(!page.has_more);
@@ -956,7 +959,7 @@ fn test_integration_public_paginated_after_peer_removal() {
         TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "bob")).unwrap();
     });
     env.as_contract(&contract_id, || {
-        let page = TrustBridgeContract::get_public_paginated(env.clone(), 0, 10).unwrap();
+        let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
         assert_eq!(
             page.records.len(),
             2,
@@ -1316,7 +1319,7 @@ fn test_integration_middle_user_removal_index_compaction() {
     // Verify paginated export is consistent
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+        let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         assert_eq!(
             page.records.len(),
             2,
@@ -1332,7 +1335,7 @@ fn test_integration_middle_user_removal_index_compaction() {
 
     // Verify public paginated endpoint is also consistent
     env.as_contract(&contract_id, || {
-        let page = TrustBridgeContract::get_public_paginated(env.clone(), 0, 10).unwrap();
+        let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
         assert_eq!(
             page.records.len(),
             2,
@@ -2357,7 +2360,7 @@ fn test_compact_index_no_op_on_dense_registry() {
     // Snapshot paginated results before compaction.
     env.mock_all_auths();
     let before_page = env.as_contract(&contract_id, || {
-        trustbridge_contract::TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10)
+        trustbridge_contract::TrustBridgeContract::get_registered_paginated(env.clone(), None, 10)
             .unwrap()
     });
 
@@ -2369,9 +2372,12 @@ fn test_compact_index_no_op_on_dense_registry() {
     // After compaction the same records must be returned.
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let after_page =
-            trustbridge_contract::TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10)
-                .unwrap();
+        let after_page = trustbridge_contract::TrustBridgeContract::get_registered_paginated(
+            env.clone(),
+            None,
+            10,
+        )
+        .unwrap();
         assert_eq!(
             before_page.records.len(),
             after_page.records.len(),
@@ -2440,9 +2446,12 @@ fn test_compact_index_after_sparse_removals_restores_dense_pagination() {
     // Paginated admin endpoint must return exactly the 3 surviving users.
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let page =
-            trustbridge_contract::TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10)
-                .unwrap();
+        let page = trustbridge_contract::TrustBridgeContract::get_registered_paginated(
+            env.clone(),
+            None,
+            10,
+        )
+        .unwrap();
         assert_eq!(
             page.records.len(),
             3,
@@ -2468,7 +2477,7 @@ fn test_compact_index_after_sparse_removals_restores_dense_pagination() {
     // Public paginated endpoint must agree.
     env.as_contract(&contract_id, || {
         let page =
-            trustbridge_contract::TrustBridgeContract::get_public_paginated(env.clone(), 0, 10)
+            trustbridge_contract::TrustBridgeContract::get_public_paginated(env.clone(), None, 10)
                 .unwrap();
         assert_eq!(page.records.len(), 3);
     });
@@ -2502,9 +2511,12 @@ fn test_compact_index_single_entry_registry() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let page =
-            trustbridge_contract::TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10)
-                .unwrap();
+        let page = trustbridge_contract::TrustBridgeContract::get_registered_paginated(
+            env.clone(),
+            None,
+            10,
+        )
+        .unwrap();
         assert_eq!(page.records.len(), 1);
         assert_eq!(page.records.get(0).unwrap().0, s(&env, "solo"));
     });
@@ -2586,9 +2598,12 @@ fn test_compact_index_is_idempotent() {
     // Also confirm pagination is the same after both compactions.
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let page =
-            trustbridge_contract::TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10)
-                .unwrap();
+        let page = trustbridge_contract::TrustBridgeContract::get_registered_paginated(
+            env.clone(),
+            None,
+            10,
+        )
+        .unwrap();
         assert_eq!(
             page.records.len(),
             2,
@@ -2785,7 +2800,7 @@ fn test_protocol_upgrade_rehearsal() {
         TrustBridgeContract::get_role(env.clone(), upgrader.clone())
     });
     let pre_paginated = env.as_contract(&contract_id, || {
-        TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap()
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap()
     });
     let pre_health = env.as_contract(&contract_id, || {
         TrustBridgeContract::get_health(env.clone()).unwrap()
@@ -2906,7 +2921,7 @@ fn test_protocol_upgrade_rehearsal() {
     );
 
     let post_paginated = env.as_contract(&contract_id, || {
-        TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap()
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap()
     });
     assert_eq!(
         pre_paginated.total, post_paginated.total,
@@ -3062,7 +3077,7 @@ fn test_conformance_public_reads_available_while_paused() {
     // ── Fallible public reads: must NOT return `Err(Paused)` while paused ────
     env.as_contract(&contract_id, || {
         // The regression this issue is really about.
-        let page = TrustBridgeContract::get_public_paginated(env.clone(), 0, 10);
+        let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10);
         assert_ne!(
             page,
             Err(ContractError::Paused),
@@ -3172,7 +3187,7 @@ fn test_conformance_admin_reads_while_paused_need_auth_not_pause() {
     env.as_contract(&contract_id, || {
         assert!(TrustBridgeContract::get_all_registered(env.clone()).is_ok());
         assert!(TrustBridgeContract::get_registered_page(env.clone(), 0, 10).is_ok());
-        assert!(TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).is_ok());
+        assert!(TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).is_ok());
     });
 
     // None of them fail with `Paused` (they fail auth, not pause, for a
@@ -3215,16 +3230,17 @@ fn test_issue306_remove_compact_reregister_counter_parity() {
         // at the max page limit).
         let mut pages = 0u32;
         let mut seen = 0u32;
-        let mut cursor = 0u32;
+        let mut cursor: Option<soroban_sdk::BytesN<8>> = None;
         loop {
             let page =
-                TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 100).unwrap();
+                TrustBridgeContract::get_registered_paginated(env.clone(), cursor.clone(), 100)
+                    .unwrap();
             pages += 1;
             seen += page.records.len() as u32;
             if !page.has_more {
                 break;
             }
-            cursor += page.records.len() as u32;
+            cursor = page.next_cursor.clone();
         }
         assert!(
             pages >= 4,
@@ -3344,16 +3360,17 @@ fn test_issue306_remove_compact_reregister_counter_parity() {
         // see every live record exactly once (I5/I9-style check for the
         // compacted registry).
         let mut seen = 0u32;
-        let mut cursor = 0u32;
+        let mut cursor: Option<soroban_sdk::BytesN<8>> = None;
         loop {
             let page =
-                TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 100).unwrap();
+                TrustBridgeContract::get_registered_paginated(env.clone(), cursor.clone(), 100)
+                    .unwrap();
             let page_size = page.records.len() as u32;
             seen += page_size;
             if !page.has_more {
                 break;
             }
-            cursor += page_size;
+            cursor = page.next_cursor.clone();
         }
         assert_eq!(seen, stats.total, "paginated walk must visit every record");
         assert_eq!(seen, all.len() as u32);

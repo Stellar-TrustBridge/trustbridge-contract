@@ -198,7 +198,7 @@ fn test_parity_middle_removal_get_registered_page() {
             "After middle removal, should return 2 records"
         );
 
-        let names: Vec<String> = result.iter().map(|(name, _)| name).collect();
+        let names: std::vec::Vec<String> = result.iter().map(|(name, _)| name).collect();
         assert!(names.contains(&s(&env, "alice")));
         assert!(names.contains(&s(&env, "carol")));
         assert!(
@@ -232,7 +232,7 @@ fn test_parity_middle_removal_get_registered_paginated() {
             "After middle removal, should return 2 records"
         );
 
-        let names: Vec<String> = page.records.iter().map(|(name, _)| name).collect();
+        let names: std::vec::Vec<String> = page.records.iter().map(|(name, _)| name).collect();
         assert!(names.contains(&s(&env, "alice")));
         assert!(names.contains(&s(&env, "carol")));
         assert!(
@@ -265,7 +265,7 @@ fn test_parity_middle_removal_get_public_paginated() {
             "After middle removal, should return 2 records"
         );
 
-        let names: Vec<String> = page.records.iter().map(|(name, _)| name).collect();
+        let names: std::vec::Vec<String> = page.records.iter().map(|(name, _)| name).collect();
         assert!(names.contains(&s(&env, "alice")));
         assert!(names.contains(&s(&env, "carol")));
         assert!(
@@ -360,7 +360,7 @@ fn test_parity_multi_page_get_registered_page() {
     // Register 5 users
     for i in 0..5 {
         let user = Address::generate(&env);
-        let username = alloc::format!("user{}", i);
+        let username = std::format!("user{}", i);
         register_user(&env, &contract_id, &username, &user);
     }
 
@@ -405,7 +405,7 @@ fn test_parity_multi_page_get_registered_paginated() {
     // Register 5 users
     for i in 0..5 {
         let user = Address::generate(&env);
-        let username = alloc::format!("user{}", i);
+        let username = std::format!("user{}", i);
         register_user(&env, &contract_id, &username, &user);
     }
 
@@ -444,7 +444,7 @@ fn test_parity_multi_page_get_public_paginated() {
     // Register 5 users
     for i in 0..5 {
         let user = Address::generate(&env);
-        let username = alloc::format!("user{}", i);
+        let username = std::format!("user{}", i);
         register_user(&env, &contract_id, &username, &user);
     }
 

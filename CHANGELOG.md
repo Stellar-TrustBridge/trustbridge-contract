@@ -12,6 +12,7 @@ compatible corrections.
 - Added `get_address_if_verified` to the public ABI for secure CI payouts (see [get_address_if_verified](docs/ABI.md#get_address_if_verifiedgithub_username-string---resultcontributorrecord-contracterror)).
 - Added verifier allowlist management (`add_verifier`, `remove_verifier`, `get_verifiers`, `is_active_verifier`, `verifier_slots_remaining`, `prune_expired_verifiers`).
 - Added role-grant timelock lifecycle functions (`activate_role`, `cancel_role_grant`).
+- Added oracle-proof verification: `set_oracle_allowlist`, `get_oracle_allowlist`, and `verify_with_oracle_proof` (see [verify_with_oracle_proof](docs/ABI.md#verify_with_oracle_proofgithub_username-string-proof-oracleproof---result-contracterror)).
 - Added typed export page bindings (`ExportRecord`, `ExportPage`, `EXPORT_PAGE_LAYOUT_VERSION = 2`) and updated `abi/export_page.layout.golden` layout regression fixtures.
 - Added TypeScript export page decoding and typed parser helpers in `ts-differential-tests`.
 - Added `set_audit_config(caller, enabled, max_events, log_unauthorized)` — admin-gated entry point to persist `AuditConfig` on-chain. Emits `AuditConfigChangedEvent` and appends an `AuditConfigChanged` (code 14) log entry (Issue #412).
@@ -22,6 +23,7 @@ compatible corrections.
 
 ### Changed
 
+- Documented the `set_bot_status` auth policy consistently as admin-or-registrant across `tests/auth_matrix.csv`, `docs/ABI.md` and `docs/ADMIN_RUNBOOK.md` (the runbook previously said admin only). No contract behaviour change.
 - Fixed `calculate_verification_percentage` and `BatchSummary::new` rounding at boundary and fractional values (0%, 100%, 1/3, 2/3) to use standard round-half-up semantics.
 - Fixed `NetworkMismatch` error code by moving its discriminant from 21 to 30 to avoid overlap with `InvalidPauseReason` (see [ContractError](docs/ABI.md#contracterror-u32-discriminant)).
 - Added new error codes `VerifierAllowlistFull` (31), `VerifierNotAllowlisted` (32), `VerifierExpiryInPast` (33), `NoPendingRoleGrant` (34), `RoleGrantNotReady` (35), `ProvenanceMissing` (36), and `ProvenanceMismatch` (37).

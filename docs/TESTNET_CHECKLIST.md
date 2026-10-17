@@ -88,3 +88,69 @@ value is missing, the job fails closed.
 ## Metadata
 
 Store the contract ID, network passphrase, deployer address, admin address, and commit hash used for the deployment.
+
+
+## RPC Timeout Triage
+
+When RPC calls timeout or Horizon lags during the export and invoke steps of this checklist, follow this triage procedure instead of abandoning the run.
+
+### Common Timeout Errors
+
+- `request timeout` or `connection refused` from stellar CLI
+- `Horizon lag` warning with stale ledger sequence
+- `rate limit exceeded` from public RPC endpoints
+- `friendbot funding failed` when requesting testnet XLM
+
+### Retry Backoff Strategy
+
+1. **First retry**: Wait 10 seconds, then re-run the failed command.
+2. **Second retry**: Wait 30 seconds with exponential backoff (10s → 30s → 90s).
+3. **Third retry**: Switch to an alternate RPC endpoint before retrying.
+
+### Alternate RPC Endpoints
+
+Override the default RPC endpoint with environment variables:
+
+```bash
+# Testnet public RPC (alternate)
+export STELLAR_RPC_URL="https://soroban-testnet.stellar.org"
+
+# Futurenet public RPC
+export STELLAR_RPC_URL="https://rpc-futurenet.stellar.org:443"
+
+# Friendbot for testnet funding
+export STELLAR_FRIENDBOT_URL="https://friendbot.stellar.org"
+```
+
+### Testnet vs Futurenet Failure Modes
+
+| Symptom | Testnet Behavior | Futurenet Behavior |
+|---|---|---|
+| RPC timeout | Retry with backoff; public RPC is shared | Use dedicated futurenet RPC endpoint |
+| Friendbot failure | Usually transient; retry after 30s | Futurenet friendbot is less reliable |
+| Ledger lag | Normal during peak hours; check [CONTRACT_HEALTH.md](./CONTRACT_HEALTH.md) | Expected; futurenet has lower throughput |
+| Network passphrase error | Indicates wrong NETWORK env var | Common when mixing testnet/futurenet commands |
+
+### Friendbot Funding Troubleshooting
+
+If `make deploy-testnet` fails because the source account has insufficient funds:
+
+1. Verify the account is on testnet (not futurenet/mainnet).
+2. Request funds from friendbot: `curl "https://friendbot.stellar.org?addr=$ADMIN"`
+3. Wait 10 seconds for the transaction to confirm.
+4. Re-run the deploy step.
+
+### Rate Limiting
+
+Public RPC endpoints have rate limits. If you see `429 Too Many Requests`:
+
+- Wait 60 seconds before retrying.
+- Reduce the number of concurrent invocations.
+- Consider running the checklist steps sequentially instead of in parallel.
+
+### Related Documentation
+
+- [CONTRACT_HEALTH.md](./CONTRACT_HEALTH.md) — Expected latency and health metrics
+- [FUTURENET_ONBOARDING.md](./FUTURENET_ONBOARDING.md) — Futurenet-specific setup
+- [DEPLOYMENT.md](./DEPLOYMENT.md) — RPC configuration details in the Makefile
+- 

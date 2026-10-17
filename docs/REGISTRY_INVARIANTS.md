@@ -140,6 +140,17 @@ default finite run count. Reproduce any crash from the saved artifact with
 and keep a minimized reproducer in the corpus. This parser target complements
 the deterministic registry-state invariant suite above.
 
+The same decode contract is replayed deterministically by the soak property
+tests in `tests/cursor_pagination.rs` (`test_soak_valid_cursor_prologue`,
+`test_soak_export_cursor_decode_never_panics`,
+`test_soak_generation_bump_invalidates_old_cursors`, Issue #650): fixed seeds
+from `tests/fuzz/seeds.txt` drive thousands of forged-cursor permutations
+through the public export path and assert adversarial bytes return
+`InvalidCursor` without ever panicking, and that a generation bump (any
+removal) invalidates previously valid cursors (I9). Default budget is 512
+iterations per seed for CI; override with `CURSOR_SOAK_ITERATIONS`, or run
+`make soak-cursor` (`CURSOR_SOAK_ITERATIONS=20000`) for a long local soak.
+
 ### 10k-user pagination scale test
 
 The host-side integration harness `test_paginated_export_at_10k_users` inserts

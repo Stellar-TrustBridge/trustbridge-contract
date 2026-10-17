@@ -281,7 +281,28 @@ struct ChallengeRecord {
 | 35 | `RoleGrantNotReady` | `activate_role` before the grant's timelock elapsed (Issue #220) |
 | 36 | `ProvenanceMissing` | `assert_build` / `set_provenance_digests` before any provenance record exists (Issue #225) |
 | 37 | `ProvenanceMismatch` | `assert_build` given a hash that does not match stored provenance (Issue #225) |
+| 39 | `StagedWasmMismatch` | `upgrade` / `execute_upgrade` was given a WASM hash that does not match the staged-WASM slot (Issue #300) |
+| 40 | `UpgradeProposalAlreadyPending` | `propose_multisig_upgrade` was called while a proposal is already live (Issue #301) |
+| 41 | `NoUpgradeProposalPending` | `approve_upgrade` / `execute_upgrade` / `cancel_upgrade_proposal` was called with no live proposal (or a proposal id that does not match) (Issue #301) |
+| 42 | `UpgradeProposalAlreadyApproved` | `approve_upgrade` was called by an address that already approved this proposal (Issue #301) |
+| 43 | `UpgradeProposalDelayActive` | `execute_upgrade` was called before the proposal's delay elapsed (Issue #301) |
+| 44 | `UpgradeProposalInsufficientApprovals` | `execute_upgrade` was called before the approval threshold was met (Issue #301) |
+| 46 | `FallbackListFull` | `register` was given more fallback addresses than `MAX_FALLBACK_ADDRESSES` |
+| 47 | `UsernameTaken` | `rename` was called with a `new_username` that is already registered |
+| 48 | `RotationRequired` | `register` was asked to change the registered address while the rotation delay is armed (Issue #234) — use the request/execute rotation flow |
+| 49 | `RotationPending` | A rotation is already pending for this username (Issue #234) |
+| 50 | `NoRotationPending` | `execute_address_rotation` / `cancel_address_rotation` was called with no pending rotation (Issue #234) |
+| 51 | `RotationNotReady` | `execute_address_rotation` was called before the delay has elapsed (Issue #234) |
+| 52 | `InvalidCursor` | A pagination cursor no longer decodes against the current registry state (Issue #215) |
+| 53 | `VerifyRateLimited` | A non-admin caller would exceed its per-ledger verify/revoke cap (Issue #292) |
+| 54 | `DualControlRequired` | `batch_remove` was called with a batch larger than the configured dual-control threshold (Issue #219) — use `propose_batch_remove` / `execute_batch_remove` instead |
+| 55 | `BatchRemoveProposalPending` | `propose_batch_remove` was called while a proposal is already pending (Issue #219) |
+| 56 | `NoPendingBatchRemove` | `execute_batch_remove` / `cancel_batch_remove` was called with no live (or already-expired) proposal (Issue #219) |
 | 57 | `RoleExpired` | A role-gated privileged invocation was made at or after the role's expiry timestamp |
+| 58 | `OracleProofBadLayout` | `verify_with_proof`: empty `message` or all-zero `signature` (structurally malformed proof) |
+| 59 | `OracleProofNotAllowlisted` | `verify_with_proof`: `oracle_pubkey` is not on the oracle allowlist (always, when it is empty) |
+| 60 | `OracleProofExpired` | `verify_with_proof`: non-zero `expires_at` is earlier than the ledger timestamp |
+| 61 | `OracleProofBadSignature` | `verify_with_proof`: signature is not a canonical Ed25519 encoding |
 
 > **`NetworkMismatch` moved from 21 to 30.** This table previously listed it at
 > code 21 while the enum had `InvalidPauseReason` there and no `NetworkMismatch`
@@ -923,7 +944,7 @@ that budget while still allowing full export via a cursor loop.
 | Field | Type | Semantics |
 |-------|------|-----------|
 | `records` | `Vec<(String, ContributorRecord)>` | Current page |
-| `next_cursor` | `Option<u32>` | Next zero-based index offset, or `None` when done |
+| `next_cursor` | `Option<BytesN<8>>` | Opaque cursor for the next call, or `None` when done |
 | `total` | `u32` | Live registration count |
 | `has_more` | `bool` | `true` when another page exists |
 | `merkle_root` | `BytesN<32>` | Merkle root over `records`, in page order (Issue #216) |
@@ -988,6 +1009,37 @@ must pass with the updated golden before release.
 
 ### `get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
 
+
+### `set_oracle_allowlist(pubkeys: Vec<BytesN<32>>) -> Result<(), ContractError>`
+
+Replaces the Ed25519 oracle public keys whose proofs
+`verify_with_oracle_proof` accepts (Issue #584). An empty list disables oracle
+verification. **Auth:** contract admin.
+
+**Errors:** `NotInitialized`.
+
+### `get_oracle_allowlist() -> Vec<BytesN<32>>`
+
+Returns the current oracle allowlist (empty if never set). Read-only, no auth.
+
+### `verify_with_oracle_proof(github_username: String, proof: OracleProof) -> Result<(), ContractError>`
+
+Marks a registered username verified on the strength of an allowlisted
+oracle's signature instead of an admin/Verifier call. `proof` is
+`OracleProof { oracle_pubkey: BytesN<32>, message: Bytes, signature: BytesN<64>, expires_at: u64 }`,
+and `message` must be exactly
+`<github_username>:<stellar_address strkey>:<expires_at decimal>` for the
+record's current `stellar_address` — see
+[SECURITY.md](SECURITY.md#oracle-signed-proof-interface-signature-check).
+`expires_at = 0` skips the expiry check. On success the record, counters,
+`VerifiedEvent`, and audit log update exactly as for `verify`.
+
+**Auth:** the registered `stellar_address`.
+
+**Errors:** `NotInitialized`, `Paused`, `NotRegistered`,
+`OracleProofBadLayout` (58), `OracleProofNotAllowlisted` (59),
+`OracleProofExpired` (60), `OracleProofBadSignature` (61), `AlreadyVerified`.
+A well-formed signature that does not verify traps the invocation.
 
 ---
 
@@ -1208,45 +1260,25 @@ footprint limit. Same shape as `get_all_registered` — no `verified` flag; use
 
 ---
 
-### `get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
+### `get_registered_paginated` / `get_public_paginated` (cursor-based export)
 
-Admin-gated paginated export. Each entry is a full `ContributorRecord`, so the
-`verified` bit travels with every row — no second call or cross-reference
-against `get_address` is needed to know verification status (Issue #96).
-
-| | |
-|---|---|
-| **Auth** | Admin |
-| **Mutates** | No |
-| **Errors** | `NotInitialized` |
-
-`limit = 0` defaults to `DEFAULT_PAGE_LIMIT` (20); any value above
-`MAX_PAGE_LIMIT` (100) is clamped down to it. `next_cursor` is `Some` while
-`has_more` is true; pass it back as `cursor` to continue.
+Documented once under [Pagination API Selection
+Guide](#pagination-api-selection-guide-issue-302):
+`get_registered_paginated(cursor: Option<BytesN<8>>, limit)` (admin) and
+`get_public_paginated(cursor: Option<BytesN<8>>, limit)` (permissionless).
+Cursors are opaque `BytesN<8>` tokens — never construct or parse one yourself;
+start from `None` and pass back each page's `next_cursor`. A cursor issued
+before a registry removal fails with `InvalidCursor` (see
+`tests/cursor_pagination.rs` and the soak notes in
+`docs/REGISTRY_INVARIANTS.md`). `limit = 0` defaults to `DEFAULT_PAGE_LIMIT`
+(20); values above `MAX_PAGE_LIMIT` (100) clamp down to it. `next_cursor` is
+`Some` while `has_more` is true; pass it back as `cursor` to continue.
 
 ```bash
 stellar contract invoke --id $ID --source admin --network testnet \
-  -- get_registered_paginated --cursor 0 --limit 50
-```
-
----
-
-### `get_public_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
-
-Same `ExportPage` shape as `get_registered_paginated` — including the
-`verified` flag per record — but callable by anyone. This is the
-unauthenticated read path for dashboards and indexers that need
-username + address + verified without an admin key (Issue #96).
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Mutates** | No |
-| **Errors** | `NotInitialized`, `Paused` |
-
-```bash
-stellar contract invoke --id $ID --source deployer --network testnet \
-  -- get_public_paginated --cursor 0 --limit 50
+  -- get_registered_paginated --cursor null --limit 50
+stellar contract invoke --id $ID --network testnet \
+  -- get_public_paginated --cursor null --limit 50
 ```
 
 ---
@@ -2713,6 +2745,11 @@ affects the contract admin's own identity.
 Emits `RoleGrantedEvent` (unchanged shape — expiry is not carried on the
 event; read it back with `get_role_expiry`).
 
+While a `set_role_delay` timelock is armed it cannot mint a role instantly:
+it returns `RoleGrantNotReady` (35) unless `target` already actively holds
+`role`, in which case only the expiry changes (e.g. to off-board a key
+early). New grants go through `set_role` + `activate_role` (Issue #220).
+
 #### `get_role_expiry(address: Address) -> Option<u64>`
 
 Read-only; no auth. The raw expiry timestamp for `address`'s current role
@@ -2765,7 +2802,7 @@ not configured, `expires_in == 0`, or revoked).
 
 ### Signed export attestation (Issue #223)
 
-#### `export_attestation(cursor: u32, limit: u32) -> Result<ExportAttestation, ContractError>`
+#### `export_attestation(cursor: Option<BytesN<8>>, limit: u32) -> Result<ExportAttestation, ContractError>`
 
 Admin-only; unaffected by the normal pause flag (same as
 `get_registered_paginated` / `get_all_registered` — admin export tooling
