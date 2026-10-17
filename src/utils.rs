@@ -252,6 +252,7 @@ pub fn generate_event_id(env: &Env, nonce: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Ledger as _;
     use soroban_sdk::Env;
 
     fn s(env: &Env, value: &str) -> String {
@@ -274,6 +275,54 @@ mod tests {
         assert!(is_empty_or_whitespace(&s(&env, "")));
         assert!(is_empty_or_whitespace(&s(&env, "   ")));
         assert!(!is_empty_or_whitespace(&s(&env, "hello")));
+    }
+
+    // ── Stack-buffer boundaries (mutation-testing gaps, Issue #574) ──────────
+    //
+    // `USERNAME_BUF` (64) is the largest input copied onto the stack; one
+    // byte more must take the "too long" branch instead of overrunning it.
+
+    #[test]
+    fn test_is_empty_or_whitespace_at_buffer_boundary() {
+        let env = Env::default();
+        assert!(is_empty_or_whitespace(&s(&env, &" ".repeat(USERNAME_BUF))));
+        assert!(!is_empty_or_whitespace(&s(
+            &env,
+            &" ".repeat(USERNAME_BUF + 1)
+        )));
+    }
+
+    #[test]
+    fn test_eq_ignore_ascii_case_at_buffer_boundary() {
+        let env = Env::default();
+        let fits = s(&env, &"a".repeat(USERNAME_BUF));
+        let fits_upper = s(&env, &"A".repeat(USERNAME_BUF));
+        assert!(eq_ignore_ascii_case(&fits, &fits_upper));
+        let over = s(&env, &"a".repeat(USERNAME_BUF + 1));
+        assert!(!eq_ignore_ascii_case(&over, &over.clone()));
+    }
+
+    #[test]
+    fn test_canonicalize_username_at_buffer_boundary() {
+        let env = Env::default();
+        assert_eq!(
+            canonicalize_username(&env, &s(&env, &"A".repeat(USERNAME_BUF))),
+            s(&env, &"a".repeat(USERNAME_BUF))
+        );
+        // Too long to fold: returned unchanged.
+        let over = s(&env, &"A".repeat(USERNAME_BUF + 1));
+        assert_eq!(canonicalize_username(&env, &over), over);
+    }
+
+    #[test]
+    fn test_is_zero_address() {
+        use soroban_sdk::testutils::Address as _;
+        let env = Env::default();
+        assert!(is_zero_address(
+            &env,
+            &Address::from_str(&env, ZERO_ADDRESS_STRKEY)
+        ));
+        assert!(!is_zero_address(&env, &Address::generate(&env)));
     }
 
     // ── Valid username acceptance ─────────────────────────────────────────────

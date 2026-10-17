@@ -1,17 +1,21 @@
 # cargo-deny configuration for trustbridge-contract
 #
-# Run: cargo deny check
-# Install: cargo install cargo-deny
+# Run: cargo deny --config deny.toml check   (CI job `cargo-deny`)
+# Install: cargo install --locked cargo-deny@0.20.2
+#
+# Uses the cargo-deny v2 config schema: vulnerability advisories and
+# unlicensed crates are always errors; the removed v1 keys
+# (`vulnerability`, `notice`, `unlicensed`) are no longer accepted.
 
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
+version = 2
+# Unmaintained advisories fail only for direct dependencies.
+unmaintained = "workspace"
 yanked = "warn"
-notice = "warn"
 ignore = []
 
 [licenses]
-unlicensed = "deny"
+version = 2
 allow = [
     "Apache-2.0",
     "MIT",
@@ -23,7 +27,12 @@ allow = [
     "Zlib",
     "0BSD",
 ]
-exceptions = []
+# wasmparser is a soroban-env dependency; LLVM-exception only adds
+# permissions to Apache-2.0, so it is allowed for these crates alone.
+exceptions = [
+    { crate = "wasmparser", allow = ["Apache-2.0 WITH LLVM-exception"] },
+    { crate = "wasmparser-nostd", allow = ["Apache-2.0 WITH LLVM-exception"] },
+]
 
 [bans]
 multiple-versions = "warn"

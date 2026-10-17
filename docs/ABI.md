@@ -37,23 +37,87 @@ consumers can reason about audit trails without reading the contract source.
 
 - **Fields (in encoding order):**
   1. `enabled` (`bool`) — whether audit event recording is active. **Default:** `true`
-  2. `retention_epochs` (`u32`) — number of epochs audit records are retained before pruning. **Default:** `30`
-  3. `max_events_per_epoch` (`u32`) — upper bound on audit events recorded per epoch. **Default:** `1024`
-  4. `require_actor` (`bool`) — whether each audit event must carry a non-empty actor. **Default:** `true`
+  2. `max_events` (`u32`) — ring-buffer size: maximum number of audit events retained
+     in instance storage before the oldest is evicted. **Default:** `1000`
+  3. `log_unauthorized` (`bool`) — whether failed authorization attempts are recorded
+     as `AuditEventType::UnauthorizedAttempt` (code 6). Set to `false` to suppress
+     spam from probing bots; `AuditStats.unauthorized_attempts` still increments.
+     **Default:** `true`
+
+> **ABI note:** Earlier drafts of this document listed `retention_epochs`,
+> `max_events_per_epoch`, and `require_actor`. Those fields **do not exist** in
+> the implementation. The canonical field list above matches `src/audit.rs`
+> exactly. Codes are append-only — do not renumber existing fields.
 
 ### Defaults
 
-When no `AuditConfig` has been explicitly stored, the contract MUST behave as if
-the defaults above are in effect. Defaults are chosen to keep audit trails on by
+When no `AuditConfig` has been explicitly stored (i.e. `set_audit_config` has
+never been called), the contract behaves as if the defaults above are in effect
+via `AuditConfig::default()`. Defaults are chosen to keep audit trails on by
 default and to bound storage growth; disabling auditing or lowering retention is
 an explicit, authorized action.
 
+### Entry points
+
+| Function | Auth | Notes |
+|---|---|---|
+| `get_audit_config() -> AuditConfig` | None | Returns stored config or default |
+| `set_audit_config(caller, enabled, max_events, log_unauthorized)` | Admin only | Persists config, emits `AuditConfigChangedEvent`, appends `AuditConfigChanged` log entry |
+
 ### Mutation authorization
 
-`AuditConfig` may only be mutated by authorized roles. Unauthorized callers MUST
-be rejected and the stored configuration MUST remain unchanged. The authorization
-check is enforced in the contract (see `src/audit.rs` / `src/lib.rs`) and is
-covered by tests that assert unauthorized mutation attempts are rejected.
+`AuditConfig` may only be mutated by the contract admin. Unauthorized callers are
+rejected with `NotAuthorized` (code 3) and the stored configuration remains
+unchanged. The authorization check is enforced in `src/lib.rs` and covered by
+tests asserting unauthorized mutation attempts are rejected and themselves logged
+as `UnauthorizedAttempt` entries (using the pre-change config so an
+attacker cannot suppress their own trace via a failed disable-then-probe).
+
+### AuditEventType codes (append-only)
+
+| Code | Name | Description |
+|------|------|-------------|
+| 1 | `ContractInitialized` | `initialize` called |
+| 2 | `UserRegistered` | `register` / `register_sponsored` succeeded |
+| 3 | `UserRemoved` | `remove` / `batch_remove` removed a record |
+| 4 | `UserVerified` | `verify` / `batch_verify` verified a record |
+| 5 | `AdminAction` | Generic admin operation |
+| 6 | `UnauthorizedAttempt` | Auth check failed; gated on `log_unauthorized` |
+| 7 | `DataExported` | Paginated export operation |
+| 8 | `VerificationRevoked` | `revoke_verification` revoked a record |
+| 9 | `UserRenamed` | `rename` moved a registration |
+| 10 | `ContractPaused` | `pause` / `emergency_pause` / `set_paused` |
+| 11 | `ContractUnpaused` | `unpause` / `clear_emergency_pause` |
+| 12 | `RoleChanged` | `set_role` / `activate_role` granted a role |
+| 13 | `ContractUpgraded` | `upgrade` replaced the WASM |
+| 14 | `AuditConfigChanged` | `set_audit_config` mutated the config |
+
+> Codes are **append-only**. Indexers store the numeric discriminant; renumbering
+> silently re-labels historical entries. New variants must be added at the end.
+
+### Audit reads
+
+`get_audit_logs() -> Vec<AuditLogEntry>` returns the retained audit entries
+**oldest-first** with no server-side offset/limit parameters — dashboards and
+indexers paginate client-side by slicing `[offset..offset+limit)` over the
+returned vector (see `audit_page` in `tests/integration.rs` for the reference
+slicing convention, and Issue #646 for the edge-case tests):
+
+| Rule | Behavior |
+|------|----------|
+| Retention | At most `MAX_AUDIT_LOG_ENTRIES` (`100`) entries are retained; each push past the cap evicts the oldest entry (FIFO) |
+| Ordering | Oldest first — index `0` is the oldest retained entry |
+| Empty log | A deployed-but-uninitialized instance returns an empty vector |
+| `offset >= len` | Empty page, not an error |
+| `limit == 0` | Empty page (client convention) |
+| Over-long window | Truncated to the retained tail, not an error |
+
+`get_audit_stats() -> AuditStats` returns monotonic counters
+(`total_events`, `registrations`, …) that **include evicted entries**, so
+stats totals can exceed the 100 retained rows — read the retained window to
+answer "what happened", and the stats to answer "how many ever happened".
+Both reads are permissionless and available while paused (see the conformance
+matrix in `docs/ARCHITECTURE.md`).
 
 ### Audit reads
 
@@ -265,7 +329,28 @@ struct ChallengeRecord {
 | 35 | `RoleGrantNotReady` | `activate_role` before the grant's timelock elapsed (Issue #220) |
 | 36 | `ProvenanceMissing` | `assert_build` / `set_provenance_digests` before any provenance record exists (Issue #225) |
 | 37 | `ProvenanceMismatch` | `assert_build` given a hash that does not match stored provenance (Issue #225) |
+| 39 | `StagedWasmMismatch` | `upgrade` / `execute_upgrade` was given a WASM hash that does not match the staged-WASM slot (Issue #300) |
+| 40 | `UpgradeProposalAlreadyPending` | `propose_multisig_upgrade` was called while a proposal is already live (Issue #301) |
+| 41 | `NoUpgradeProposalPending` | `approve_upgrade` / `execute_upgrade` / `cancel_upgrade_proposal` was called with no live proposal (or a proposal id that does not match) (Issue #301) |
+| 42 | `UpgradeProposalAlreadyApproved` | `approve_upgrade` was called by an address that already approved this proposal (Issue #301) |
+| 43 | `UpgradeProposalDelayActive` | `execute_upgrade` was called before the proposal's delay elapsed (Issue #301) |
+| 44 | `UpgradeProposalInsufficientApprovals` | `execute_upgrade` was called before the approval threshold was met (Issue #301) |
+| 46 | `FallbackListFull` | `register` was given more fallback addresses than `MAX_FALLBACK_ADDRESSES` |
+| 47 | `UsernameTaken` | `rename` was called with a `new_username` that is already registered |
+| 48 | `RotationRequired` | `register` was asked to change the registered address while the rotation delay is armed (Issue #234) — use the request/execute rotation flow |
+| 49 | `RotationPending` | A rotation is already pending for this username (Issue #234) |
+| 50 | `NoRotationPending` | `execute_address_rotation` / `cancel_address_rotation` was called with no pending rotation (Issue #234) |
+| 51 | `RotationNotReady` | `execute_address_rotation` was called before the delay has elapsed (Issue #234) |
+| 52 | `InvalidCursor` | A pagination cursor no longer decodes against the current registry state (Issue #215) |
+| 53 | `VerifyRateLimited` | A non-admin caller would exceed its per-ledger verify/revoke cap (Issue #292) |
+| 54 | `DualControlRequired` | `batch_remove` was called with a batch larger than the configured dual-control threshold (Issue #219) — use `propose_batch_remove` / `execute_batch_remove` instead |
+| 55 | `BatchRemoveProposalPending` | `propose_batch_remove` was called while a proposal is already pending (Issue #219) |
+| 56 | `NoPendingBatchRemove` | `execute_batch_remove` / `cancel_batch_remove` was called with no live (or already-expired) proposal (Issue #219) |
 | 57 | `RoleExpired` | A role-gated privileged invocation was made at or after the role's expiry timestamp |
+| 58 | `OracleProofBadLayout` | `verify_with_proof`: empty `message` or all-zero `signature` (structurally malformed proof) |
+| 59 | `OracleProofNotAllowlisted` | `verify_with_proof`: `oracle_pubkey` is not on the oracle allowlist (always, when it is empty) |
+| 60 | `OracleProofExpired` | `verify_with_proof`: non-zero `expires_at` is earlier than the ledger timestamp |
+| 61 | `OracleProofBadSignature` | `verify_with_proof`: signature is not a canonical Ed25519 encoding |
 
 > **`NetworkMismatch` moved from 21 to 30.** This table previously listed it at
 > code 21 while the enum had `InvalidPauseReason` there and no `NetworkMismatch`
@@ -2673,6 +2758,11 @@ affects the contract admin's own identity.
 
 Emits `RoleGrantedEvent` (unchanged shape — expiry is not carried on the
 event; read it back with `get_role_expiry`).
+
+While a `set_role_delay` timelock is armed it cannot mint a role instantly:
+it returns `RoleGrantNotReady` (35) unless `target` already actively holds
+`role`, in which case only the expiry changes (e.g. to off-board a key
+early). New grants go through `set_role` + `activate_role` (Issue #220).
 
 #### `get_role_expiry(address: Address) -> Option<u64>`
 

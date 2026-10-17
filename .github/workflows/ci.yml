@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "0 3 * * *" # nightly mutation run
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -25,33 +28,53 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
-  diff-test:
-    name: TypeScript differential tests
+  make-check:
+    name: make check
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Keep in sync with docs/CONTRIBUTING.md (Install dependencies).
+      STELLAR_CLI_VERSION: 26.1.0
+      STELLAR_CLI_SHA256: e18d5a7629102e1ccc07241acbcbebfc05b1c02476ce7d3204ba2d7418be5c0c
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Same version as rust-toolchain.toml: the WASM hash depends on it.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
-          fetch-depth: 0
+          components: rustfmt, clippy
+          targets: wasm32v1-none, wasm32-unknown-unknown
 
-      - name: Check Rust/TS fixture pairing
-        if: github.event_name == 'pull_request'
-        run: scripts/check_fixture_pairing.sh "origin/${{ github.base_ref }}"
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: ts-differential-tests/package-lock.json
+      - name: Install Stellar CLI
+        run: |
+          curl -fsSL -o stellar-cli.tar.gz \
+            "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${STELLAR_CLI_SHA256}  stellar-cli.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf stellar-cli.tar.gz -C "$HOME/.local/bin" stellar
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/stellar" --version
 
-      - name: Run differential tests
-        run: set -o pipefail; make diff-test 2>&1 | tee diff-test-output.txt
+      # Release gate: fails on a stale pin or PLACEHOLDER (WASM_HASH_STRICT=1).
+      # Runs before `make check` so it is enforced on its own.
+      - name: Compute and verify WASM hash pin
+        run: make wasm-hash-pin WASM_HASH_STRICT=1
 
-      - name: Upload differential test log
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: diff-test-output
-          path: diff-test-output.txt
-          retention-days: 14
+      - name: Report WASM hash
+        if: always()
+        run: |
+          wasm=target/wasm32v1-none/release/trustbridge_contract.wasm
+          if [ -f "$wasm" ]; then
+            echo "Release WASM SHA-256: \`$(sha256sum "$wasm" | awk '{print $1}')\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # The single local/CI quality gate: fmt, lint, error-codes, event-topics,
+      # abi-check, test, build, docs-check, wasm-size. Make stops on the first
+      # failing recipe and returns non-zero, failing this job.
+      - name: make check
+        run: make check

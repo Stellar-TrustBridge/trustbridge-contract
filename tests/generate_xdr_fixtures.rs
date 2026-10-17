@@ -42,18 +42,14 @@ fn s(env: &Env, text: &str) -> String {
 /// Find the data ScVal for an event whose first topic matches `symbol_name`.
 /// Returns the base64-encoded XDR of the event value.
 fn find_event_xdr(env: &Env, contract_id: &Address, symbol_name: &str) -> soroban_sdk::Bytes {
-    let target = Symbol::new(env, symbol_name);
-    for (source, topics, data) in env.events().all() {
-        if source == *contract_id {
-            if let Some(first) = topics.get(0) {
-                if Symbol::try_from_val(env, &first)
-                    .map(|s| s == target)
-                    .unwrap_or(false)
-                {
-                    // Serialize the event data ScVal to XDR bytes.
-                    return data.to_xdr(env);
-                }
-            }
+    use soroban_sdk::xdr::{ContractEventBody, Limits, ScVal, WriteXdr};
+    let target = ScVal::try_from_val(env, &Symbol::new(env, symbol_name).to_val()).unwrap();
+    for event in env.events().all().filter_by_contract(contract_id).events() {
+        let ContractEventBody::V0(v0) = &event.body;
+        if v0.topics.first() == Some(&target) {
+            // Serialize the event data ScVal to XDR bytes.
+            let raw = v0.data.to_xdr(Limits::none()).unwrap();
+            return soroban_sdk::Bytes::from_slice(env, &raw);
         }
     }
     panic!("event '{symbol_name}' not found in event log");
@@ -137,7 +133,7 @@ fn generate_xdr_fixtures() {
         let record = TrustBridgeContract::get_address(env.clone(), username.clone())
             .expect("record should exist");
 
-        let xdr_bytes = record.to_xdr(&env);
+        let xdr_bytes = soroban_sdk::xdr::ToXdr::to_xdr(record.clone(), &env);
         let raw: std::vec::Vec<u8> = xdr_bytes.iter().collect();
         let b64 = base64_encode(&raw);
         let addr_str = record.stellar_address.to_string();

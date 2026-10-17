@@ -514,7 +514,7 @@ tests validate this property against 78+ known confusable characters and ensure
 no bypass path exists at the `register()` entry point.
 
 Run the full corpus: `cargo test homoglyph` or `cargo test unicode`
-(CI: `cargo test --test homoglyph_corpus` on every pull request).
+(CI: the `homoglyph_corpus` job runs `cargo test --test homoglyph_corpus` on every pull request).
 
 ### Performance
 
@@ -733,7 +733,9 @@ Dashboard operators and auditors need the full failure surface of the dual-contr
 invalid state transition across all six entrypoints. Each cell maps to a test in
 `tests/batch_remove_dual_control.rs`.
 
-Cross-reference: [`tests/auth_matrix.csv`](../tests/auth_matrix.csv) ·
+Cross-reference: [`tests/auth_matrix.csv`](../tests/auth_matrix.csv) (every row is
+executed by [`tests/auth_matrix.rs`](../tests/auth_matrix.rs); see
+[CONTRIBUTING — Authorization matrix](CONTRIBUTING.md#authorization-matrix)) ·
 [ABI reference](ABI.md) · [ADMIN_RUNBOOK.md — Dual-Control batch_remove](ADMIN_RUNBOOK.md)
 
 Auth rules in brief:
@@ -948,38 +950,118 @@ hash for upgrades, not an identity claim.)
 - `get_oracle_allowlist(env)` — public read of the current allowlist.
 - `OracleProof { oracle_pubkey, message, signature, expires_at }` — a signed
   attestation from an off-chain oracle.
-- `verify_with_proof(env, proof)` — checks, in order: the signing key is on
-  the allowlist (`NotAuthorized` if not, including an empty allowlist),
-  the proof has not expired (`expires_at == 0` disables the check —
-  production callers should always set a real value), and finally that
+- `verify_with_proof(env, proof)` — checks, in order: the proof is
+  structurally well-formed (`OracleProofBadLayout`, 58: empty `message` or
+  all-zero `signature`), the signing key is on the allowlist
+  (`OracleProofNotAllowlisted`, 59, including an empty allowlist), the proof
+  has not expired (`OracleProofExpired`, 60; `expires_at == 0` disables the
+  check — production callers should always set a real value), the signature
+  is a canonical encoding (`OracleProofBadSignature`, 61), and finally that
   `signature` is a valid Ed25519 signature over `message` under
   `oracle_pubkey`.
 
-**Invalid proof fails.** An unallowlisted key or an expired proof returns
-`Err(ContractError::NotAuthorized)`. An allowlisted key with a signature that
-does not verify traps the host invocation instead of returning `Err` —
-`soroban_sdk`'s `Env::crypto().ed25519_verify` has no non-panicking form, so
-this fails the exact same way an invalid `require_auth()` signature already
-does everywhere else in this contract. Tests in `src/oracle_proof.rs` cover
-both failure shapes with a fixed test keypair (`valid_allowlisted_proof_passes`,
+**Invalid proof fails.** Each rejection above returns its own `Err` code. An
+allowlisted key with a canonically encoded signature that does not verify
+traps the host invocation (`Error(Crypto, InvalidInput)`) instead of
+returning `Err` — `soroban_sdk`'s `Env::crypto().ed25519_verify` has no
+non-panicking form, so this fails the exact same way an invalid
+`require_auth()` signature already does everywhere else in this contract.
+Tests in `src/oracle_proof.rs` cover every path with a fixed test keypair
+(`valid_allowlisted_proof_passes`, `bad_layout_is_rejected_with_layout_code`,
 `non_allowlisted_key_is_rejected`, `expired_proof_is_rejected`,
-`tampered_signature_traps`).
+`bad_signature_is_rejected_with_signature_code`,
+`wellformed_invalid_signature_traps`); run them with
+`cargo test oracle_proof`.
 
 **This is a signature-check interface, not GitHub verification.** The
 contract has no way to talk to the GitHub API and this change does not give
-it one — see **Out of Scope** above, which still applies unchanged. What an
-oracle signs, and how it constructs `message` (e.g. binding a specific
-`github_username` + `stellar_address` + expiry into the signed bytes so a
-proof can't be replayed against a different subject), is an off-chain
-contract between the oracle operator and whoever consumes its proofs; it is
-not parsed or enforced by `verify_with_proof` itself.
+it one — see **Out of Scope** above, which still applies unchanged. How the
+oracle confirms ownership before signing is an off-chain contract between the
+oracle operator and the admin who allowlists its key.
+
+### Canonical `message` byte layout (v1)
+
+The `message` field is the exact byte sequence the oracle signs and the
+contract checks. The contract does **not** parse `message` — it passes the
+raw bytes straight to `ed25519_verify` — but all TrustBridge oracle
+implementations MUST produce messages in the following layout so that
+proofs are not silently scoped to a single subject or replayable across
+contexts:
+
+```text
+message = github_username_bytes
+        ++ 0x3A                       // ':' separator (ASCII 0x3A)
+        ++ stellar_address_strkey     // G... strkey as ASCII bytes
+        ++ 0x3A                       // ':' separator
+        ++ expires_at_decimal         // decimal ASCII encoding of expires_at
+```
+
+Field details:
+
+| Field | Encoding | Example |
+|-------|----------|---------|
+| `github_username_bytes` | Raw ASCII bytes of the canonical (lowercased) GitHub username | `testuser` → `[116,101,115,116,117,115,101,114]` |
+| `0x3A` separator | Single byte `0x3A` (ASCII `':'`) | — |
+| `stellar_address_strkey` | ASCII bytes of `Address::to_string()` — the `G...` StrKey encoding | `GABCDEF0000…STUB` |
+| `0x3A` separator | Single byte `0x3A` | — |
+| `expires_at_decimal` | ASCII decimal representation of the `expires_at` Unix timestamp with no padding or suffix | `1700000000` → `[49,55,48,48,48,48,48,48,48,48]` |
+
+**Example** (from the fixed test vector in `src/oracle_proof.rs`):
+
+```
+testuser:GABCDEF0000000000000000000000000000000000000000000000STUB:1700000000
+```
+
+This is 77 bytes: 8 (username) + 1 (`:`) + 56 (strkey) + 1 (`:`) + 10 (timestamp) = 77.
+
+**Why this layout?**
+
+- The `':'` separators make it impossible to confuse `("ab", "c...")` with
+  `("a", "bc...")` — the field boundaries are unambiguous even if the
+  username could theoretically contain all strkey characters.
+- Including `stellar_address_strkey` binds the proof to one specific
+  Stellar account, so a proof issued to `alice`/`G1...` cannot be
+  replayed by `alice`/`G2...`.
+- Including `expires_at` in the signed bytes prevents replay attacks where
+  an expired proof is submitted again: an oracle that re-issues a proof
+  must re-sign the new timestamp, it cannot recycle the old signature.
+- Using `expires_at == 0` in the `OracleProof.expires_at` field disables
+  the on-chain expiry check, but a zero timestamp is still part of the
+  signed message, so every proof is still bound to a specific `expires_at`
+  value (it just happens to mean "no expiry" by convention).
+
+**Validation performed by `verify_with_proof` itself:**
+
+1. Layout check — `message` must not be empty, and `signature` must not be
+   all-zero (catches uninitialized `OracleProof` values before any crypto
+   is attempted). Returns `OracleProofBadLayout` (distinct from other
+   errors so incident triage can tell a malformed proof from a forged one).
+2. Allowlist check — `oracle_pubkey` must appear in the on-chain allowlist.
+   Returns `OracleProofNotAllowlisted`. An empty allowlist rejects
+   everything.
+3. Expiry check — if `expires_at != 0`, `env.ledger().timestamp() >
+   expires_at` returns `OracleProofExpired`.
+4. Signature shape check — the high 3 bits of `signature[63]` must be
+   zero (canonical Ed25519 scalar encoding). Returns `OracleProofBadSignature`
+   rather than handing a non-canonical scalar to the host layer.
+5. `ed25519_verify` — a passing shape check that still fails cryptographic
+   verification traps the host invocation (the SDK has no non-panicking
+   form), failing the same way an invalid `require_auth()` does everywhere
+   else in this contract.
+
+**Error code mapping:**
+
+| Scenario | Error code | `ContractError` variant |
+|---|---|---|
+| Empty message or all-zero signature | `OracleProofBadLayout` | structurally malformed |
+| Key not on allowlist (or allowlist empty) | `OracleProofNotAllowlisted` | key not trusted |
+| `expires_at` passed | `OracleProofExpired` | stale proof |
+| Non-canonical scalar in `signature[63]` | `OracleProofBadSignature` | bad shape |
+| Valid shape but crypto fails | host trap (panic) | same as failed `require_auth` |
 
 **Explicitly out of scope:**
 
-- Wiring a valid `OracleProof` into `verify()`/`batch_verify()` as an
-  alternative to admin/`Role::Verifier` auth. This module ships the
-  primitive and its tests; integrating it into the verification entry
-  points is separate follow-up work.
+- Accepting oracle proofs in `batch_verify()`.
 - Running a production GitHub oracle service that produces these proofs.
 
 ---
@@ -1199,7 +1281,17 @@ them were not recorded at all.
 | 10 | `CONTRACT_PAUSED` | `pause`, `emergency_pause`, `set_paused(true)` |
 | 11 | `CONTRACT_UNPAUSED` | `unpause`, `clear_emergency_pause`, `set_paused(false)` |
 | 12 | `ROLE_CHANGED` | `set_role`, `activate_role` |
-| 13 | `CONTRACT_UPGRADED` | `upgrade` |
+| 13 | `CONTRACT_UPGRADED` | `upgrade`, `execute_upgrade` (multisig path) |
+| 14 | `AUDIT_CONFIG_CHANGED` | `set_audit_config` |
+
+`AdminAction` entries are also written for the multisig upgrade governance
+paths: `set_upgrade_threshold`, `propose_multisig_upgrade`,
+`approve_upgrade`, and `cancel_upgrade_proposal` each record an
+`AuditEventType::AdminAction` entry with a `details` field naming the
+function, so an audit reader can distinguish governance configuration from
+other admin actions. `execute_upgrade` records `ContractUpgraded` (code 13)
+because the WASM was actually swapped, matching the single-admin `upgrade`
+path for indexer consistency.
 
 Codes and strings are **append-only**, for the same reason `ContractError`'s
 are: an indexer stores them, so renumbering or renaming silently re-labels
@@ -1241,6 +1333,102 @@ whether the contract had gone down or come back up.
 - **An unbounded historical store**: with a 100-entry cap, long-term history is
   the indexer's job. On a busy contract the on-chain log is a recent window,
   not an archive — do not design a compliance process that assumes otherwise.
+
+---
+
+## Unauthorized Attempt Logging (Issue #412)
+
+Every role-gated entry point that returns `ContractError::NotAuthorized` now
+calls the internal `record_unauthorized_attempt` helper before returning.  This
+appends an `AuditEventType::UnauthorizedAttempt` (code 6) entry to the audit
+log, recording the actor address and the name of the operation they attempted.
+
+### Why this matters
+
+Forensics needs a structured, queryable record of probing activity that
+**never** resulted in a successful state mutation.  Without these entries the
+audit log only tells an operator what succeeded — a gap that makes it
+impossible to detect a credential-stuffing campaign or a compromised key that
+is being tested before it is used.
+
+### Design choices
+
+| Property | Decision |
+|---|---|
+| **Gated on `AuditConfig.log_unauthorized`** | Operators can suppress entries during a spam campaign without redeploying. The `AuditStats.unauthorized_attempts` counter still increments regardless. |
+| **Uses the pre-call config** | An attacker calling `set_audit_config` to disable logging would itself require admin auth; the very failure to pass that check is logged under the current config before the call returns. |
+| **Non-recursive** | `record_unauthorized_attempt` calls `push_audit_entry` directly — no auth check, no re-entry into any role-gated path. |
+| **No reentrant loop** | The helper reads config and appends; it cannot trigger another auth check. |
+| **Storage spam guard** | The ring buffer evicts the oldest entry when full (cap = 100). A bot flooding `emergency_pause` or `verify` cannot grow storage beyond that bound. |
+
+### Covered entry points
+
+All public entry points that return `NotAuthorized` are covered:
+
+`emergency_pause`, `stage_wasm`, `clear_staged`, `set_upgrade_threshold`,
+`propose_multisig_upgrade`, `approve_upgrade`, `execute_upgrade`,
+`cancel_upgrade_proposal`, `config_verification`, `set_audit_config`,
+`batch_remove`, `propose_batch_remove`, `execute_batch_remove`,
+`cancel_batch_remove`, `verify`, `revoke_verification`,
+`start_challenge`, `cancel_challenge`, `complete_challenge`,
+`cancel_address_rotation`, `set_bot_status`, `remove`, `rename`.
+
+The private `require_remove_auth` helper (used by `remove` and `rename`) has
+no `&Env`, so logging is done at the call site rather than inside the helper.
+Admin-gated functions that call `admin.require_auth()` directly (e.g. `pause`,
+`set_role`, `upgrade`) do not need this hook because Soroban's own
+`require_auth` traps the transaction if the signature is missing — there is no
+`NotAuthorized` error path in those functions.
+
+### Reading the log
+
+```bash
+stellar contract invoke --id $CONTRACT_ID --network testnet \
+  -- get_audit_stats
+# Look at unauthorized_attempts field
+
+stellar contract invoke --id $CONTRACT_ID --network testnet \
+  -- get_audit_logs
+# Filter entries where event_type == 6 (UNAUTHORIZED_ATTEMPT)
+```
+
+---
+
+## Audit Configuration (Issue #412)
+
+The on-chain audit trail is configurable via `set_audit_config` (admin-only)
+and readable by anyone via `get_audit_config`.
+
+### AuditConfig fields
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | `bool` | `true` | Global switch for audit logging |
+| `max_events` | `u32` | `1000` | Ring-buffer capacity |
+| `log_unauthorized` | `bool` | `true` | Record `UnauthorizedAttempt` entries |
+
+When no config has been stored, `AuditConfig::default()` is used — all
+defaults apply automatically without an explicit `set_audit_config` call.
+
+### Authorization
+
+Only the contract admin may call `set_audit_config`. A non-admin caller
+receives `NotAuthorized` and the stored config is not modified.
+The failed attempt is itself logged as an `UnauthorizedAttempt` entry using
+the **current** config, preventing a disable-then-probe attack.
+
+### Config changes while paused
+
+`set_audit_config` does not call `require_not_paused` — operators need to
+be able to adjust audit settings during an incident freeze without first
+unpausing (which may be undesirable while a security review is underway).
+
+### Event
+
+Every successful `set_audit_config` emits an `AuditConfigChangedEvent` with
+topics `[admin]` and body fields `enabled`, `max_events`, `log_unauthorized`,
+`timestamp`. The change is also appended to the audit log as an
+`AuditConfigChanged` (code 14) entry.
 
 ---
 
