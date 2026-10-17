@@ -8,7 +8,7 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
+use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Vec};
 
 use trustbridge_contract::{ContractError, TrustBridgeContract};
 
@@ -216,5 +216,278 @@ fn test_registering_more_after_a_cursor_is_issued_does_not_invalidate_it() {
 
         let page2 = TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 10).unwrap();
         assert!(page2.records.len() >= 1);
+    });
+}
+
+// ── Soak-style export_cursor decode property (Issue #650) ────────────────────
+//
+// `fuzz/fuzz_targets/export_cursor.rs` validates decode robustness against
+// arbitrary bytes, but it needs `cargo-fuzz` + nightly. This is the
+// CI-friendly counterpart: a deterministic soak loop replaying thousands of
+// cursor permutations from fixed seeds and asserting an adversarial cursor
+// can never panic the export path — a cursor whose embedded generation no
+// longer matches, or whose offset is past the registry size, must return
+// exactly `Err(ContractError::InvalidCursor)`.
+//
+// Seeds come from `tests/fuzz/seeds.txt`, the same corpus the in-`lib.rs`
+// property suite uses (see `docs/REGISTRY_INVARIANTS.md` § "How the Fuzzing
+// Works", invariant I9). Append a seed there when a failure is found so it
+// reproduces forever.
+//
+// Iteration budget: the `CURSOR_SOAK_ITERATIONS` env var sets the per-seed
+// loop count (default 512 — fast enough for default CI). Local long soak:
+// `make soak-cursor` (`CURSOR_SOAK_ITERATIONS=20000`).
+//
+// Pinned edge cases (hold on every run, independent of the loop):
+// - `limit == 0` falls back to `DEFAULT_PAGE_LIMIT`, never an error.
+// - `BytesN<8>` is fixed-width at the type level, so over-long cursor bytes
+//   cannot be expressed by a caller at all (the fuzz target mirrors this by
+//   rejecting other lengths at its input boundary).
+// - A generation bump (any removal) invalidates previously issued cursors.
+
+/// Default soak iterations per seed when `CURSOR_SOAK_ITERATIONS` is unset.
+const DEFAULT_SOAK_ITERATIONS: u64 = 512;
+
+/// Env var overriding the per-seed soak iteration count for local long runs.
+const SOAK_ITERATIONS_ENV: &str = "CURSOR_SOAK_ITERATIONS";
+
+/// Soak iteration budget: `CURSOR_SOAK_ITERATIONS`, or 512 when unset/empty/invalid.
+fn soak_iterations() -> u64 {
+    std::env::var(SOAK_ITERATIONS_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_SOAK_ITERATIONS)
+}
+
+/// xorshift64* — the same generator family as the in-`lib.rs` property
+/// suite's `Prng` (see `docs/REGISTRY_INVARIANTS.md`); deterministic per seed.
+fn xorshift64(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    *state = x;
+    x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+}
+
+/// Loads `tests/fuzz/seeds.txt` (hex `0x…` or decimal, `#` comments and
+/// blank lines ignored), mirroring the corpus loader behind the in-`lib.rs`
+/// fuzz suite. Falls back to a pinned seed if the file is unreadable so the
+/// soak still runs hermetically.
+fn load_fuzz_seeds() -> alloc::vec::Vec<u64> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fuzz/seeds.txt");
+    let mut seeds = alloc::vec::Vec::new();
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let value = if let Some(hex) =
+                line.strip_prefix("0x").or_else(|| line.strip_prefix("0X"))
+            {
+                u64::from_str_radix(hex, 16).ok()
+            } else {
+                line.parse::<u64>().ok()
+            };
+            if let Some(v) = value {
+                seeds.push(v);
+            }
+        }
+    }
+    if seeds.is_empty() {
+        // Pinned fallback: seeds[0] of tests/fuzz/seeds.txt.
+        seeds.push(0xDEAD_BEEF_1234_5678);
+    }
+    seeds
+}
+
+/// White-box cursor forge: bytes `0..4` are the offset, bytes `4..8` are the
+/// generation, both big-endian — the layout the contract embeds at issue
+/// time. Mirrors the forging in `fuzz/fuzz_targets/export_cursor.rs`; the
+/// contract itself deliberately exposes no cursor constructor (see the
+/// interchangeability test above), so tests forge bytes exactly like the
+/// fuzzer does.
+fn forge_cursor(env: &Env, offset: u32, generation: u32) -> BytesN<8> {
+    let mut bytes = [0u8; 8];
+    bytes[0..4].copy_from_slice(&offset.to_be_bytes());
+    bytes[4..8].copy_from_slice(&generation.to_be_bytes());
+    BytesN::from_array(env, &bytes)
+}
+
+/// Deterministic valid-cursor prologue: every reachable (offset, limit)
+/// combination on a 3-record fixture must succeed — including `limit == 0`
+/// (falls back to `DEFAULT_PAGE_LIMIT`) and over-cap limits (clamped to
+/// `MAX_PAGE_LIMIT`), and `offset == total` (empty last page, not an error).
+#[test]
+fn test_soak_valid_cursor_prologue() {
+    let (env, _admin, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        for name in ["alice", "bob", "carol"] {
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, name),
+                Address::generate(&env),
+                Vec::new(&env),
+            )
+            .unwrap();
+        }
+        let total = 3u32;
+        // Mirror storage::DEFAULT_PAGE_LIMIT / storage::MAX_PAGE_LIMIT.
+        let default_limit = 20u32;
+        let max_limit = 100u32;
+
+        for offset in 0..=total {
+            for limit in [0u32, 1, 2, 3, 20, 100, 101, u32::MAX] {
+                let cursor = forge_cursor(&env, offset, 0);
+                let page =
+                    TrustBridgeContract::get_public_paginated(env.clone(), Some(cursor), limit)
+                        .expect("in-generation, in-range cursor must decode");
+                let effective = if limit == 0 {
+                    default_limit
+                } else {
+                    limit.min(max_limit)
+                };
+                assert_eq!(
+                    page.records.len() as u32,
+                    (total - offset).min(effective),
+                    "offset {offset} limit {limit}"
+                );
+                assert_eq!(page.total, total);
+                assert_eq!(page.has_more, page.next_cursor.is_some());
+            }
+        }
+    });
+}
+
+/// The soak loop proper: replays deterministic cursor permutations from the
+/// checked-in seed corpus and asserts adversarial bytes never panic — every
+/// outcome is either an `Ok` page with bounded contents or exactly
+/// `Err(ContractError::InvalidCursor)`.
+#[test]
+fn test_soak_export_cursor_decode_never_panics() {
+    let (env, _admin, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        // 3-record fixture mirrors fuzz/fuzz_targets/export_cursor.rs, whose
+        // oracle is: generation 0 + offset <= 3 ⇒ page, else InvalidCursor.
+        for name in ["alice", "bob", "carol"] {
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, name),
+                Address::generate(&env),
+                Vec::new(&env),
+            )
+            .unwrap();
+        }
+        let total = 3u32;
+        let default_limit = 20u32; // mirrors storage::DEFAULT_PAGE_LIMIT
+        let max_limit = 100u32; // mirrors storage::MAX_PAGE_LIMIT
+
+        let seeds = load_fuzz_seeds();
+        assert!(
+            seeds.len() >= 4,
+            "seed corpus tests/fuzz/seeds.txt must hold at least 4 seeds"
+        );
+        let iters = soak_iterations();
+
+        for (si, seed) in seeds.iter().enumerate() {
+            let mut rng = *seed ^ 0x9E37_79B9_7F4A_7C15;
+            if rng == 0 {
+                rng = 0x2545_F491_4F6C_DD1D;
+            }
+            for i in 0..iters {
+                let a = xorshift64(&mut rng);
+                let b = xorshift64(&mut rng);
+                // Every 4th draw stays near the valid boundary (0..=7) so the
+                // offset-past-end edge (`offset > total`) is hit densely;
+                // otherwise the full u32 range exercises far-past-end offsets.
+                let offset = if i % 4 == 0 {
+                    (b & 7) as u32
+                } else {
+                    (a >> 32) as u32
+                };
+                let forged_gen = (a & 0xFFFF_FFFF) as u32;
+                // Spans 0 (default-limit path), normal, and over-cap limits.
+                let limit = ((b >> 32) % 150) as u32;
+                let cursor = forge_cursor(&env, offset, forged_gen);
+                match TrustBridgeContract::get_public_paginated(
+                    env.clone(),
+                    Some(cursor),
+                    limit,
+                ) {
+                    Ok(page) => {
+                        // Reachable only for the live generation (0 — no
+                        // removal has happened yet) with an in-range offset.
+                        assert_eq!(
+                            forged_gen, 0,
+                            "seed {si} iter {i}: an Ok page requires the live generation"
+                        );
+                        assert!(
+                            offset <= total,
+                            "seed {si} iter {i}: an Ok page requires an in-range offset"
+                        );
+                        let effective = if limit == 0 {
+                            default_limit
+                        } else {
+                            limit.min(max_limit)
+                        };
+                        assert_eq!(
+                            page.records.len() as u32,
+                            (total - offset).min(effective),
+                            "seed {si} iter {i}: bounded page contents"
+                        );
+                        assert_eq!(page.total, total);
+                        assert_eq!(page.has_more, page.next_cursor.is_some());
+                    }
+                    Err(e) => assert_eq!(
+                        e,
+                        ContractError::InvalidCursor,
+                        "seed {si} iter {i}: adversarial cursor must map to InvalidCursor, never panic"
+                    ),
+                }
+            }
+        }
+    });
+}
+
+/// A generation bump (any removal) invalidates previously valid cursors —
+/// both contract-issued `next_cursor` values and the same bytes forged
+/// directly. See `docs/REGISTRY_INVARIANTS.md` invariant I9.
+#[test]
+fn test_soak_generation_bump_invalidates_old_cursors() {
+    let (env, admin, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 5);
+
+        // Pre-removal: the forged cursor and the issued cursor agree.
+        let forged = forge_cursor(&env, 2, 0);
+        let forged_page =
+            TrustBridgeContract::get_public_paginated(env.clone(), Some(forged.clone()), 2)
+                .unwrap();
+        assert_eq!(forged_page.records.len(), 2);
+
+        let page1 = TrustBridgeContract::get_registered_paginated(env.clone(), None, 2).unwrap();
+        assert!(page1.has_more);
+        let issued = page1.next_cursor.clone().unwrap();
+
+        // Any removal bumps the index generation: both cursors must now fail
+        // loudly instead of silently resuming at a drifted offset.
+        TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "user000")).unwrap();
+
+        assert_eq!(
+            TrustBridgeContract::get_public_paginated(env.clone(), Some(issued), 2),
+            Err(ContractError::InvalidCursor)
+        );
+        assert_eq!(
+            TrustBridgeContract::get_public_paginated(env.clone(), Some(forged), 2),
+            Err(ContractError::InvalidCursor)
+        );
     });
 }

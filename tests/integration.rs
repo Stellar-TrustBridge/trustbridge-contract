@@ -11,10 +11,16 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, String};
+use soroban_sdk::{
+    symbol_short,
+    testutils::{Address as _, Events as _, Ledger as _},
+    Address, Env, String, Symbol, TryFromVal,
+};
 
-use soroban_sdk::testutils::Ledger as _;
-use trustbridge_contract::{ContractError, Role, TrustBridgeContract};
+use trustbridge_contract::{
+    AuditEventType, AuditLogEntry, ContractError, Role, RoleGrantCancelledEvent,
+    RoleGrantPendingEvent, TrustBridgeContract,
+};
 
 fn setup_test_env() -> (Env, Address, Address, Address, Address) {
     let env = Env::default();
@@ -3442,4 +3448,316 @@ fn test_set_bot_status_rejected_while_paused() {
             Err(ContractError::Paused)
         );
     });
+}
+
+// ── Timelocked role grants: cancel before activation (Issue #648) ────────────
+//
+// Operator flow: docs/ADMIN_RUNBOOK.md § "Timelocked role grants (Issue
+// #220)". With a non-zero `get_role_delay()`, `set_role` only *queues* the
+// grant (`RoleGrantPendingEvent` + `get_pending_role`); `cancel_role_grant`
+// drops it before `activate_at`, after which `activate_role` must report
+// `NoPendingRoleGrant` and the target must hold no role.
+
+/// True when `contract_id` emitted an event with exactly these topics+data.
+fn has_event_with(
+    env: &Env,
+    contract_id: &Address,
+    topics: soroban_sdk::Vec<soroban_sdk::Val>,
+    payload: soroban_sdk::Val,
+) -> bool {
+    for (source, event_topics, data) in env.events().all() {
+        if source == *contract_id && event_topics == topics && data == payload {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn test_timelocked_role_grant_cancel_before_activation() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+    let target = Address::generate(&env);
+    const DELAY: u64 = 86_400;
+
+    // t=1000: opt in to a 24h delay, then queue a Verifier grant.
+    env.ledger().set_timestamp(1_000);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_role_delay(env.clone(), DELAY).unwrap();
+        assert_eq!(TrustBridgeContract::get_role_delay(env.clone()), DELAY);
+
+        TrustBridgeContract::set_role(env.clone(), target.clone(), Role::Verifier).unwrap();
+
+        // Queued, not active: no role yet, but a pending grant is visible via
+        // get_pending_role with activate_at = now + delay.
+        assert_eq!(
+            TrustBridgeContract::get_role(env.clone(), target.clone()),
+            None
+        );
+        let pending = TrustBridgeContract::get_pending_role(env.clone(), target.clone())
+            .expect("grant must be queued behind the timelock");
+        assert_eq!(pending.role, Role::Verifier);
+        assert_eq!(pending.activate_at, 1_000 + DELAY);
+
+        // The queue step emits RoleGrantPendingEvent with the same payload.
+        let expected_pending = RoleGrantPendingEvent {
+            address: target.clone(),
+            role: Role::Verifier as u32,
+            admin: admin.clone(),
+            activate_at: 1_000 + DELAY,
+            timestamp: 1_000,
+        };
+        assert!(
+            has_event_with(
+                &env,
+                &contract_id,
+                expected_pending.topics(&env),
+                expected_pending.data(&env),
+            ),
+            "queueing the grant must emit RoleGrantPendingEvent"
+        );
+    });
+
+    // t=2000 (before activate_at): cancel the queued grant.
+    env.ledger().set_timestamp(2_000);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::cancel_role_grant(env.clone(), target.clone()).unwrap();
+
+        // The cancel emits RoleGrantCancelledEvent carrying the grant address,
+        // the admin that cancelled, and the cancel timestamp — and its first
+        // topic names the event.
+        let expected = RoleGrantCancelledEvent {
+            address: target.clone(),
+            admin: admin.clone(),
+            timestamp: 2_000,
+        };
+        let topics = expected.topics(&env);
+        assert_eq!(topics.len(), 2);
+        assert_eq!(
+            Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+            Symbol::new(&env, "role_grant_cancelled_event")
+        );
+        assert!(
+            has_event_with(&env, &contract_id, topics, expected.data(&env)),
+            "cancelling the grant must emit RoleGrantCancelledEvent"
+        );
+
+        // The queue is gone: activation is impossible and no role was granted.
+        assert_eq!(
+            TrustBridgeContract::get_pending_role(env.clone(), target.clone()),
+            None
+        );
+        assert_eq!(
+            TrustBridgeContract::activate_role(env.clone(), target.clone()),
+            Err(ContractError::NoPendingRoleGrant)
+        );
+        assert_eq!(
+            TrustBridgeContract::get_role(env.clone(), target.clone()),
+            None
+        );
+
+        // Double cancel reports the empty queue rather than trapping.
+        assert_eq!(
+            TrustBridgeContract::cancel_role_grant(env.clone(), target.clone()),
+            Err(ContractError::NoPendingRoleGrant)
+        );
+    });
+}
+
+/// Delay zero skips the pending queue: `set_role` grants instantly and there
+/// is nothing to cancel (Issue #648 edge case).
+#[test]
+fn test_role_grant_delay_zero_skips_pending_queue() {
+    let (env, _admin, _user1, _user2, contract_id) = setup_test_env();
+    let target = Address::generate(&env);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(TrustBridgeContract::get_role_delay(env.clone()), 0);
+        TrustBridgeContract::set_role(env.clone(), target.clone(), Role::Verifier).unwrap();
+        assert_eq!(
+            TrustBridgeContract::get_role(env.clone(), target.clone()),
+            Some(Role::Verifier)
+        );
+        assert_eq!(
+            TrustBridgeContract::get_pending_role(env.clone(), target.clone()),
+            None
+        );
+        // Nothing queued means nothing to cancel.
+        assert_eq!(
+            TrustBridgeContract::cancel_role_grant(env.clone(), target.clone()),
+            Err(ContractError::NoPendingRoleGrant)
+        );
+    });
+}
+
+/// `cancel_role_grant` is admin-only: without the admin's authorization the
+/// call traps in `require_auth` instead of touching the queue (Issue #648).
+/// Auth is the guard here — under `mock_all_auths` any caller would pass, so
+/// this test runs with no mocked auths, mirroring
+/// `tests/cross_contract_register_deny.rs`.
+#[test]
+#[should_panic]
+fn test_cancel_role_grant_rejects_unauthenticated_caller() {
+    let (env, _admin, _user1, _user2, contract_id) = setup_test_env();
+    let target = Address::generate(&env);
+
+    // NOTE: no mock_all_auths — admin.require_auth() has no mocked auth to
+    // satisfy, so the host aborts the call before the queue is even read.
+    env.as_contract(&contract_id, || {
+        let _ = TrustBridgeContract::cancel_role_grant(env.clone(), target);
+    });
+}
+
+// ── Audit log pagination edges (Issue #646) ─────────────────────────────────
+//
+// `get_audit_logs` returns the retained entries oldest-first with no
+// server-side offset/limit — consumers paginate client-side (see docs/ABI.md
+// § Audit reads). These tests pin the retention contract:
+// at most MAX_AUDIT_LOG_ENTRIES (100) entries, FIFO eviction of the oldest,
+// and stable oldest-first ordering.
+
+/// Mirrors `storage::MAX_AUDIT_LOG_ENTRIES` (storage is crate-private, so the
+/// value is pinned here with the retention tests that enforce it).
+const MAX_AUDIT_LOG_ENTRIES: u32 = 100;
+
+/// Client-side audit pagination (see docs/ABI.md § Audit reads): slice
+/// `[offset..offset+limit)` over the oldest-first log. `limit == 0` and
+/// `offset >= len` both yield an empty page.
+fn audit_page(
+    logs: &std::vec::Vec<AuditLogEntry>,
+    offset: usize,
+    limit: usize,
+) -> std::vec::Vec<AuditLogEntry> {
+    if limit == 0 || offset >= logs.len() {
+        return std::vec::Vec::new();
+    }
+    let end = (offset + limit).min(logs.len());
+    logs[offset..end].to_vec()
+}
+
+fn collect_audit_logs(env: &Env, contract_id: &Address) -> std::vec::Vec<AuditLogEntry> {
+    env.as_contract(contract_id, || {
+        let mut out = std::vec::Vec::new();
+        for entry in TrustBridgeContract::get_audit_logs(env.clone()).iter() {
+            out.push(entry);
+        }
+        out
+    })
+}
+
+/// A deployed-but-uninitialized instance retains no audit entries.
+#[test]
+fn test_audit_logs_empty_before_initialize() {
+    let env = Env::default();
+    let contract_id = env.register(TrustBridgeContract, ());
+
+    env.as_contract(&contract_id, || {
+        assert_eq!(TrustBridgeContract::get_audit_logs(env.clone()).len(), 0);
+    });
+}
+
+/// `initialize` writes exactly one entry: ContractInitialized.
+#[test]
+fn test_audit_logs_initial_entry_after_initialize() {
+    let (env, _admin, _user1, _user2, contract_id) = setup_test_env();
+
+    let logs = collect_audit_logs(&env, &contract_id);
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].event_type, AuditEventType::ContractInitialized);
+}
+
+/// Past MAX_AUDIT_LOG_ENTRIES pushes the oldest entries are evicted FIFO and
+/// the retained window stays oldest-first. 1 ContractInitialized + 105
+/// UserRegistered = 106 pushes, so the first 6 entries must be gone.
+#[test]
+fn test_audit_logs_fifo_eviction_at_max_entries() {
+    let (env, _admin, _user1, _user2, contract_id) = setup_test_env();
+    const REGISTRATIONS: u32 = 105;
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        for i in 0..REGISTRATIONS {
+            let name = format!("audit{i:03}");
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, &name),
+                Address::generate(&env),
+                Vec::new(&env),
+            )
+            .unwrap();
+        }
+    });
+
+    let logs = collect_audit_logs(&env, &contract_id);
+    assert_eq!(
+        logs.len(),
+        MAX_AUDIT_LOG_ENTRIES,
+        "retained log must be capped at MAX_AUDIT_LOG_ENTRIES"
+    );
+
+    // Evicted: ContractInitialized + audit000..=audit004. Retained window is
+    // audit005..=audit104, oldest first.
+    let first = logs.first().expect("capped log is non-empty");
+    assert_eq!(first.event_type, AuditEventType::UserRegistered);
+    assert_eq!(first.target_username, Some(s(&env, "audit005")));
+    let last = logs.last().expect("capped log is non-empty");
+    assert_eq!(last.target_username, Some(s(&env, "audit104")));
+    for (pos, entry) in logs.iter().enumerate() {
+        let expected = format!("audit{:03}", pos as u32 + 5);
+        assert_eq!(
+            entry.target_username,
+            Some(s(&env, &expected)),
+            "retained window must stay oldest-first at position {pos}"
+        );
+    }
+
+    // Stats counters are monotonic: they include evicted entries, unlike the
+    // retained window.
+    env.as_contract(&contract_id, || {
+        let stats = TrustBridgeContract::get_audit_stats(env.clone());
+        assert_eq!(stats.registrations, REGISTRATIONS);
+        assert_eq!(stats.total_events, REGISTRATIONS + 1);
+    });
+}
+
+/// Client-side pagination over the oldest-first log: a mid-log window
+/// returns exactly its slice, `offset >= len` returns empty, and `limit == 0`
+/// returns empty (Issue #646 edge cases).
+#[test]
+fn test_audit_page_offset_past_end_returns_empty() {
+    let (env, _admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        for i in 0..5u32 {
+            let name = format!("page{i}");
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, &name),
+                Address::generate(&env),
+                Vec::new(&env),
+            )
+            .unwrap();
+        }
+    });
+
+    // 1 ContractInitialized + 5 UserRegistered = 6 retained entries.
+    let logs = collect_audit_logs(&env, &contract_id);
+    assert_eq!(logs.len(), 6);
+
+    // Offset past the end yields an empty page rather than an error.
+    assert!(audit_page(&logs, 6, 10).is_empty());
+    assert!(audit_page(&logs, 200, 10).is_empty());
+    // Zero limit yields an empty page.
+    assert!(audit_page(&logs, 0, 0).is_empty());
+    // A mid-log window returns exactly its slice, oldest-first.
+    let window = audit_page(&logs, 2, 3);
+    assert_eq!(window.len(), 3);
+    assert_eq!(window[0].target_username, Some(s(&env, "page1")));
+    assert_eq!(window[2].target_username, Some(s(&env, "page3")));
+    // A window running off the end is truncated, not an error.
+    let tail = audit_page(&logs, 4, 10);
+    assert_eq!(tail.len(), 2);
 }

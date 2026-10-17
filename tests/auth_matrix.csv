@@ -42,9 +42,11 @@ commit_staged_wasm,random,NotAuthorized
 cancel_staged_wasm,admin,
 cancel_staged_wasm,upgrader,NotAuthorized
 cancel_staged_wasm,random,NotAuthorized
-set_role_timelock,admin,
-set_role_timelock,upgrader,NotAuthorized
-set_role_timelock,random,NotAuthorized
+set_role_delay,admin,
+set_role_delay,upgrader,NotAuthorized
+set_role_delay,random,NotAuthorized
+activate_role,admin,
+cancel_role_grant,admin,
 set_verifier_allowlist,admin,
 set_verifier_allowlist,verifier,NotAuthorized
 set_verifier_allowlist,random,NotAuthorized
