@@ -426,6 +426,26 @@ pub struct VerificationConfiguredEvent {
     pub timestamp: u64,
 }
 
+/// Emitted when an admin mutates the on-chain AuditConfig (Issue #412).
+///
+/// Topics allow indexers to filter configuration-change events without scanning
+/// all events. The full before/after state is not included to keep the event
+/// compact — the current config is always readable via `get_audit_config`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuditConfigChangedEvent {
+    /// Admin that authorised the change.
+    #[topic]
+    pub admin: Address,
+    /// Whether audit logging is now enabled.
+    pub enabled: bool,
+    /// Max events retained per ring-buffer cycle.
+    pub max_events: u32,
+    /// Whether unauthorized access attempts are now recorded.
+    pub log_unauthorized: bool,
+    pub timestamp: u64,
+}
+
 #[cfg(test)]
 mod test {
     use crate::{TrustBridgeContract, TrustBridgeContractClient};
