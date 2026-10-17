@@ -28,99 +28,53 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
-  abi-consistency:
-    name: Error codes and event topics
+  make-check:
+    name: make check
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # Keep in sync with docs/CONTRIBUTING.md (Install dependencies).
+      STELLAR_CLI_VERSION: 26.1.0
+      STELLAR_CLI_SHA256: e18d5a7629102e1ccc07241acbcbebfc05b1c02476ce7d3204ba2d7418be5c0c
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Same scripts as `make error-codes` / `make event-topics`.
-      - name: Check error codes
-        run: ./scripts/check_error_codes.sh
-
-      - name: Check event topics
-        run: ./scripts/check_event_topics.sh
-
-  oracle-proof-tests:
-    name: oracle_proof unit tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
+      # Same version as rust-toolchain.toml: the WASM hash depends on it.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run oracle_proof module tests
-        run: cargo test --lib oracle_proof
-
-  cargo-deny:
-    name: cargo deny
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # Caches the installed cargo-deny binary between runs.
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-deny
-        run: cargo install --locked cargo-deny@0.20.2
-
-      # Advisory DB cache; cargo-deny refreshes it on every run.
-      - name: Cache advisory database
-        uses: actions/cache@v4
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
-          path: ~/.cargo/advisory-dbs
-          key: advisory-db-${{ github.run_id }}
-          restore-keys: advisory-db-
-
-      - name: cargo deny check
-        run: cargo deny --config deny.toml check
-
-  mutants:
-    name: cargo mutants (src/utils.rs)
-    # CPU-heavy: nightly and on demand only, never on pull requests.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+          components: rustfmt, clippy
+          targets: wasm32v1-none, wasm32-unknown-unknown
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-mutants
-        run: cargo install --locked cargo-mutants@27.1.0
-
-      # Scope and test selection come from mutants.toml (cargo-mutants only
-      # reads .cargo/mutants.toml by default). Exit 2 means survived
-      # ("missed") mutants and fails the job; exit 3 means only timeouts,
-      # which mutants.toml documents as not failures.
-      - name: cargo mutants --file src/utils.rs
+      - name: Install Stellar CLI
         run: |
-          status=0
-          cargo mutants --config mutants.toml --file src/utils.rs || status=$?
-          if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then exit "$status"; fi
+          curl -fsSL -o stellar-cli.tar.gz \
+            "https://github.com/stellar/stellar-cli/releases/download/v${STELLAR_CLI_VERSION}/stellar-cli-${STELLAR_CLI_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${STELLAR_CLI_SHA256}  stellar-cli.tar.gz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf stellar-cli.tar.gz -C "$HOME/.local/bin" stellar
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/stellar" --version
 
-      - name: Upload survived mutants
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: mutants-survived
-          path: |
-            mutants.out/missed.txt
-            mutants.out/outcomes.json
-          if-no-files-found: warn
+      # Release gate: fails on a stale pin or PLACEHOLDER (WASM_HASH_STRICT=1).
+      # Runs before `make check` so it is enforced on its own.
+      - name: Compute and verify WASM hash pin
+        run: make wasm-hash-pin WASM_HASH_STRICT=1
+
+      - name: Report WASM hash
+        if: always()
+        run: |
+          wasm=target/wasm32v1-none/release/trustbridge_contract.wasm
+          if [ -f "$wasm" ]; then
+            echo "Release WASM SHA-256: \`$(sha256sum "$wasm" | awk '{print $1}')\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # The single local/CI quality gate: fmt, lint, error-codes, event-topics,
+      # abi-check, test, build, docs-check, wasm-size. Make stops on the first
+      # failing recipe and returns non-zero, failing this job.
+      - name: make check
+        run: make check

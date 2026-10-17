@@ -715,6 +715,9 @@ pub fn extend_record_ttl(env: &Env, github_username: &String) -> bool {
 pub fn remove_record(env: &Env, github_username: &String) {
     let key = (REG_KEY, canon(env, github_username));
     env.storage().persistent().remove(&key);
+    // The re-verify flag belongs to the record; never leave it orphaned for a
+    // later re-registration of the same name to inherit.
+    clear_pending_reverify(env, github_username);
 }
 
 /// Existence check for a single registration.
@@ -1320,11 +1323,17 @@ pub fn get_pending_reverify(env: &Env, github_username: &String) -> bool {
     env.storage().persistent().get(&key).unwrap_or(false)
 }
 
+/// Sets the pending re-verification flag for `github_username` (keyed by its
+/// canonical form, like the record) and bumps its TTL to match the record's.
 pub fn set_pending_reverify(env: &Env, github_username: &String, flag: bool) {
     let key = (PENDING_REVERIFY_KEY, canon(env, github_username));
     env.storage().persistent().set(&key, &flag);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
 }
 
+/// Removes the pending re-verification flag. A no-op when none is stored.
 pub fn clear_pending_reverify(env: &Env, github_username: &String) {
     let key = (PENDING_REVERIFY_KEY, canon(env, github_username));
     env.storage().persistent().remove(&key);
@@ -2699,725 +2708,114 @@ pub fn repair_index(env: &Env, apply: bool) -> RepairReport {
     }
 }
 
-// ── Counter helpers ───────────────────────────────────────────────────────────
+#[cfg(test)]
+mod pending_reverify_tests {
+    use super::*;
+    use crate::TrustBridgeContract;
+    use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
 
-/// Total registered contributor count (O(1) cached counter).
-#[must_use]
-pub fn get_count(env: &Env) -> u32 {
-    env.storage().instance().get(&COUNT_KEY).unwrap_or(0)
-}
-
-pub fn set_count(env: &Env, count: u32) {
-    env.storage().instance().set(&COUNT_KEY, &count);
-}
-
-/// Currently-verified contributor count (O(1) cached counter).
-#[must_use]
-pub fn get_verified_count(env: &Env) -> u32 {
-    env.storage().instance().get(&VCOUNT_KEY).unwrap_or(0)
-}
-
-pub fn set_verified_count(env: &Env, count: u32) {
-    env.storage().instance().set(&VCOUNT_KEY, &count);
-}
-
-/// Monotonic count of verifications ever granted (never decreases on revoke).
-#[must_use]
-pub fn get_ever_verified_count(env: &Env) -> u32 {
-    env.storage()
-        .instance()
-        .get(&EVER_VCOUNT_KEY)
-        .unwrap_or(0)
-}
-
-pub fn set_ever_verified_count(env: &Env, count: u32) {
-    env.storage().instance().set(&EVER_VCOUNT_KEY, &count);
-}
-
-pub fn bump_ever_verified_count(env: &Env) {
-    set_ever_verified_count(env, get_ever_verified_count(env).saturating_add(1));
-}
-
-/// Returns the aggregate registry statistics snapshot.
-#[must_use]
-pub fn get_stats(env: &Env) -> Stats {
-    Stats {
-        total: get_count(env),
-        verified: get_verified_count(env),
-        ever_verified: get_ever_verified_count(env),
-    }
-}
-
-/// Writes both the `count` and `verified` counters atomically.
-///
-/// Used by `repair_index` to correct drifted counters in a single operation.
-pub fn set_stats(env: &Env, total: u32, verified: u32) {
-    set_count(env, total);
-    set_verified_count(env, verified);
-}
-
-// ── Flat username index ───────────────────────────────────────────────────────
-//
-// The flat index is a persistent `Vec<String>` stored under `INDEX_KEY`.  It is
-// the canonical enumerable list used by `get_all_registered`, `repair_index`,
-// and the migration runner.  `get_registered_paginated_internal` works from the
-// chunked index (CHUNK_KEY pages) for O(page) cost, but the flat index remains
-// the authoritative source for full walks.
-
-/// Returns the full flat username index.  Callers that only need a page should
-/// use `get_registered_paginated_internal` instead.
-#[must_use]
-pub fn get_index(env: &Env) -> Vec<String> {
-    env.storage()
-        .persistent()
-        .get(&INDEX_KEY)
-        .unwrap_or_else(|| Vec::new(env))
-}
-
-fn set_index(env: &Env, index: &Vec<String>) {
-    env.storage().persistent().set(&INDEX_KEY, index);
-    env.storage()
-        .persistent()
-        .extend_ttl(&INDEX_KEY, TTL_THRESHOLD, TTL_BUMP);
-}
-
-/// Appends `username` to the flat index and the chunked index, then bumps the
-/// index generation so outstanding cursors are invalidated.
-pub fn add_to_index(env: &Env, username: &String) {
-    // Flat index
-    let mut flat = get_index(env);
-    flat.push_back(username.clone());
-    set_index(env, &flat);
-
-    // Chunked index: append to the last chunk or start a new one.
-    let chunk_count = get_chunk_count(env);
-    if chunk_count == 0 {
-        let mut first = Vec::new(env);
-        first.push_back(username.clone());
-        set_chunk(env, 0, &first);
-        set_chunk_count(env, 1);
-    } else {
-        let last_idx = chunk_count - 1;
-        let mut last_chunk = get_chunk(env, last_idx);
-        if last_chunk.len() < CHUNK_SIZE {
-            last_chunk.push_back(username.clone());
-            set_chunk(env, last_idx, &last_chunk);
-        } else {
-            let mut new_chunk = Vec::new(env);
-            new_chunk.push_back(username.clone());
-            set_chunk(env, chunk_count, &new_chunk);
-            set_chunk_count(env, chunk_count + 1);
-        }
+    fn setup(env: &Env) -> Address {
+        let contract_id = env.register(TrustBridgeContract, ());
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), Address::generate(env)).unwrap();
+        });
+        contract_id
     }
 
-    bump_index_gen(env);
-}
-
-/// Removes `username` from both the flat and chunked index, then bumps the
-/// index generation so outstanding cursors are invalidated.
-pub fn remove_from_index(env: &Env, username: &String) {
-    // Flat index — compact out the entry.
-    let flat = get_index(env);
-    let mut compacted: Vec<String> = Vec::new(env);
-    let canonical = canon(env, username);
-    for entry in flat.iter() {
-        if canon(env, &entry) != canonical {
-            compacted.push_back(entry);
-        }
-    }
-    set_index(env, &compacted);
-
-    // Rebuild the chunked index from the updated flat index so they stay in
-    // sync.  compact_chunked_index already implements this logic; call it
-    // directly to avoid duplicating the algorithm.
-    compact_chunked_index(env);
-
-    bump_index_gen(env);
-}
-
-// ── Chunked index helpers ─────────────────────────────────────────────────────
-
-/// Number of chunk pages currently in the chunked index.
-#[must_use]
-pub fn get_chunk_count(env: &Env) -> u32 {
-    env.storage()
-        .instance()
-        .get(&CHUNK_CNT_KEY)
-        .unwrap_or(0)
-}
-
-pub fn set_chunk_count(env: &Env, count: u32) {
-    env.storage().instance().set(&CHUNK_CNT_KEY, &count);
-}
-
-/// Returns the usernames stored in chunk page `idx`.
-#[must_use]
-pub fn get_chunk(env: &Env, idx: u32) -> Vec<String> {
-    env.storage()
-        .persistent()
-        .get(&(CHUNK_KEY, idx))
-        .unwrap_or_else(|| Vec::new(env))
-}
-
-pub fn set_chunk(env: &Env, idx: u32, chunk: &Vec<String>) {
-    let key = (CHUNK_KEY, idx);
-    env.storage().persistent().set(&key, chunk);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
-}
-
-// ── Index generation (cursor invalidation) ────────────────────────────────────
-
-/// Current index generation counter (Issue #215).
-#[must_use]
-pub fn get_index_gen(env: &Env) -> u32 {
-    env.storage()
-        .instance()
-        .get(&INDEX_GEN_KEY)
-        .unwrap_or(0)
-}
-
-/// Increment the index generation.  Called by every operation that shifts
-/// index positions: `add_to_index` and `remove_from_index`.
-pub fn bump_index_gen(env: &Env) {
-    let gen = get_index_gen(env);
-    env.storage()
-        .instance()
-        .set(&INDEX_GEN_KEY, &gen.saturating_add(1));
-}
-
-// ── Per-record helpers ────────────────────────────────────────────────────────
-
-/// Reads the `ContributorRecord` for `github_username`, or `None` if absent.
-///
-/// Extends the entry's TTL on a successful read so hot records stay warm.
-#[must_use]
-pub fn get_record(env: &Env, github_username: &String) -> Option<ContributorRecord> {
-    let key = (REG_KEY, canon(env, github_username));
-    let record: Option<ContributorRecord> = env.storage().persistent().get(&key);
-    if record.is_some() {
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
-    }
-    record
-}
-
-pub fn set_record(env: &Env, github_username: &String, record: &ContributorRecord) {
-    let key = (REG_KEY, canon(env, github_username));
-    env.storage().persistent().set(&key, record);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
-}
-
-pub fn has_record(env: &Env, github_username: &String) -> bool {
-    env.storage()
-        .persistent()
-        .has(&(REG_KEY, canon(env, github_username)))
-}
-
-pub fn remove_record(env: &Env, github_username: &String) {
-    env.storage()
-        .persistent()
-        .remove(&(REG_KEY, canon(env, github_username)));
-}
-
-/// Bumps the TTL of a persistent record without reading its value (Issue #239).
-/// Returns `true` if the entry exists and was extended, `false` if absent.
-pub fn extend_record_ttl(env: &Env, github_username: &String) -> bool {
-    let key = (REG_KEY, canon(env, github_username));
-    if env.storage().persistent().has(&key) {
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
-        true
-    } else {
-        false
-    }
-}
-
-// ── Pending reverify flag ─────────────────────────────────────────────────────
-
-pub fn set_pending_reverify(env: &Env, github_username: &String, value: bool) {
-    let key = (PENDING_REVERIFY_KEY, canon(env, github_username));
-    env.storage().persistent().set(&key, &value);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
-}
-
-pub fn clear_pending_reverify(env: &Env, github_username: &String) {
-    env.storage()
-        .persistent()
-        .remove(&(PENDING_REVERIFY_KEY, canon(env, github_username)));
-}
-
-// ── Pause state ───────────────────────────────────────────────────────────────
-
-/// `true` when the contract is in the regular (non-emergency) paused state.
-#[must_use]
-pub fn is_paused(env: &Env) -> bool {
-    env.storage()
-        .instance()
-        .get(&PAUSED_KEY)
-        .unwrap_or(false)
-}
-
-/// Returns `Err(ContractError::Paused)` when the contract is paused.
-pub fn require_not_paused(env: &Env) -> Result<(), ContractError> {
-    if is_paused(env) || get_emergency_pause(env) {
-        Err(ContractError::Paused)
-    } else {
-        Ok(())
-    }
-}
-
-pub fn set_paused(env: &Env, paused: bool) {
-    env.storage().instance().set(&PAUSED_KEY, &paused);
-}
-
-// ── Emergency pause ───────────────────────────────────────────────────────────
-
-#[must_use]
-pub fn get_emergency_pause(env: &Env) -> bool {
-    env.storage()
-        .instance()
-        .get(&EMERGENCY_PAUSE_KEY)
-        .unwrap_or(false)
-}
-
-pub fn set_emergency_pause(env: &Env, paused: bool) {
-    env.storage()
-        .instance()
-        .set(&EMERGENCY_PAUSE_KEY, &paused);
-}
-
-#[must_use]
-pub fn get_emergency_pause_ts(env: &Env) -> u64 {
-    env.storage()
-        .instance()
-        .get(&EMERGENCY_PAUSE_TS_KEY)
-        .unwrap_or(0)
-}
-
-pub fn set_emergency_pause_ts(env: &Env, ts: u64) {
-    env.storage()
-        .instance()
-        .set(&EMERGENCY_PAUSE_TS_KEY, &ts);
-}
-
-// ── Guardian ──────────────────────────────────────────────────────────────────
-
-#[must_use]
-pub fn get_guardian(env: &Env) -> Option<Address> {
-    env.storage().instance().get(&GUARDIAN_KEY)
-}
-
-pub fn set_guardian_address(env: &Env, guardian: &Address) {
-    env.storage().instance().set(&GUARDIAN_KEY, guardian);
-}
-
-pub fn remove_guardian(env: &Env) {
-    env.storage().instance().remove(&GUARDIAN_KEY);
-}
-
-/// `true` when `address` is the currently configured guardian.
-#[must_use]
-pub fn is_guardian(env: &Env, address: &Address) -> bool {
-    matches!(get_guardian(env), Some(g) if g == *address)
-}
-
-// ── Upgrade cooldown ──────────────────────────────────────────────────────────
-
-#[must_use]
-pub fn get_cooldown(env: &Env) -> u64 {
-    env.storage().instance().get(&COOLDOWN_KEY).unwrap_or(0)
-}
-
-pub fn set_cooldown(env: &Env, seconds: u64) {
-    env.storage().instance().set(&COOLDOWN_KEY, &seconds);
-}
-
-#[must_use]
-pub fn get_last_upgrade(env: &Env) -> u64 {
-    env.storage()
-        .instance()
-        .get(&LAST_UPG_KEY)
-        .unwrap_or(0)
-}
-
-pub fn set_last_upgrade(env: &Env, ts: u64) {
-    env.storage().instance().set(&LAST_UPG_KEY, &ts);
-}
-
-/// `true` when the upgrade cooldown period has not yet elapsed.
-#[must_use]
-pub fn is_in_cooldown(env: &Env) -> bool {
-    let cooldown = get_cooldown(env);
-    if cooldown == 0 {
-        return false;
-    }
-    let last = get_last_upgrade(env);
-    if last == 0 {
-        return false;
-    }
-    env.ledger().timestamp() < last.saturating_add(cooldown)
-}
-
-/// Records that `github_username` was last acted upon at the current ledger
-/// timestamp (used by the upgrade cooldown per-username variant).
-pub fn set_last_action(env: &Env, github_username: &String, ts: u64) {
-    let key = (LAST_ACT_KEY, canon(env, github_username));
-    env.storage().persistent().set(&key, &ts);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
-}
-
-// ── Contract version ──────────────────────────────────────────────────────────
-
-#[must_use]
-pub fn get_version(env: &Env) -> Option<(u32, u32, u32)> {
-    env.storage()
-        .instance()
-        .get::<Symbol, (u32, u32, u32)>(&VER_KEY)
-}
-
-pub fn set_version(env: &Env, version: (u32, u32, u32)) {
-    env.storage().instance().set(&VER_KEY, &version);
-}
-
-// ── Per-username verify limit ─────────────────────────────────────────────────
-
-#[must_use]
-pub fn get_verify_limit(env: &Env) -> u32 {
-    env.storage().instance().get(&VER_CFG_KEY).unwrap_or(0)
-}
-
-pub fn set_verify_limit(env: &Env, limit: u32) {
-    env.storage().instance().set(&VER_CFG_KEY, &limit);
-}
-
-// ── WASM attestation / provenance ─────────────────────────────────────────────
-
-#[must_use]
-pub fn is_attestation_required(env: &Env) -> bool {
-    env.storage()
-        .instance()
-        .get(&ATTEST_REQUIRED_KEY)
-        .unwrap_or(false)
-}
-
-/// Returns `Err(ContractError::AttestationRequired)` when attestation is
-/// required but no valid (non-expired) attestation is currently live.
-pub fn require_attestation_if_required(
-    env: &Env,
-    wasm_hash: &BytesN<32>,
-) -> Result<(), ContractError> {
-    if !is_attestation_required(env) {
-        return Ok(());
-    }
-    let Some(att) = get_wasm_attestation(env) else {
-        return Err(ContractError::AttestationRequired);
-    };
-    if env.ledger().timestamp() >= att.expires_at {
-        return Err(ContractError::AttestationExpired);
-    }
-    if att.wasm_hash != *wasm_hash {
-        return Err(ContractError::UnattestedWasm);
-    }
-    Ok(())
-}
-
-#[must_use]
-pub fn get_wasm_attestation(env: &Env) -> Option<WasmAttestation> {
-    env.storage().instance().get(&ATTEST_KEY)
-}
-
-pub fn set_wasm_attestation(env: &Env, attestation: &WasmAttestation) {
-    env.storage().instance().set(&ATTEST_KEY, attestation);
-}
-
-pub fn remove_wasm_attestation(env: &Env) {
-    env.storage().instance().remove(&ATTEST_KEY);
-}
-
-#[must_use]
-pub fn get_wasm_provenance(env: &Env) -> Option<WasmProvenance> {
-    env.storage().instance().get(&PROV_KEY)
-}
-
-pub fn set_wasm_provenance(env: &Env, provenance: &WasmProvenance) {
-    env.storage().instance().set(&PROV_KEY, provenance);
-}
-
-// ── Role storage ──────────────────────────────────────────────────────────────
-//
-// Each address's role is stored under `(ROLE_KEY, address)` in instance
-// storage.  Expired grants (Issue #221) are stored identically to live ones;
-// `get_role` applies the lazy expiry check so reads are always correct.
-
-/// Returns the role currently held by `address`, or `None` if the address
-/// holds no role or its grant has expired (Issue #221).
-#[must_use]
-pub fn get_role(env: &Env, address: &Address) -> Option<Role> {
-    let role: Option<Role> = env.storage().instance().get(&(ROLE_KEY, address.clone()));
-    if role.is_none() {
-        return None;
-    }
-    // Lazy expiry: if an expiry timestamp is stored and has passed, treat the
-    // grant as absent without writing (removal happens via `remove_role`).
-    if let Some(expires_at) = get_role_expiry(env, address) {
-        if env.ledger().timestamp() >= expires_at {
-            return None;
-        }
-    }
-    role
-}
-
-pub fn set_role(env: &Env, address: &Address, role: &Role) {
-    env.storage()
-        .instance()
-        .set(&(ROLE_KEY, address.clone()), role);
-    add_to_role_index(env, address);
-}
-
-pub fn remove_role(env: &Env, address: &Address) {
-    env.storage()
-        .instance()
-        .remove(&(ROLE_KEY, address.clone()));
-    // Also clear any stored expiry.
-    env.storage()
-        .instance()
-        .remove(&(ROLE_EXPIRY_KEY, address.clone()));
-    remove_from_role_index(env, address);
-}
-
-/// Raw expiry timestamp for `address`'s role grant, or `None` if the grant
-/// was issued without an expiry (Issue #221).
-#[must_use]
-pub fn get_role_expiry(env: &Env, address: &Address) -> Option<u64> {
-    env.storage()
-        .instance()
-        .get(&(ROLE_EXPIRY_KEY, address.clone()))
-}
-
-pub fn set_role_expiry(env: &Env, address: &Address, expires_at: u64) {
-    env.storage()
-        .instance()
-        .set(&(ROLE_EXPIRY_KEY, address.clone()), &expires_at);
-}
-
-/// Returns `Err(ContractError::RoleExpired)` if `address` holds a role whose
-/// expiry timestamp has passed (Issue #221).
-pub fn require_role_not_expired(env: &Env, address: &Address) -> Result<(), ContractError> {
-    if let Some(expires_at) = get_role_expiry(env, address) {
-        if env.ledger().timestamp() >= expires_at {
-            return Err(ContractError::RoleExpired);
-        }
-    }
-    Ok(())
-}
-
-// ── Role delay / pending grants (Issue #220) ──────────────────────────────────
-
-#[must_use]
-pub fn get_role_delay(env: &Env) -> u64 {
-    env.storage()
-        .instance()
-        .get(&ROLE_DELAY_KEY)
-        .unwrap_or(0)
-}
-
-pub fn set_role_delay(env: &Env, seconds: u64) {
-    env.storage().instance().set(&ROLE_DELAY_KEY, &seconds);
-}
-
-#[must_use]
-pub fn get_pending_role(env: &Env, address: &Address) -> Option<PendingRoleGrant> {
-    env.storage()
-        .instance()
-        .get(&(PENDING_ROLE_KEY, address.clone()))
-}
-
-pub fn set_pending_role(env: &Env, address: &Address, grant: &PendingRoleGrant) {
-    env.storage()
-        .instance()
-        .set(&(PENDING_ROLE_KEY, address.clone()), grant);
-}
-
-pub fn remove_pending_role(env: &Env, address: &Address) {
-    env.storage()
-        .instance()
-        .remove(&(PENDING_ROLE_KEY, address.clone()));
-}
-
-// ── Paginated export (Issue #215) ─────────────────────────────────────────────
-//
-// Cursors are opaque 8-byte tokens: 4 bytes of index generation + 4 bytes of
-// offset.  Any removal bumps the generation, making all outstanding cursors
-// stale so consumers must restart from `None` rather than silently skip or
-// duplicate records.
-
-/// Encodes a cursor as an 8-byte token: `[gen(4 bytes BE)][offset(4 bytes BE)]`.
-fn encode_cursor(env: &Env, gen: u32, offset: u32) -> BytesN<8> {
-    let mut buf = Bytes::new(env);
-    buf.push_back((gen >> 24) as u8);
-    buf.push_back((gen >> 16) as u8);
-    buf.push_back((gen >> 8) as u8);
-    buf.push_back(gen as u8);
-    buf.push_back((offset >> 24) as u8);
-    buf.push_back((offset >> 16) as u8);
-    buf.push_back((offset >> 8) as u8);
-    buf.push_back(offset as u8);
-    BytesN::try_from_val(env, &buf).unwrap()
-}
-
-/// Decodes a cursor token into `(generation, offset)`, or returns
-/// `Err(ContractError::InvalidCursor)` if the bytes are malformed.
-fn decode_cursor(token: &BytesN<8>) -> (u32, u32) {
-    let gen = ((token.get(0).unwrap_or(0) as u32) << 24)
-        | ((token.get(1).unwrap_or(0) as u32) << 16)
-        | ((token.get(2).unwrap_or(0) as u32) << 8)
-        | (token.get(3).unwrap_or(0) as u32);
-    let offset = ((token.get(4).unwrap_or(0) as u32) << 24)
-        | ((token.get(5).unwrap_or(0) as u32) << 16)
-        | ((token.get(6).unwrap_or(0) as u32) << 8)
-        | (token.get(7).unwrap_or(0) as u32);
-    (gen, offset)
-}
-
-/// Internal implementation shared by `get_registered_paginated` (admin) and
-/// `get_public_paginated` (no-auth).
-pub fn get_registered_paginated_internal(
-    env: &Env,
-    cursor: Option<BytesN<8>>,
-    limit: u32,
-) -> Result<ExportPage, ContractError> {
-    let capped = if limit == 0 || limit > MAX_PAGE_LIMIT {
-        MAX_PAGE_LIMIT
-    } else {
-        limit
-    };
-
-    let current_gen = get_index_gen(env);
-    let start_offset: u32 = if let Some(token) = cursor {
-        let (gen, offset) = decode_cursor(&token);
-        if gen != current_gen {
-            return Err(ContractError::InvalidCursor);
-        }
-        offset
-    } else {
-        0
-    };
-
-    let index = get_index(env);
-    let total = index.len();
-
-    if start_offset > total {
-        return Err(ContractError::InvalidCursor);
+    fn name(env: &Env, s: &str) -> String {
+        String::from_str(env, s)
     }
 
-    let mut records: Vec<(String, ContributorRecord)> = Vec::new(env);
-    let end = (start_offset.saturating_add(capped)).min(total);
-
-    for i in start_offset..end {
-        if let Some(username) = index.get(i) {
-            if let Some(record) = get_record(env, &username) {
-                records.push_back((username, record));
-            }
-        }
+    /// Each auth-requiring call runs in its own `as_contract` frame: the host
+    /// rejects a second `require_auth` for the same address in one frame.
+    fn register_flagged(env: &Env, contract_id: &Address, username: &str, owner: &Address) {
+        env.as_contract(contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                name(env, username),
+                owner.clone(),
+                Vec::new(env),
+            )
+            .unwrap();
+            set_pending_reverify(env, &name(env, username), true);
+        });
     }
 
-    let has_more = end < total;
-    let next_cursor = if has_more {
-        Some(encode_cursor(env, current_gen, end))
-    } else {
-        None
-    };
+    #[test]
+    fn test_pending_reverify_set_get_clear_round_trip() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        env.as_contract(&contract_id, || {
+            let octocat = name(&env, "octocat");
+            assert!(!get_pending_reverify(&env, &octocat));
 
-    let merkle_root = crate::merkle::root_of_records(env, &records);
+            set_pending_reverify(&env, &octocat, true);
+            assert!(get_pending_reverify(&env, &octocat));
 
-    Ok(ExportPage {
-        records,
-        next_cursor,
-        total,
-        merkle_root,
-        has_more,
-    })
-}
-
-/// Returns a proof struct for a single record (Issue #230).
-pub fn build_record_proof(env: &Env, github_username: &String) -> RecordProof {
-    let key = (REG_KEY, canon(env, github_username));
-    let record: Option<ContributorRecord> = env.storage().persistent().get(&key);
-    RecordProof {
-        exists: record.is_some(),
-        verified: record.as_ref().map(|r| r.verified).unwrap_or(false),
-        registered_at: record.as_ref().map(|r| r.registered_at).unwrap_or(0),
-        as_of_ledger: env.ledger().sequence(),
-        ttl_threshold_ledgers: TTL_THRESHOLD,
-        ttl_bump_ledgers: TTL_BUMP,
-        key_prefix: REG_KEY,
+            clear_pending_reverify(&env, &octocat);
+            assert!(!get_pending_reverify(&env, &octocat));
+            assert!(!env
+                .storage()
+                .persistent()
+                .has(&(PENDING_REVERIFY_KEY, canon(&env, &octocat))));
+        });
     }
-}
 
-/// SHA-256 digest over the XDR encoding of `page` (Issue #223).
-///
-/// This is what `export_attestation` binds — an off-chain auditor can
-/// re-derive the same digest from the exported JSON without a live RPC call.
-pub fn build_export_digest(env: &Env, page: &ExportPage) -> BytesN<32> {
-    // Encode the page to XDR bytes and hash them.
-    let encoded = page.clone().to_xdr(env);
-    env.crypto().sha256(&encoded).to_bytes()
-}
-
-/// Public alias for `get_registered_paginated_internal` — used by
-/// `get_public_paginated` (no-auth) in lib.rs.
-pub fn get_registered_paginated(
-    env: &Env,
-    cursor: Option<BytesN<8>>,
-    limit: u32,
-) -> Result<ExportPage, ContractError> {
-    get_registered_paginated_internal(env, cursor, limit)
-}
-
-/// Sets a role **with** an optional expiry timestamp (Issue #221).
-///
-/// `expires_at = 0` means no expiry — identical to `set_role`.
-pub fn set_role_with_expiry(env: &Env, address: &Address, role: &Role, expires_at: u64) {
-    set_role(env, address, role);
-    if expires_at > 0 {
-        set_role_expiry(env, address, expires_at);
+    #[test]
+    fn test_clear_pending_reverify_on_unknown_username_is_a_no_op() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        env.as_contract(&contract_id, || {
+            let ghost = name(&env, "ghost");
+            clear_pending_reverify(&env, &ghost);
+            clear_pending_reverify(&env, &ghost);
+            assert!(!get_pending_reverify(&env, &ghost));
+        });
     }
-}
 
-// ── Oracle-proof verified-by-address state ────────────────────────────────────
-//
-// A lightweight boolean flag stored per `Address` in instance storage,
-// written by `oracle_proof::verify_with_oracle_proof` when an oracle
-// signature check passes. This is intentionally separate from the
-// username-keyed `ContributorRecord.verified` flag used by `verify()` —
-// this flag tracks "an allowlisted oracle attested to this Stellar address"
-// at the address level, without requiring a username lookup.
+    /// The flag is keyed like the record: by the canonical (lower-case) name.
+    #[test]
+    fn test_pending_reverify_uses_canonical_username_key() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        env.as_contract(&contract_id, || {
+            set_pending_reverify(&env, &name(&env, "OctoCat"), true);
+            assert!(get_pending_reverify(&env, &name(&env, "octocat")));
+            clear_pending_reverify(&env, &name(&env, "OCTOCAT"));
+            assert!(!get_pending_reverify(&env, &name(&env, "octocat")));
+        });
+    }
 
-const ORACLE_VERIFIED_KEY: Symbol = symbol_short!("orc_ver");
+    /// Removing a registration drops its flag so a later re-registration of
+    /// the same name does not inherit it.
+    #[test]
+    fn test_remove_record_clears_pending_reverify() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        let owner = Address::generate(&env);
+        register_flagged(&env, &contract_id, "octocat", &owner);
+        env.as_contract(&contract_id, || {
+            let octocat = name(&env, "octocat");
+            TrustBridgeContract::remove(env.clone(), owner.clone(), octocat.clone()).unwrap();
+            assert!(!get_pending_reverify(&env, &octocat));
+        });
+    }
 
-/// Records that `subject` has been oracle-verified.
-pub fn set_oracle_verified(env: &Env, subject: &Address) {
-    env.storage()
-        .instance()
-        .set(&(ORACLE_VERIFIED_KEY, subject.clone()), &true);
-}
-
-/// Returns `true` if `subject` has been marked oracle-verified via
-/// `verify_with_oracle_proof`.
-#[must_use]
-pub fn is_verified(env: &Env, subject: &Address) -> bool {
-    env.storage()
-        .instance()
-        .get(&(ORACLE_VERIFIED_KEY, subject.clone()))
-        .unwrap_or(false)
+    /// `rename` moves an outstanding flag to the new name and leaves none
+    /// behind under the old one.
+    #[test]
+    fn test_rename_migrates_pending_reverify() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        let owner = Address::generate(&env);
+        register_flagged(&env, &contract_id, "octocat", &owner);
+        env.as_contract(&contract_id, || {
+            let (old, new) = (name(&env, "octocat"), name(&env, "hubot"));
+            TrustBridgeContract::rename(env.clone(), owner.clone(), old.clone(), new.clone())
+                .unwrap();
+            assert!(!get_pending_reverify(&env, &old));
+            assert!(get_pending_reverify(&env, &new));
+        });
+    }
 }

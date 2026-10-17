@@ -299,8 +299,6 @@ mod tests {
         });
     }
 
-    const SUBJECT: &str = "GAZOJB42QBRQC44KFDMPWIKO5JBARJ3MBALJQU2T7M2WZUDZ2D3FVT4I";
-
     #[test]
     fn non_allowlisted_key_is_rejected() {
         let env = Env::default();

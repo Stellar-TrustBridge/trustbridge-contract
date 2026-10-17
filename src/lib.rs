@@ -82,7 +82,8 @@ use crate::storage::{
     get_ever_verified_count as storage_get_ever_verified_count,
     get_guardian as storage_get_guardian, get_index,
     get_last_event_ledger as storage_get_last_event_ledger, get_last_upgrade,
-    get_network_id as storage_get_network_id, get_pending_role as storage_get_pending_role,
+    get_network_id as storage_get_network_id, get_pending_reverify,
+    get_pending_role as storage_get_pending_role,
     get_pending_rotation as storage_get_pending_rotation, get_record,
     get_registered_paginated_internal, get_role as storage_get_role,
     get_role_delay as storage_get_role_delay,
@@ -853,6 +854,9 @@ impl TrustBridgeContract {
     /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
     /// - [`ContractError::Paused`] if the contract is paused.
     /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
+    /// - [`ContractError::RoleGrantNotReady`] if a `set_role_delay` timelock is
+    ///   armed and `target` does not already actively hold `role`: new grants
+    ///   must go through `set_role` + `activate_role` (Issue #220).
     pub fn set_role_with_expiry(
         env: Env,
         target: Address,
@@ -864,6 +868,13 @@ impl TrustBridgeContract {
 
         let admin = get_admin(&env)?;
         admin.require_auth();
+
+        // With the grant timelock armed (Issue #220), this path must not mint
+        // a role instantly. It may still change the expiry of a grant the
+        // target already actively holds (e.g. to off-board a key early).
+        if storage_get_role_delay(&env) > 0 && storage_get_role(&env, &target) != Some(role) {
+            return Err(ContractError::RoleGrantNotReady);
+        }
 
         crate::storage::set_role_with_expiry(&env, &target, &role, expires_at);
         let timestamp = env.ledger().timestamp();
@@ -3883,6 +3894,8 @@ impl TrustBridgeContract {
 
         let timestamp = env.ledger().timestamp();
         let verification_cleared = record.verified;
+        // Read before `remove_record` below drops the old name's flag.
+        let reverify_pending = get_pending_reverify(&env, &old_username);
 
         // Verification attested the old handle; it does not follow the rename.
         if verification_cleared {
@@ -3904,8 +3917,8 @@ impl TrustBridgeContract {
         remove_record(&env, &old_username);
         remove_from_index(&env, &old_username);
 
-        clear_pending_reverify(&env, &old_username);
-        if verification_cleared {
+        // An outstanding re-verify flag moves with the registration.
+        if verification_cleared || reverify_pending {
             set_pending_reverify(&env, &new_username, true);
         }
 
@@ -11990,6 +12003,9 @@ mod test {
                 Some(5_000),
             )
             .unwrap();
+        });
+        // Separate frame: one `require_auth` per address per frame.
+        env.as_contract(&contract_id, || {
             TrustBridgeContract::remove_role(env.clone(), user.clone()).unwrap();
             assert_eq!(
                 TrustBridgeContract::get_role(env.clone(), user.clone()),
@@ -12052,6 +12068,8 @@ mod test {
                 Vec::new(&env),
             )
             .unwrap();
+        });
+        env.as_contract(&contract_id, || {
             TrustBridgeContract::set_role_with_expiry(
                 env.clone(),
                 verifier.clone(),
@@ -12066,6 +12084,8 @@ mod test {
             // Still active: the expired-role holder can verify normally.
             TrustBridgeContract::verify(env.clone(), verifier.clone(), username(&env, "octocat"))
                 .unwrap();
+        });
+        env.as_contract(&contract_id, || {
             TrustBridgeContract::revoke_verification(
                 env.clone(),
                 admin.clone(),
@@ -12083,6 +12103,8 @@ mod test {
                 username(&env, "octocat"),
             );
             assert_eq!(res, Err(ContractError::RoleExpired));
+        });
+        env.as_contract(&contract_id, || {
             let batch_res = TrustBridgeContract::batch_verify(
                 env.clone(),
                 verifier.clone(),

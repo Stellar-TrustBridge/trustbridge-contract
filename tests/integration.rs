@@ -11,11 +11,7 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{
-    symbol_short,
-    testutils::{Address as _, Events as _, Ledger as _},
-    Address, Env, String, Symbol, TryFromVal,
-};
+use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, String, Vec};
 
 use trustbridge_contract::{
     AuditEventType, AuditLogEntry, ContractError, Role, RoleGrantCancelledEvent,
