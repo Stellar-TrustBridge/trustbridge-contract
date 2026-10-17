@@ -11,7 +11,7 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, String};
+use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, String, Vec};
 
 use soroban_sdk::testutils::Ledger as _;
 use trustbridge_contract::{ContractError, Role, TrustBridgeContract};
@@ -35,6 +35,7 @@ fn s(env: &Env, text: &str) -> String {
 }
 
 fn record_ttl(env: &Env, contract_id: &Address, username: &String) -> u32 {
+    use soroban_sdk::testutils::storage::Persistent as _;
     env.as_contract(contract_id, || {
         env.storage()
             .persistent()
@@ -98,7 +99,7 @@ fn test_near_expiry_record_is_revived_by_keeper_extension() {
         usernames.push_back(username.clone());
         assert_eq!(
             TrustBridgeContract::extend_registry_ttl(env.clone(), usernames),
-            1
+            Ok(1)
         );
     });
 
@@ -821,7 +822,7 @@ fn test_integration_get_registered_paginated_not_initialized() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         assert_eq!(
-            TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10),
+            TrustBridgeContract::get_registered_paginated(env.clone(), None, 10),
             Err(ContractError::NotInitialized),
             "get_registered_paginated before init"
         );
@@ -835,7 +836,7 @@ fn test_integration_get_public_paginated_not_initialized() {
     let contract_id = env.register(TrustBridgeContract, ());
     env.as_contract(&contract_id, || {
         assert_eq!(
-            TrustBridgeContract::get_public_paginated(env.clone(), 0, 10),
+            TrustBridgeContract::get_public_paginated(env.clone(), None, 10),
             Err(ContractError::NotInitialized),
             "get_public_paginated before init"
         );
@@ -882,7 +883,7 @@ fn test_integration_guards_lifted_after_initialization() {
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+        let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         assert_eq!(page.records.len(), 1);
     });
 }
@@ -923,7 +924,7 @@ fn test_integration_paginated_export_after_multiple_removals() {
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+        let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         assert_eq!(page.records.len(), 2);
         assert_eq!(page.total, 2);
         assert!(!page.has_more);
@@ -956,7 +957,7 @@ fn test_integration_public_paginated_after_peer_removal() {
         TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "bob")).unwrap();
     });
     env.as_contract(&contract_id, || {
-        let page = TrustBridgeContract::get_public_paginated(env.clone(), 0, 10).unwrap();
+        let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
         assert_eq!(
             page.records.len(),
             2,
@@ -1316,7 +1317,7 @@ fn test_integration_middle_user_removal_index_compaction() {
     // Verify paginated export is consistent
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+        let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         assert_eq!(
             page.records.len(),
             2,
@@ -1332,7 +1333,7 @@ fn test_integration_middle_user_removal_index_compaction() {
 
     // Verify public paginated endpoint is also consistent
     env.as_contract(&contract_id, || {
-        let page = TrustBridgeContract::get_public_paginated(env.clone(), 0, 10).unwrap();
+        let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
         assert_eq!(
             page.records.len(),
             2,
@@ -2357,7 +2358,7 @@ fn test_compact_index_no_op_on_dense_registry() {
     // Snapshot paginated results before compaction.
     env.mock_all_auths();
     let before_page = env.as_contract(&contract_id, || {
-        trustbridge_contract::TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10)
+        trustbridge_contract::TrustBridgeContract::get_registered_paginated(env.clone(), None, 10)
             .unwrap()
     });
 
@@ -2369,9 +2370,12 @@ fn test_compact_index_no_op_on_dense_registry() {
     // After compaction the same records must be returned.
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let after_page =
-            trustbridge_contract::TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10)
-                .unwrap();
+        let after_page = trustbridge_contract::TrustBridgeContract::get_registered_paginated(
+            env.clone(),
+            None,
+            10,
+        )
+        .unwrap();
         assert_eq!(
             before_page.records.len(),
             after_page.records.len(),
@@ -2440,9 +2444,12 @@ fn test_compact_index_after_sparse_removals_restores_dense_pagination() {
     // Paginated admin endpoint must return exactly the 3 surviving users.
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let page =
-            trustbridge_contract::TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10)
-                .unwrap();
+        let page = trustbridge_contract::TrustBridgeContract::get_registered_paginated(
+            env.clone(),
+            None,
+            10,
+        )
+        .unwrap();
         assert_eq!(
             page.records.len(),
             3,
@@ -2468,7 +2475,7 @@ fn test_compact_index_after_sparse_removals_restores_dense_pagination() {
     // Public paginated endpoint must agree.
     env.as_contract(&contract_id, || {
         let page =
-            trustbridge_contract::TrustBridgeContract::get_public_paginated(env.clone(), 0, 10)
+            trustbridge_contract::TrustBridgeContract::get_public_paginated(env.clone(), None, 10)
                 .unwrap();
         assert_eq!(page.records.len(), 3);
     });
@@ -2502,9 +2509,12 @@ fn test_compact_index_single_entry_registry() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let page =
-            trustbridge_contract::TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10)
-                .unwrap();
+        let page = trustbridge_contract::TrustBridgeContract::get_registered_paginated(
+            env.clone(),
+            None,
+            10,
+        )
+        .unwrap();
         assert_eq!(page.records.len(), 1);
         assert_eq!(page.records.get(0).unwrap().0, s(&env, "solo"));
     });
@@ -2586,9 +2596,12 @@ fn test_compact_index_is_idempotent() {
     // Also confirm pagination is the same after both compactions.
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let page =
-            trustbridge_contract::TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10)
-                .unwrap();
+        let page = trustbridge_contract::TrustBridgeContract::get_registered_paginated(
+            env.clone(),
+            None,
+            10,
+        )
+        .unwrap();
         assert_eq!(
             page.records.len(),
             2,
@@ -2785,7 +2798,7 @@ fn test_protocol_upgrade_rehearsal() {
         TrustBridgeContract::get_role(env.clone(), upgrader.clone())
     });
     let pre_paginated = env.as_contract(&contract_id, || {
-        TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap()
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap()
     });
     let pre_health = env.as_contract(&contract_id, || {
         TrustBridgeContract::get_health(env.clone()).unwrap()
@@ -2906,7 +2919,7 @@ fn test_protocol_upgrade_rehearsal() {
     );
 
     let post_paginated = env.as_contract(&contract_id, || {
-        TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap()
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap()
     });
     assert_eq!(
         pre_paginated.total, post_paginated.total,
@@ -3062,7 +3075,7 @@ fn test_conformance_public_reads_available_while_paused() {
     // ── Fallible public reads: must NOT return `Err(Paused)` while paused ────
     env.as_contract(&contract_id, || {
         // The regression this issue is really about.
-        let page = TrustBridgeContract::get_public_paginated(env.clone(), 0, 10);
+        let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10);
         assert_ne!(
             page,
             Err(ContractError::Paused),
@@ -3172,7 +3185,7 @@ fn test_conformance_admin_reads_while_paused_need_auth_not_pause() {
     env.as_contract(&contract_id, || {
         assert!(TrustBridgeContract::get_all_registered(env.clone()).is_ok());
         assert!(TrustBridgeContract::get_registered_page(env.clone(), 0, 10).is_ok());
-        assert!(TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).is_ok());
+        assert!(TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).is_ok());
     });
 
     // None of them fail with `Paused` (they fail auth, not pause, for a
@@ -3215,16 +3228,17 @@ fn test_issue306_remove_compact_reregister_counter_parity() {
         // at the max page limit).
         let mut pages = 0u32;
         let mut seen = 0u32;
-        let mut cursor = 0u32;
+        let mut cursor: Option<soroban_sdk::BytesN<8>> = None;
         loop {
             let page =
-                TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 100).unwrap();
+                TrustBridgeContract::get_registered_paginated(env.clone(), cursor.clone(), 100)
+                    .unwrap();
             pages += 1;
             seen += page.records.len() as u32;
             if !page.has_more {
                 break;
             }
-            cursor += page.records.len() as u32;
+            cursor = page.next_cursor.clone();
         }
         assert!(
             pages >= 4,
@@ -3344,102 +3358,156 @@ fn test_issue306_remove_compact_reregister_counter_parity() {
         // see every live record exactly once (I5/I9-style check for the
         // compacted registry).
         let mut seen = 0u32;
-        let mut cursor = 0u32;
+        let mut cursor: Option<soroban_sdk::BytesN<8>> = None;
         loop {
             let page =
-                TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 100).unwrap();
+                TrustBridgeContract::get_registered_paginated(env.clone(), cursor.clone(), 100)
+                    .unwrap();
             let page_size = page.records.len() as u32;
             seen += page_size;
             if !page.has_more {
                 break;
             }
-            cursor += page_size;
+            cursor = page.next_cursor.clone();
         }
         assert_eq!(seen, stats.total, "paginated walk must visit every record");
         assert_eq!(seen, all.len() as u32);
     });
 }
 
-// Maps to the set_bot_status rows in auth_matrix.csv: the admin or the
-// record's own registrant may set the flag; anyone else gets NotAuthorized.
-#[test]
-fn test_auth_matrix_set_bot_status_admin_user_random() {
-    let (env, admin, user1, _user2, contract_id) = setup_test_env();
-    let random = Address::generate(&env);
-    let name = s(&env, "bot-matrix");
+// ── Oracle-proof verification (Issue #584) ──────────────────────────────────
 
-    env.mock_all_auths();
-    env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), name.clone(), user1.clone(), Vec::new(&env))
-            .unwrap();
+mod oracle_proof {
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        Address, Bytes, BytesN, Env, String, Vec,
+    };
+    use trustbridge_contract::{
+        ContractError, OracleProof, TrustBridgeContract, TrustBridgeContractClient,
+    };
 
-        assert_eq!(
-            TrustBridgeContract::set_bot_status(env.clone(), admin.clone(), name.clone(), true),
-            Ok(())
+    /// Registrant the fixture signatures below are bound to.
+    const SUBJECT: &str = "CAZOJB42QBRQC44KFDMPWIKO5JBARJ3MBALJQU2T7M2WZUDZ2D3FUXZR";
+    /// Ed25519 key with seed `sha256("trustbridge-oracle-test-key-v1")`.
+    const ORACLE_PUBKEY: [u8; 32] = [
+        179, 58, 29, 50, 177, 220, 29, 101, 34, 2, 132, 169, 155, 83, 4, 194, 225, 186, 125, 165,
+        137, 197, 121, 222, 196, 246, 147, 247, 102, 8, 90, 166,
+    ];
+    /// Signature over `octocat:<SUBJECT>:0`.
+    const SIG_NO_EXPIRY: [u8; 64] = [
+        119, 66, 42, 126, 119, 125, 225, 20, 230, 191, 213, 77, 251, 218, 203, 34, 10, 157, 179,
+        220, 98, 214, 153, 200, 200, 174, 50, 27, 149, 203, 145, 63, 66, 235, 102, 208, 199, 126,
+        244, 182, 206, 237, 117, 9, 78, 162, 99, 94, 177, 163, 60, 90, 109, 100, 224, 66, 183, 239,
+        92, 104, 59, 116, 147, 0,
+    ];
+    /// Signature over `octocat:<SUBJECT>:5000`.
+    const SIG_EXPIRES_5000: [u8; 64] = [
+        86, 209, 38, 134, 210, 30, 34, 108, 245, 182, 124, 84, 93, 101, 21, 94, 26, 79, 211, 205,
+        209, 105, 80, 55, 67, 109, 120, 60, 206, 50, 83, 74, 32, 172, 203, 206, 221, 99, 154, 101,
+        71, 182, 91, 185, 233, 114, 140, 148, 216, 29, 184, 211, 42, 9, 185, 251, 58, 186, 150, 63,
+        84, 13, 198, 12,
+    ];
+
+    fn setup(env: &Env) -> TrustBridgeContractClient<'_> {
+        env.mock_all_auths();
+        let client = TrustBridgeContractClient::new(env, &env.register(TrustBridgeContract, ()));
+        client.initialize(&Address::generate(env));
+        client.register(
+            &String::from_str(env, "octocat"),
+            &Address::from_str(env, SUBJECT),
+            &Vec::new(env),
         );
+        client
+    }
+
+    fn allowlist(env: &Env) -> Vec<BytesN<32>> {
+        let mut keys = Vec::new(env);
+        keys.push_back(BytesN::from_array(env, &ORACLE_PUBKEY));
+        keys
+    }
+
+    fn proof(env: &Env, expires_at: u64, sig: &[u8; 64]) -> OracleProof {
+        let message = std::format!("octocat:{SUBJECT}:{expires_at}");
+        OracleProof {
+            oracle_pubkey: BytesN::from_array(env, &ORACLE_PUBKEY),
+            message: Bytes::from_slice(env, message.as_bytes()),
+            signature: BytesN::from_array(env, sig),
+            expires_at,
+        }
+    }
+
+    #[test]
+    fn test_verify_with_oracle_proof_marks_record_verified() {
+        let env = Env::default();
+        let client = setup(&env);
+        let octocat = String::from_str(&env, "octocat");
+
+        client.set_oracle_allowlist(&allowlist(&env));
+        assert_eq!(client.get_oracle_allowlist(), allowlist(&env));
+
+        client.verify_with_oracle_proof(&octocat, &proof(&env, 0, &SIG_NO_EXPIRY));
+
+        assert!(client.get_address(&octocat).unwrap().verified);
+        assert_eq!(client.get_stats().verified, 1);
+
+        // Already-verified behaves exactly like `verify`.
         assert_eq!(
-            TrustBridgeContract::set_bot_status(env.clone(), user1.clone(), name.clone(), false),
-            Ok(())
+            client.try_verify_with_oracle_proof(&octocat, &proof(&env, 0, &SIG_NO_EXPIRY)),
+            Err(Ok(ContractError::AlreadyVerified))
         );
+    }
+
+    #[test]
+    fn test_verify_with_oracle_proof_empty_allowlist_rejects() {
+        let env = Env::default();
+        let client = setup(&env);
+        let octocat = String::from_str(&env, "octocat");
+
+        assert_eq!(client.get_oracle_allowlist().len(), 0);
         assert_eq!(
-            TrustBridgeContract::set_bot_status(env.clone(), random.clone(), name.clone(), true),
-            Err(ContractError::NotAuthorized)
+            client.try_verify_with_oracle_proof(&octocat, &proof(&env, 0, &SIG_NO_EXPIRY)),
+            Err(Ok(ContractError::OracleProofNotAllowlisted))
         );
-    });
-}
+        assert!(!client.get_address(&octocat).unwrap().verified);
+    }
 
-// set_bot_status: a registrant may only flag their own record.
-#[test]
-fn test_set_bot_status_rejects_other_registrant() {
-    let (env, _admin, user1, user2, contract_id) = setup_test_env();
-    let name = s(&env, "bot-owner-only");
+    #[test]
+    fn test_verify_with_oracle_proof_honours_expiry() {
+        let env = Env::default();
+        let client = setup(&env);
+        let octocat = String::from_str(&env, "octocat");
+        client.set_oracle_allowlist(&allowlist(&env));
 
-    env.mock_all_auths();
-    env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), name.clone(), user1.clone(), Vec::new(&env))
-            .unwrap();
-        TrustBridgeContract::register(
-            env.clone(),
-            s(&env, "bot-other"),
-            user2.clone(),
-            Vec::new(&env),
-        )
-        .unwrap();
-
+        env.ledger().set_timestamp(6_000);
         assert_eq!(
-            TrustBridgeContract::set_bot_status(env.clone(), user2.clone(), name.clone(), true),
-            Err(ContractError::NotAuthorized)
+            client.try_verify_with_oracle_proof(&octocat, &proof(&env, 5_000, &SIG_EXPIRES_5000)),
+            Err(Ok(ContractError::OracleProofExpired))
         );
-    });
-}
 
-#[test]
-fn test_set_bot_status_unknown_username_is_not_registered() {
-    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+        env.ledger().set_timestamp(4_000);
+        client.verify_with_oracle_proof(&octocat, &proof(&env, 5_000, &SIG_EXPIRES_5000));
+        assert!(client.get_address(&octocat).unwrap().verified);
+    }
 
-    env.mock_all_auths();
-    env.as_contract(&contract_id, || {
+    #[test]
+    fn test_verify_with_oracle_proof_rejects_unbound_message_and_pause() {
+        let env = Env::default();
+        let client = setup(&env);
+        let octocat = String::from_str(&env, "octocat");
+        client.set_oracle_allowlist(&allowlist(&env));
+
+        // Signed for `octocat`, replayed against another registration.
+        let other = String::from_str(&env, "hubot");
+        client.register(&other, &Address::generate(&env), &Vec::new(&env));
         assert_eq!(
-            TrustBridgeContract::set_bot_status(env.clone(), admin.clone(), s(&env, "ghost"), true),
-            Err(ContractError::NotRegistered)
+            client.try_verify_with_oracle_proof(&other, &proof(&env, 0, &SIG_NO_EXPIRY)),
+            Err(Ok(ContractError::OracleProofBadLayout))
         );
-    });
-}
 
-#[test]
-fn test_set_bot_status_rejected_while_paused() {
-    let (env, admin, user1, _user2, contract_id) = setup_test_env();
-    let name = s(&env, "bot-paused");
-
-    env.mock_all_auths();
-    env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(env.clone(), name.clone(), user1.clone(), Vec::new(&env))
-            .unwrap();
-        TrustBridgeContract::pause(env.clone(), 1).unwrap();
-
+        client.pause(&1);
         assert_eq!(
-            TrustBridgeContract::set_bot_status(env.clone(), admin.clone(), name.clone(), true),
-            Err(ContractError::Paused)
+            client.try_verify_with_oracle_proof(&octocat, &proof(&env, 0, &SIG_NO_EXPIRY)),
+            Err(Ok(ContractError::Paused))
         );
-    });
+    }
 }

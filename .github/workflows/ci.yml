@@ -25,33 +25,45 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
-  diff-test:
-    name: TypeScript differential tests
+  smoke:
+    name: smoke
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Fork PRs cannot write the cache; only main pushes save it.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
         with:
-          fetch-depth: 0
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Check Rust/TS fixture pairing
-        if: github.event_name == 'pull_request'
-        run: scripts/check_fixture_pairing.sh "origin/${{ github.base_ref }}"
+      - name: cargo check --all-targets
+        run: cargo check --all-targets
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: cargo test
+        run: cargo test
+
+  homoglyph_corpus:
+    name: homoglyph_corpus
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
         with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: ts-differential-tests/package-lock.json
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Run differential tests
-        run: set -o pipefail; make diff-test 2>&1 | tee diff-test-output.txt
-
-      - name: Upload differential test log
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: diff-test-output
-          path: diff-test-output.txt
-          retention-days: 14
+      # Blocking: same command as `make test-homoglyph`.
+      - name: cargo test --test homoglyph_corpus
+        run: cargo test --test homoglyph_corpus

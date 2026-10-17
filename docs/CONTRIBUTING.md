@@ -35,12 +35,16 @@ cargo install --locked stellar-cli@26.1.0
 make check
 ```
 
-This runs the same checks as the two jobs in `.github/workflows/ci.yml`:
+`make check` is the full local quality gate (`make fmt`, `make lint`,
+`make test`, `make docs-check`, plus error-codes / event-topics / abi-check /
+build / wasm-size). Every pull request and push to `main` runs these jobs from
+`.github/workflows/ci.yml`; each one fails the workflow on its first error:
 
-| CI job | Make targets |
-|---|---|
-| `quality` | `cargo test --test homoglyph_corpus` (named blocking step), then `make check` (`make fmt`, `make lint`, `make test`, `make docs-check`, plus error-codes / event-topics / abi-check / wasm-size) |
-| `build` | `make build` (`stellar contract build`), `make wasm-size`, `make wasm-hash-pin WASM_HASH_STRICT=1` |
+| CI job | Commands | Local equivalent |
+|---|---|---|
+| `Basic checks` | `cargo fmt -- --check` | `make fmt` |
+| `smoke` | `cargo check --all-targets`, then `cargo test` (stable toolchain, cached `target/`, 20 min timeout, no secrets or deploy steps) | `cargo check --all-targets && make test` |
+| `homoglyph_corpus` | `cargo test --test homoglyph_corpus` | `make test-homoglyph` |
 
 `make ci` runs the same set with the strict hash gate enabled, so it fails while
 `wasm-hash.pin` still contains `PLACEHOLDER` or does not match the built WASM.
@@ -391,11 +395,12 @@ cargo test --test homoglyph_corpus
 # equivalent: make test-homoglyph
 ```
 
-CI runs this target as a named blocking step on every pull request: the
-`quality` job in `.github/workflows/ci.yml` executes
-`cargo test --test homoglyph_corpus` (no path filters, no `continue-on-error`).
-A failing corpus test fails the quality check. The same job then runs
-`make check`, whose `cargo test` also includes this suite.
+CI runs this target as a dedicated blocking job on every pull request and
+push to `main`: the `homoglyph_corpus` job in `.github/workflows/ci.yml`
+executes `cargo test --test homoglyph_corpus` (no path filters, no
+`continue-on-error`), so a failing corpus test fails the `homoglyph_corpus`
+check. Maintainers should mark `homoglyph_corpus` as a required status check
+in branch protection. The `smoke` job's `cargo test` also includes this suite.
 
 ### TypeScript Differential Tests
 
@@ -519,14 +524,23 @@ CI does not compare snapshots against a baseline — snapshots are gitignored an
 
 The checked-in [auth matrix](../tests/auth_matrix.csv) is the source of truth
 for actor coverage across public mutating entrypoints. Each row contains an
-entrypoint, an actor class (`admin`, `verifier`, `revoker`, `upgrader`, `user`,
-`random`, or `none`), and an optional expected `ContractError` variant.
+entrypoint, an actor class (`admin`, `second_admin`, `guardian`, `verifier`,
+`revoker`, `upgrader`, `user`, `random`, or `none`), and an optional expected
+`ContractError` variant.
 
-When adding a mutating public function, add it to the matrix and to the
-coverage list in `tests/integration.rs`. Add rows for every meaningful actor
-boundary, especially Admin, Verifier, Revoker, Upgrader, registrant, and an
-unrelated address. Leave `expected_error` empty for a successful cell. The
-driver fails when an entrypoint is missing from the table.
+[`tests/auth_matrix.rs`](../tests/auth_matrix.rs) executes every row
+(`cargo test --test auth_matrix`): it builds a fresh fixture, sets up the
+operation's preconditions, and invokes the entrypoint with only that actor
+signing. An empty `expected_error` must return `Ok`; `NotAuthorized` also
+matches a host auth failure for entrypoints that `require_auth` a fixed
+identity such as the stored admin. Failures cite the CSV line, operation, and
+actor.
+
+When adding a mutating public function, add rows for every meaningful actor
+boundary (especially Admin, Verifier, Revoker, Upgrader, registrant, and an
+unrelated address) and a dispatcher arm in `plan()` in `tests/auth_matrix.rs`.
+The driver fails when an entrypoint that calls `require_auth` has no row, or a
+row has no dispatcher arm.
 
 This repo uses the Soroban SDK test host. Tests live in `src/lib.rs` inside `#[cfg(test)] mod test` for unit tests and in `tests/integration.rs` for integration tests.
 

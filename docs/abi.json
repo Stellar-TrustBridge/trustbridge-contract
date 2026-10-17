@@ -57,6 +57,18 @@
     {
       "name": "get_registered_paginated",
       "signature": "get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>"
+    },
+    {
+      "name": "set_oracle_allowlist",
+      "signature": "set_oracle_allowlist(pubkeys: Vec<BytesN<32>>) -> Result<(), ContractError>"
+    },
+    {
+      "name": "get_oracle_allowlist",
+      "signature": "get_oracle_allowlist() -> Vec<BytesN<32>>"
+    },
+    {
+      "name": "verify_with_oracle_proof",
+      "signature": "verify_with_oracle_proof(github_username: String, proof: OracleProof) -> Result<(), ContractError>"
     }
   ],
   "errors": [
@@ -333,27 +345,27 @@
     {
       "code": 57,
       "name": "RoleExpired",
-      "description": "A role-gated privileged invocation was made at or after the role's expiry timestamp (Issue #428)"
+      "description": "A role-gated privileged invocation was made at or after the role's expiry timestamp"
     },
     {
       "code": 58,
       "name": "OracleProofBadLayout",
-      "description": "`verify_with_proof` was given a proof whose XDR layout is invalid"
+      "description": "`verify_with_oracle_proof` given an empty message, all-zero signature, or a message not bound to the username/address/expiry (Issue #584)"
     },
     {
       "code": 59,
       "name": "OracleProofNotAllowlisted",
-      "description": "`verify_with_proof` oracle address is not on the allowlist"
+      "description": "`verify_with_oracle_proof` signed by a key not on the oracle allowlist (Issue #584)"
     },
     {
       "code": 60,
       "name": "OracleProofExpired",
-      "description": "`verify_with_proof` proof timestamp is past its validity window"
+      "description": "`verify_with_oracle_proof` with a non-zero `expires_at` in the past (Issue #584)"
     },
     {
       "code": 61,
       "name": "OracleProofBadSignature",
-      "description": "`verify_with_proof` Ed25519 signature does not verify against the oracle key"
+      "description": "`verify_with_oracle_proof` with a non-canonical signature encoding (Issue #584)"
     }
   ],
   "events": [

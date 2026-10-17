@@ -134,8 +134,9 @@ While `utils.rs` already rejects Unicode via ASCII-only validation, sophisticate
 
 ## How to Run
 
-CI runs `cargo test --test homoglyph_corpus` as a named blocking step in
-the `quality` job on every pull request (see `.github/workflows/ci.yml`).
+CI runs `cargo test --test homoglyph_corpus` as the dedicated blocking
+`homoglyph_corpus` job on every pull request and push to `main` (see
+`.github/workflows/ci.yml`); it is the same command as `make test-homoglyph`.
 
 ```bash
 # Run all homoglyph corpus tests

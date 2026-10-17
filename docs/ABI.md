@@ -241,28 +241,11 @@ struct ChallengeRecord {
 | 35 | `RoleGrantNotReady` | `activate_role` before the grant's timelock elapsed (Issue #220) |
 | 36 | `ProvenanceMissing` | `assert_build` / `set_provenance_digests` before any provenance record exists (Issue #225) |
 | 37 | `ProvenanceMismatch` | `assert_build` given a hash that does not match stored provenance (Issue #225) |
-| 39 | `StagedWasmMismatch` | `upgrade` / `execute_upgrade` given a WASM hash that does not match the staged-WASM slot (Issue #300) |
-| 40 | `UpgradeProposalAlreadyPending` | `propose_multisig_upgrade` called while a proposal is already live (Issue #301) |
-| 41 | `NoUpgradeProposalPending` | `approve_upgrade` / `execute_upgrade` / `cancel_upgrade_proposal` called with no live proposal (Issue #301) |
-| 42 | `UpgradeProposalAlreadyApproved` | `approve_upgrade` called by an address that already approved this proposal (Issue #301) |
-| 43 | `UpgradeProposalDelayActive` | `execute_upgrade` called before the proposal's delay elapsed (Issue #301) |
-| 44 | `UpgradeProposalInsufficientApprovals` | `execute_upgrade` called before the approval threshold was met (Issue #301) |
-| 46 | `FallbackListFull` | `register` given more fallback addresses than `MAX_FALLBACK_ADDRESSES` (Issue #238) |
-| 47 | `UsernameTaken` | `rename` called with a `new_username` that is already registered (Issue #233) |
-| 48 | `RotationRequired` | `register` asked to change the registered address while the rotation delay is armed (Issue #234) |
-| 49 | `RotationPending` | A rotation is already pending for this username (Issue #234) |
-| 50 | `NoRotationPending` | `execute_address_rotation` / `cancel_address_rotation` called with no pending rotation (Issue #234) |
-| 51 | `RotationNotReady` | `execute_address_rotation` called before the delay has elapsed (Issue #234) |
-| 52 | `InvalidCursor` | A pagination cursor no longer decodes against the current registry state (Issue #215) |
-| 53 | `VerifyRateLimited` | A non-admin caller would exceed its per-ledger verify/revoke cap (Issue #292) |
-| 54 | `DualControlRequired` | `batch_remove` called with a batch larger than the dual-control threshold — use `propose_batch_remove` / `execute_batch_remove` (Issue #219) |
-| 55 | `BatchRemoveProposalPending` | `propose_batch_remove` called while a proposal is already pending (Issue #219) |
-| 56 | `NoPendingBatchRemove` | `execute_batch_remove` / `cancel_batch_remove` called with no live proposal (Issue #219) |
-| 57 | `RoleExpired` | A role-gated privileged invocation was made at or after the role's expiry timestamp (Issue #428) |
-| 58 | `OracleProofBadLayout` | `verify_with_proof` given a proof whose XDR layout is invalid |
-| 59 | `OracleProofNotAllowlisted` | `verify_with_proof` oracle address is not on the allowlist |
-| 60 | `OracleProofExpired` | `verify_with_proof` proof timestamp is past its validity window |
-| 61 | `OracleProofBadSignature` | `verify_with_proof` Ed25519 signature does not verify against the oracle key |
+| 57 | `RoleExpired` | A role-gated privileged invocation was made at or after the role's expiry timestamp |
+| 58 | `OracleProofBadLayout` | `verify_with_oracle_proof` given an empty message, all-zero signature, or a message not bound to the username/address/expiry (Issue #584) |
+| 59 | `OracleProofNotAllowlisted` | `verify_with_oracle_proof` signed by a key not on the oracle allowlist (Issue #584) |
+| 60 | `OracleProofExpired` | `verify_with_oracle_proof` with a non-zero `expires_at` in the past (Issue #584) |
+| 61 | `OracleProofBadSignature` | `verify_with_oracle_proof` with a non-canonical signature encoding (Issue #584) |
 
 > **`NetworkMismatch` moved from 21 to 30.** This table previously listed it at
 > code 21 while the enum had `InvalidPauseReason` there and no `NetworkMismatch`
@@ -969,6 +952,37 @@ must pass with the updated golden before release.
 
 ### `get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
 
+
+### `set_oracle_allowlist(pubkeys: Vec<BytesN<32>>) -> Result<(), ContractError>`
+
+Replaces the Ed25519 oracle public keys whose proofs
+`verify_with_oracle_proof` accepts (Issue #584). An empty list disables oracle
+verification. **Auth:** contract admin.
+
+**Errors:** `NotInitialized`.
+
+### `get_oracle_allowlist() -> Vec<BytesN<32>>`
+
+Returns the current oracle allowlist (empty if never set). Read-only, no auth.
+
+### `verify_with_oracle_proof(github_username: String, proof: OracleProof) -> Result<(), ContractError>`
+
+Marks a registered username verified on the strength of an allowlisted
+oracle's signature instead of an admin/Verifier call. `proof` is
+`OracleProof { oracle_pubkey: BytesN<32>, message: Bytes, signature: BytesN<64>, expires_at: u64 }`,
+and `message` must be exactly
+`<github_username>:<stellar_address strkey>:<expires_at decimal>` for the
+record's current `stellar_address` — see
+[SECURITY.md](SECURITY.md#oracle-signed-proof-interface-signature-check).
+`expires_at = 0` skips the expiry check. On success the record, counters,
+`VerifiedEvent`, and audit log update exactly as for `verify`.
+
+**Auth:** the registered `stellar_address`.
+
+**Errors:** `NotInitialized`, `Paused`, `NotRegistered`,
+`OracleProofBadLayout` (58), `OracleProofNotAllowlisted` (59),
+`OracleProofExpired` (60), `OracleProofBadSignature` (61), `AlreadyVerified`.
+A well-formed signature that does not verify traps the invocation.
 
 ---
 

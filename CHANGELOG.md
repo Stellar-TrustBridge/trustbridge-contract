@@ -12,6 +12,7 @@ compatible corrections.
 - Added `get_address_if_verified` to the public ABI for secure CI payouts (see [get_address_if_verified](docs/ABI.md#get_address_if_verifiedgithub_username-string---resultcontributorrecord-contracterror)).
 - Added verifier allowlist management (`add_verifier`, `remove_verifier`, `get_verifiers`, `is_active_verifier`, `verifier_slots_remaining`, `prune_expired_verifiers`).
 - Added role-grant timelock lifecycle functions (`activate_role`, `cancel_role_grant`).
+- Added oracle-proof verification: `set_oracle_allowlist`, `get_oracle_allowlist`, and `verify_with_oracle_proof` (see [verify_with_oracle_proof](docs/ABI.md#verify_with_oracle_proofgithub_username-string-proof-oracleproof---result-contracterror)).
 - Added typed export page bindings (`ExportRecord`, `ExportPage`, `EXPORT_PAGE_LAYOUT_VERSION = 2`) and updated `abi/export_page.layout.golden` layout regression fixtures.
 - Added TypeScript export page decoding and typed parser helpers in `ts-differential-tests`.
 

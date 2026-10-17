@@ -68,13 +68,16 @@ pub use storage::{
 };
 pub use version::Version;
 
+use crate::storage::get_public_paginated_internal;
+
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, Vec};
 
 use crate::storage::{
     add_to_index, add_verifier as storage_add_verifier, build_record_proof,
-    bump_ever_verified_count, clear_pending_reverify, get_admin, get_audit_logs, get_audit_stats,
-    get_challenge, get_cooldown as storage_get_cooldown, get_count, get_emergency_pause,
-    get_emergency_pause_ts, get_ever_verified_count as storage_get_ever_verified_count,
+    bump_ever_verified_count, charge_verify_rate, clear_pending_reverify, get_admin,
+    get_audit_logs, get_audit_stats, get_challenge, get_cooldown as storage_get_cooldown,
+    get_count, get_emergency_pause, get_emergency_pause_ts,
+    get_ever_verified_count as storage_get_ever_verified_count,
     get_guardian as storage_get_guardian, get_index,
     get_last_event_ledger as storage_get_last_event_ledger, get_last_upgrade,
     get_network_id as storage_get_network_id, get_pending_role as storage_get_pending_role,
@@ -163,6 +166,59 @@ fn event_domain(env: &Env) -> EventDomain {
     set_last_event_ledger(env);
     let version = storage_get_version(env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple());
     EventDomain::new(env, version)
+}
+
+/// Shared tail of `verify` and `verify_with_oracle_proof`: flips `record` to
+/// verified and updates counters, events, and the audit log. Authorization is
+/// the caller's responsibility.
+fn mark_verified(
+    env: &Env,
+    github_username: String,
+    mut record: ContributorRecord,
+    actor: Address,
+) -> Result<(), ContractError> {
+    // Issue #218: an expired prior verification does not block a fresh
+    // one — only a still-active verification does.
+    let was_active =
+        record.verified && !crate::storage::is_verification_expired(env, &github_username);
+    if was_active {
+        return Err(ContractError::AlreadyVerified);
+    }
+
+    let was_verified = record.verified;
+    record.verified = true;
+    set_record(env, &github_username, &record);
+    let timestamp = env.ledger().timestamp();
+    crate::storage::set_verified_at(env, &github_username, timestamp);
+
+    // Only a genuine false→true transition is a new verification for
+    // counting purposes — renewing an expired-but-never-revoked
+    // verification does not touch `verified_count` a second time, since
+    // it was never decremented when the previous grant expired (expiry
+    // is lazy; see `is_verification_expired`).
+    if !was_verified {
+        set_verified_count(env, storage_get_verified_count(env).saturating_add(1));
+        bump_ever_verified_count(env);
+    }
+
+    // Clear pending reverify flag upon successful verification
+    clear_pending_reverify(env, &github_username);
+    VerifiedEvent {
+        github_username: github_username.clone(),
+        stellar_address: record.stellar_address.clone(),
+        timestamp,
+        domain: event_domain(env),
+    }
+    .publish(env);
+
+    push_audit_entry(
+        env,
+        AuditLogEntry::new(AuditEventType::UserVerified, timestamp, Some(actor))
+            .with_username(github_username)
+            .with_address(record.stellar_address),
+    );
+
+    Ok(())
 }
 
 #[contract]
@@ -3133,7 +3189,7 @@ impl TrustBridgeContract {
     ) -> Result<ExportPage, ContractError> {
         require_initialized(&env)?;
 
-        crate::storage::get_registered_paginated(&env, cursor, limit)
+        get_public_paginated_internal(&env, cursor, limit)
     }
 
     /// Toggles contract pause state. Admin-only (Issue #3).
@@ -3264,52 +3320,87 @@ impl TrustBridgeContract {
         // Per-verifier, per-ledger anti-grief cap (Issue #292). Charged before
         // any state read so a spammer calling `verify` on junk usernames still
         // pays into the limit. The admin is exempt.
-        if !is_admin {}
-
-        let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
-
-        // Issue #218: an expired prior verification does not block a fresh
-        // one — only a still-active verification does.
-        let was_active =
-            record.verified && !crate::storage::is_verification_expired(&env, &github_username);
-        if was_active {
-            return Err(ContractError::AlreadyVerified);
+        if !is_admin {
+            charge_verify_rate(&env, &caller, 1)?;
         }
 
-        let was_verified = record.verified;
-        record.verified = true;
-        set_record(&env, &github_username, &record);
-        let timestamp = env.ledger().timestamp();
-        crate::storage::set_verified_at(&env, &github_username, timestamp);
+        let record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
+        mark_verified(&env, github_username, record, caller)
+    }
 
-        // Only a genuine false→true transition is a new verification for
-        // counting purposes — renewing an expired-but-never-revoked
-        // verification does not touch `verified_count` a second time, since
-        // it was never decremented when the previous grant expired (expiry
-        // is lazy; see `is_verification_expired`).
-        if !was_verified {
-            set_verified_count(&env, storage_get_verified_count(&env).saturating_add(1));
-            bump_ever_verified_count(&env);
-        }
-
-        // Clear pending reverify flag upon successful verification
-        clear_pending_reverify(&env, &github_username);
-        VerifiedEvent {
-            github_username: github_username.clone(),
-            stellar_address: record.stellar_address.clone(),
-            timestamp,
-            domain: event_domain(&env),
-        }
-        .publish(&env);
-
-        push_audit_entry(
-            &env,
-            AuditLogEntry::new(AuditEventType::UserVerified, timestamp, Some(caller))
-                .with_username(github_username)
-                .with_address(record.stellar_address),
-        );
-
+    /// Replaces the oracle Ed25519 public keys whose proofs
+    /// `verify_with_oracle_proof` accepts. An empty list disables oracle
+    /// verification entirely.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    pub fn set_oracle_allowlist(env: Env, pubkeys: Vec<BytesN<32>>) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        let admin = get_admin(&env)?;
+        crate::oracle_proof::set_oracle_allowlist(&env, &admin, pubkeys);
         Ok(())
+    }
+
+    /// Returns the oracle public-key allowlist (empty if never set).
+    ///
+    /// Read-only; no auth required.
+    #[must_use]
+    pub fn get_oracle_allowlist(env: Env) -> Vec<BytesN<32>> {
+        crate::oracle_proof::get_oracle_allowlist(&env)
+    }
+
+    /// Marks `github_username` verified on the strength of an allowlisted
+    /// oracle's signed proof instead of an admin/Verifier attestation.
+    ///
+    /// `proof.message` must be the canonical ownership message
+    /// `<github_username>:<stellar_address>:<expires_at>` for the record's
+    /// current `stellar_address` (see `docs/SECURITY.md`). Verification state,
+    /// counters, the `VerifiedEvent`, and the audit row are updated exactly as
+    /// `verify` does.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the registered `stellar_address`.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NotRegistered`] if `github_username` is not registered.
+    /// - [`ContractError::OracleProofBadLayout`] if the proof is malformed or
+    ///   its message does not bind this username/address/expiry.
+    /// - [`ContractError::OracleProofNotAllowlisted`] if the signing key is not
+    ///   allowlisted (always, when the allowlist is empty).
+    /// - [`ContractError::OracleProofExpired`] if `expires_at` is non-zero and past.
+    /// - [`ContractError::OracleProofBadSignature`] if the signature is not
+    ///   canonically encoded; an invalid but well-formed signature traps.
+    /// - [`ContractError::AlreadyVerified`] if the record is verified and that
+    ///   verification has not expired.
+    pub fn verify_with_oracle_proof(
+        env: Env,
+        github_username: String,
+        proof: OracleProof,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        let record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
+        record.stellar_address.require_auth();
+
+        crate::oracle_proof::verify_ownership_proof(
+            &env,
+            &github_username,
+            &record.stellar_address,
+            &proof,
+        )?;
+
+        let actor = record.stellar_address.clone();
+        mark_verified(&env, github_username, record, actor)
     }
 
     /// Verifies multiple registered contributors in a single invocation.
@@ -3387,7 +3478,9 @@ impl TrustBridgeContract {
         // Revoke shares the per-actor, per-ledger cap with verify (Issue #292):
         // a compromised Revoker key can bloat events just as fast by revoking.
         // Admin is exempt.
-        if !is_admin {}
+        if !is_admin {
+            charge_verify_rate(&env, &caller, 1)?;
+        }
 
         let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
 
@@ -4529,26 +4622,6 @@ mod test {
         )
         .unwrap();
     }
-    fn register_org(env: &Env, _contract_id: &Address, name: &str, addr: &Address, org: &str) {
-        TrustBridgeContract::register(
-            env.clone(),
-            username(env, name),
-            addr.clone(),
-            1,
-            Some(username(env, org)),
-        )
-        .unwrap();
-    }
-    fn register_team(env: &Env, _contract_id: &Address, name: &str, addr: &Address, org: &str) {
-        TrustBridgeContract::register(
-            env.clone(),
-            username(env, name),
-            addr.clone(),
-            2,
-            Some(username(env, org)),
-        )
-        .unwrap();
-    }
 
     /// Asserts `get_verified_count()` and `get_stats().verified` agree on
     /// `expected` (Issue #90). Both APIs are checked together so future
@@ -4694,9 +4767,6 @@ mod test {
             let record =
                 TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).unwrap();
             assert_eq!(record.stellar_address, user);
-            assert_eq!(record.fallback_addresses.len(), 2);
-            assert_eq!(record.fallback_addresses.get(0).unwrap(), fb1);
-            assert_eq!(record.fallback_addresses.get(1).unwrap(), fb2);
         });
     }
 
@@ -5984,7 +6054,13 @@ mod test {
     fn register_as(env: &Env, contract_id: &Address, name: &str, addr: &Address) {
         env.mock_all_auths();
         env.as_contract(contract_id, || {
-            TrustBridgeContract::register(env.clone(), username(env, name), addr.clone()).unwrap();
+            TrustBridgeContract::register(
+                env.clone(),
+                username(env, name),
+                addr.clone(),
+                Vec::new(env),
+            )
+            .unwrap();
         });
     }
 
@@ -6043,7 +6119,8 @@ mod test {
         });
 
         env.as_contract(&contract_id, || {
-            let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 50).unwrap();
+            let page =
+                TrustBridgeContract::get_registered_paginated(env.clone(), None, 50).unwrap();
             let names: alloc::vec::Vec<_> =
                 page.records.iter().map(|(name, _)| name.clone()).collect();
             assert!(
@@ -6281,8 +6358,13 @@ mod test {
     fn setup_rotation(env: &Env, contract_id: &Address, user: &Address) {
         env.mock_all_auths();
         env.as_contract(contract_id, || {
-            TrustBridgeContract::register(env.clone(), username(env, "octocat"), user.clone())
-                .unwrap();
+            TrustBridgeContract::register(
+                env.clone(),
+                username(env, "octocat"),
+                user.clone(),
+                Vec::new(env),
+            )
+            .unwrap();
         });
         env.mock_all_auths();
         env.as_contract(contract_id, || {
@@ -6306,13 +6388,23 @@ mod test {
         let (_admin, user, other, contract_id) = setup(&env);
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
-                .unwrap();
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
         });
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), other.clone())
-                .unwrap();
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                other.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
         });
         env.as_contract(&contract_id, || {
             assert_eq!(
@@ -6337,7 +6429,8 @@ mod test {
                 TrustBridgeContract::register(
                     env.clone(),
                     username(&env, "octocat"),
-                    other.clone()
+                    other.clone(),
+                    Vec::new(&env)
                 ),
                 Err(ContractError::RotationRequired)
             );
@@ -6361,8 +6454,13 @@ mod test {
         setup_rotation(&env, &contract_id, &user);
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
-                .unwrap();
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
         });
     }
 
@@ -6616,8 +6714,13 @@ mod test {
         let (_admin, user, _other, contract_id) = setup(&env);
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
-                .unwrap();
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
         });
         env.as_contract(&contract_id, || {
             let proof =
@@ -6637,8 +6740,13 @@ mod test {
         let (admin, user, _other, contract_id) = setup(&env);
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
-                .unwrap();
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
         });
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
@@ -6676,8 +6784,13 @@ mod test {
         let (_admin, user, _other, contract_id) = setup(&env);
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
-                .unwrap();
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
         });
         env.as_contract(&contract_id, || {
             for name in ["octocat", "ghost"] {
@@ -6697,8 +6810,13 @@ mod test {
         let (_admin, user, _other, contract_id) = setup(&env);
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
-                .unwrap();
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
         });
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
@@ -6723,8 +6841,13 @@ mod test {
 
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
-                .unwrap();
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
         });
         env.as_contract(&contract_id, || {
             assert_eq!(TrustBridgeContract::get_ever_verified_count(env.clone()), 0);
@@ -6783,8 +6906,13 @@ mod test {
 
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::register(env.clone(), username(&env, "octocat"), user.clone())
-                .unwrap();
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
         });
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
@@ -7665,7 +7793,7 @@ mod test {
         // Re-point the registration at `other`, authorizing only `other`.
         // The current owner's signature is missing, so the call must fail.
         env.set_auths(&[]);
-        let res = client.try_register(&name, &other);
+        let res = client.try_register(&name, &other, &Vec::new(&env));
         assert!(
             res.is_err(),
             "takeover succeeded without the current owner's authorization"
@@ -7749,7 +7877,7 @@ mod test {
 
         // We do NOT mock auth, so the registration should fail.
         env.set_auths(&[]);
-        assert!(client.try_register(&name, &user).is_err());
+        assert!(client.try_register(&name, &user, &Vec::new(&env)).is_err());
 
         assert_eq!(
             env.events().all(),
@@ -7969,7 +8097,7 @@ mod test {
         });
 
         env.as_contract(&contract_id, || {
-            let paged_res = TrustBridgeContract::get_public_paginated(env.clone(), 0, 10);
+            let paged_res = TrustBridgeContract::get_public_paginated(env.clone(), None, 10);
             assert_eq!(paged_res, Err(ContractError::Paused));
         });
 
@@ -7980,7 +8108,7 @@ mod test {
 
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            let paged = TrustBridgeContract::get_public_paginated(env.clone(), 0, 10).unwrap();
+            let paged = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
             assert_eq!(paged.records.len(), 1);
         });
 
@@ -10275,10 +10403,6 @@ mod test {
 
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            register_personal(&env, &contract_id, "octocat", &user);
-            TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "octocat"))
-                .unwrap();
-            register_personal(&env, &contract_id, "octocat", &new_user);
             let res =
                 TrustBridgeContract::remove(env.clone(), other.clone(), username(&env, "octocat"));
             assert_eq!(res, Err(ContractError::NotAuthorized));
@@ -11434,11 +11558,14 @@ mod test {
 
         let events = env.events().all();
         let mut found = false;
-        for (_source, topics, _data) in events {
-            if topics.len() > 0
-                && topics.get(0).unwrap()
-                    == soroban_sdk::Symbol::new(&env, "RegisteredEvent").to_val()
-            {
+        let want = soroban_sdk::xdr::ScVal::try_from_val(
+            &env,
+            &soroban_sdk::Symbol::new(&env, "RegisteredEvent").to_val(),
+        )
+        .unwrap();
+        for event in events.events() {
+            let soroban_sdk::xdr::ContractEventBody::V0(v0) = &event.body;
+            if v0.topics.first() == Some(&want) {
                 found = true;
             }
         }
@@ -12059,13 +12186,14 @@ mod test {
         let (_admin, _user, _other, contract_id) = setup(&env);
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            let attestation = TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap();
+            let attestation =
+                TrustBridgeContract::export_attestation(env.clone(), None, 10).unwrap();
             assert_eq!(attestation.page.records.len(), 0);
             assert_eq!(attestation.page.total, 0);
             assert!(!attestation.page.has_more);
 
             // Deterministic even for an empty page.
-            let again = TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap();
+            let again = TrustBridgeContract::export_attestation(env.clone(), None, 10).unwrap();
             assert_eq!(attestation.digest, again.digest);
         });
     }
@@ -12083,8 +12211,8 @@ mod test {
                 Vec::new(&env),
             )
             .unwrap();
-            let a = TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap();
-            let b = TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap();
+            let a = TrustBridgeContract::export_attestation(env.clone(), None, 10).unwrap();
+            let b = TrustBridgeContract::export_attestation(env.clone(), None, 10).unwrap();
             assert_eq!(a.digest, b.digest);
             assert_eq!(a.page, b.page);
         });
@@ -12106,7 +12234,7 @@ mod test {
         });
 
         let before = env.as_contract(&contract_id, || {
-            TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap()
+            TrustBridgeContract::export_attestation(env.clone(), None, 10).unwrap()
         });
 
         env.as_contract(&contract_id, || {
@@ -12115,7 +12243,7 @@ mod test {
         });
 
         let after = env.as_contract(&contract_id, || {
-            TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap()
+            TrustBridgeContract::export_attestation(env.clone(), None, 10).unwrap()
         });
 
         assert_ne!(before.digest, after.digest);
@@ -12134,7 +12262,8 @@ mod test {
                 Vec::new(&env),
             )
             .unwrap();
-            let attestation = TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap();
+            let attestation =
+                TrustBridgeContract::export_attestation(env.clone(), None, 10).unwrap();
             let page =
                 TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
             assert_eq!(attestation.page, page);
@@ -12147,7 +12276,8 @@ mod test {
         let (_admin, _user, _other, contract_id) = setup(&env);
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            let attestation = TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap();
+            let attestation =
+                TrustBridgeContract::export_attestation(env.clone(), None, 10).unwrap();
             assert_eq!(
                 attestation.version,
                 soroban_sdk::vec![&env, 1u32, 0u32, 0u32]
