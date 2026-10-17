@@ -1,4 +1,5 @@
 use soroban_sdk::contracterror;
+use core::fmt;
 
 /// Errors returned by contract entry points.
 ///
@@ -434,6 +435,76 @@ impl ContractError {
     #[must_use]
     pub fn is_retryable(self) -> bool {
         self.category() == ErrorCategory::Retry
+    }
+}
+
+impl fmt::Display for ContractError {
+    /// Human-readable message for each `ContractError` variant, kept in sync
+    /// with `docs/ABI.md` and the variant doc comments. Off-chain consumers
+    /// (dashboard, indexer) surface this text to operators, so it must not
+    /// drift from the documented catalog.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ContractError::AlreadyInitialized => write!(f, "contract already initialized"),
+            ContractError::NotInitialized => write!(f, "contract not initialized"),
+            ContractError::NotAuthorized => write!(f, "caller not authorized"),
+            ContractError::NotRegistered => write!(f, "github username not registered"),
+            ContractError::AlreadyVerified => write!(f, "username already verified"),
+            ContractError::NotVerified => write!(f, "username not verified"),
+            ContractError::Paused => write!(f, "contract is paused"),
+            ContractError::CooldownActive => write!(f, "upgrade cooldown active"),
+            ContractError::InvalidVersion => write!(f, "invalid version"),
+            ContractError::InvalidRole => write!(f, "invalid role"),
+            ContractError::InvalidUsername => write!(f, "invalid github username"),
+            ContractError::AttestationExpired => write!(f, "attestation expired"),
+            ContractError::UnattestedWasm => write!(f, "unattested wasm"),
+            ContractError::InvalidBatchSize => write!(f, "invalid batch size"),
+            ContractError::InvalidReasonCode => write!(f, "invalid reason code"),
+            ContractError::ZeroAddress => write!(f, "zero address"),
+            ContractError::ChallengeAlreadyActive => write!(f, "challenge already active"),
+            ContractError::NoChallengeActive => write!(f, "no challenge active"),
+            ContractError::ChallengeNotResolvable => write!(f, "challenge not resolvable"),
+            ContractError::ChallengeActive => write!(f, "challenge active"),
+            ContractError::InvalidPauseReason => write!(f, "invalid pause reason"),
+            ContractError::AlreadyReserved => write!(f, "username already reserved"),
+            ContractError::NotReserved => write!(f, "username not reserved"),
+            ContractError::UsernameReserved => write!(f, "username reserved"),
+            ContractError::ReservedListFull => write!(f, "reserved list full"),
+            ContractError::AdminTransferPending => write!(f, "admin transfer pending"),
+            ContractError::AdminTransferDelayActive => write!(f, "admin transfer delay active"),
+            ContractError::NoPendingAdminTransfer => write!(f, "no pending admin transfer"),
+            ContractError::AttestationRequired => write!(f, "attestation required"),
+            ContractError::NetworkMismatch => write!(f, "network mismatch"),
+            ContractError::VerifierAllowlistFull => write!(f, "verifier allowlist full"),
+            ContractError::VerifierNotAllowlisted => write!(f, "verifier not allowlisted"),
+            ContractError::VerifierExpiryInPast => write!(f, "verifier expiry in past"),
+            ContractError::NoPendingRoleGrant => write!(f, "no pending role grant"),
+            ContractError::RoleGrantNotReady => write!(f, "role grant not ready"),
+            ContractError::ProvenanceMissing => write!(f, "provenance missing"),
+            ContractError::ProvenanceMismatch => write!(f, "provenance mismatch"),
+            ContractError::StagedWasmMismatch => write!(f, "staged wasm mismatch"),
+            ContractError::UpgradeProposalAlreadyPending => write!(f, "upgrade proposal already pending"),
+            ContractError::NoUpgradeProposalPending => write!(f, "no upgrade proposal pending"),
+            ContractError::UpgradeProposalAlreadyApproved => write!(f, "upgrade proposal already approved"),
+            ContractError::UpgradeProposalDelayActive => write!(f, "upgrade proposal delay active"),
+            ContractError::UpgradeProposalInsufficientApprovals => write!(f, "upgrade proposal insufficient approvals"),
+            ContractError::FallbackListFull => write!(f, "fallback list full"),
+            ContractError::UsernameTaken => write!(f, "username taken"),
+            ContractError::RotationRequired => write!(f, "rotation required"),
+            ContractError::RotationPending => write!(f, "rotation pending"),
+            ContractError::NoRotationPending => write!(f, "no rotation pending"),
+            ContractError::RotationNotReady => write!(f, "rotation not ready"),
+            ContractError::InvalidCursor => write!(f, "invalid cursor"),
+            ContractError::VerifyRateLimited => write!(f, "verify rate limited"),
+            ContractError::DualControlRequired => write!(f, "dual control required"),
+            ContractError::BatchRemoveProposalPending => write!(f, "batch remove proposal pending"),
+            ContractError::NoPendingBatchRemove => write!(f, "no pending batch remove"),
+            ContractError::RoleExpired => write!(f, "role expired"),
+            ContractError::OracleProofBadLayout => write!(f, "oracle proof bad layout"),
+            ContractError::OracleProofNotAllowlisted => write!(f, "oracle proof not allowlisted"),
+            ContractError::OracleProofExpired => write!(f, "oracle proof expired"),
+            ContractError::OracleProofBadSignature => write!(f, "oracle proof bad signature"),
+        }
     }
 }
 
