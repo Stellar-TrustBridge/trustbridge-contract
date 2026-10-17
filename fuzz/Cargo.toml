@@ -19,4 +19,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "username_validate"
+path = "fuzz_targets/username_validate.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
