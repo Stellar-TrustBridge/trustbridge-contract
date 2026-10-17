@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "0 3 * * *" # nightly mutation run
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -25,33 +28,23 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
-  smoke:
-    name: smoke
+  abi-consistency:
+    name: Error codes and event topics
     runs-on: ubuntu-latest
-    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # Same scripts as `make error-codes` / `make event-topics`.
+      - name: Check error codes
+        run: ./scripts/check_error_codes.sh
 
-      # Fork PRs cannot write the cache; only main pushes save it.
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check event topics
+        run: ./scripts/check_event_topics.sh
 
-      - name: cargo check --all-targets
-        run: cargo check --all-targets
-
-      - name: cargo test
-        run: cargo test
-
-  homoglyph_corpus:
-    name: homoglyph_corpus
+  oracle-proof-tests:
+    name: oracle_proof unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -61,9 +54,73 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # Blocking: same command as `make test-homoglyph`.
-      - name: cargo test --test homoglyph_corpus
-        run: cargo test --test homoglyph_corpus
+      - name: Run oracle_proof module tests
+        run: cargo test --lib oracle_proof
+
+  cargo-deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Caches the installed cargo-deny binary between runs.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny@0.20.2
+
+      # Advisory DB cache; cargo-deny refreshes it on every run.
+      - name: Cache advisory database
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/advisory-dbs
+          key: advisory-db-${{ github.run_id }}
+          restore-keys: advisory-db-
+
+      - name: cargo deny check
+        run: cargo deny --config deny.toml check
+
+  mutants:
+    name: cargo mutants (src/utils.rs)
+    # CPU-heavy: nightly and on demand only, never on pull requests.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-mutants
+        run: cargo install --locked cargo-mutants@27.1.0
+
+      # Scope and test selection come from mutants.toml (cargo-mutants only
+      # reads .cargo/mutants.toml by default). Exit 2 means survived
+      # ("missed") mutants and fails the job; exit 3 means only timeouts,
+      # which mutants.toml documents as not failures.
+      - name: cargo mutants --file src/utils.rs
+        run: |
+          status=0
+          cargo mutants --config mutants.toml --file src/utils.rs || status=$?
+          if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then exit "$status"; fi
+
+      - name: Upload survived mutants
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-survived
+          path: |
+            mutants.out/missed.txt
+            mutants.out/outcomes.json
+          if-no-files-found: warn

@@ -22,38 +22,58 @@
 # of storage or business logic.
 #
 # Run locally:
-#   cargo install cargo-mutants
-#   cargo mutants --file src/utils.rs
+#   cargo install --locked cargo-mutants@27.1.0
+#   cargo mutants --config mutants.toml --file src/utils.rs
+#
+# `--config` is required: cargo-mutants only reads .cargo/mutants.toml on its
+# own.
 #
 # The command above mutates only src/utils.rs and runs the test suite against
-# each mutant. Survived mutants are printed at the end; each represents a gap
+# each mutant. Survived mutants are printed at the end and listed in
+# mutants.out/missed.txt (cargo-mutants calls them "missed"); each is a gap
 # in the test suite's ability to catch a weakened check.
 #
 # Skipped mutants (timeout/unviable) are not failures — they happen when a
 # mutant causes a compile error or an infinite loop in a no_std context.
 
 # Restrict mutations to the validation module.
-file_filter = ["src/utils.rs"]
+examine_globs = ["src/utils.rs"]
 
 # Exclude the test-only helpers — mutating test code creates false signals.
-# The error.rs patterns below are belt-and-braces: file_filter already keeps
+# The error.rs patterns below are belt-and-braces: examine_globs already keeps
 # src/error.rs out of scope, but if the scope is ever widened these keep the
 # brittle discriminant/category boilerplate excluded while storage and
 # business-logic mutants keep running.
 exclude_re = [
-  r"#\[cfg\(test\)\]",
-  r"mod tests",
-  r"src/error\.rs",
-  r"fn code\b",
-  r"fn from_code\b",
-  r"fn category\b",
-  r"fn is_retryable\b",
+  '#\[cfg\(test\)\]',
+  'mod tests',
+  'src/error\.rs',
+  'fn code\b',
+  'fn from_code\b',
+  'fn category\b',
+  'fn is_retryable\b',
+  # Equivalent mutant: the timestamp is shifted into the high 32 bits and the
+  # nonce fits in the low 32, so `|` and `^` produce identical IDs and no test
+  # can distinguish them.
+  'replace \| with \^ in generate_event_id',
+]
+
+# Tests run against each mutant: the `utils::` unit tests plus every test in
+# tests/homoglyph_corpus.rs (the filters below match all of its test names).
+# Keeping the selection here means local runs and the CI job agree, and the
+# baseline is not blocked by unrelated failing tests elsewhere in the crate.
+additional_cargo_test_args = [
+  "--lib",
+  "--test", "homoglyph_corpus",
+  "--",
+  "utils::",
+  "bidirectional", "fullwidth", "homoglyph", "invisible",
+  "mathematical", "mixed_script", "superscript",
 ]
 
 # Per-mutant timeout in seconds. The full test suite takes <30 s on GitHub
 # Actions; 120 s gives generous headroom for slow runners.
-timeout = 120
+minimum_test_timeout = 120
 
-# Baseline timeout: how long `cargo test` is allowed to run without any
-# mutations applied. Fail fast if the baseline itself is broken.
-baseline = "run"
+# The unmutated baseline always runs first (cargo-mutants default), so a
+# broken baseline fails fast before any mutant is tested.

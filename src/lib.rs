@@ -3324,6 +3324,16 @@ impl TrustBridgeContract {
             charge_verify_rate(&env, &caller, 1)?;
         }
 
+        let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
+
+        // Issue #218: an expired prior verification does not block a fresh
+        // one — only a still-active verification does.
+        let was_active =
+            record.verified && !crate::storage::is_verification_expired(&env, &github_username);
+        if was_active {
+            return Err(ContractError::AlreadyVerified);
+        }
+
         let record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
         mark_verified(&env, github_username, record, caller)
     }

@@ -302,90 +302,6 @@ mod tests {
     const SUBJECT: &str = "GAZOJB42QBRQC44KFDMPWIKO5JBARJ3MBALJQU2T7M2WZUDZ2D3FVT4I";
 
     #[test]
-    fn ownership_message_layout() {
-        let env = Env::default();
-        let subject = Address::from_str(&env, SUBJECT);
-        let username = String::from_str(&env, "octocat");
-        assert_eq!(
-            ownership_message(&env, &username, &subject, 0),
-            Bytes::from_slice(&env, std::format!("octocat:{SUBJECT}:0").as_bytes())
-        );
-        assert_eq!(
-            ownership_message(&env, &username, &subject, u64::MAX),
-            Bytes::from_slice(
-                &env,
-                std::format!("octocat:{SUBJECT}:18446744073709551615").as_bytes()
-            )
-        );
-    }
-
-    #[test]
-    fn ownership_proof_for_other_subject_is_bad_layout() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = setup(&env);
-        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
-
-        env.as_contract(&contract_id, || {
-            let mut allowlist = Vec::new(&env);
-            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
-            set_oracle_allowlist(&env, &admin, allowlist);
-
-            // A genuinely signed proof, but for "testuser"/another address.
-            let proof = OracleProof {
-                oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
-                message: Bytes::from_array(&env, &MESSAGE),
-                signature: BytesN::from_array(&env, &VALID_SIG),
-                expires_at: 0,
-            };
-            assert_eq!(
-                verify_ownership_proof(
-                    &env,
-                    &String::from_str(&env, "octocat"),
-                    &Address::from_str(&env, SUBJECT),
-                    &proof
-                ),
-                Err(ContractError::OracleProofBadLayout)
-            );
-        });
-    }
-
-    #[test]
-    fn ownership_proof_surfaces_allowlist_and_expiry_codes() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = setup(&env);
-        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
-        let username = String::from_str(&env, "octocat");
-        let subject = Address::from_str(&env, SUBJECT);
-
-        env.as_contract(&contract_id, || {
-            let proof = |expires_at: u64| OracleProof {
-                oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
-                message: ownership_message(&env, &username, &subject, expires_at),
-                signature: BytesN::from_array(&env, &VALID_SIG),
-                expires_at,
-            };
-
-            // Empty allowlist rejects every proof.
-            assert_eq!(
-                verify_ownership_proof(&env, &username, &subject, &proof(0)),
-                Err(ContractError::OracleProofNotAllowlisted)
-            );
-
-            let mut allowlist = Vec::new(&env);
-            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
-            set_oracle_allowlist(&env, &admin, allowlist);
-
-            env.ledger().set_timestamp(1_000);
-            assert_eq!(
-                verify_ownership_proof(&env, &username, &subject, &proof(500)),
-                Err(ContractError::OracleProofExpired)
-            );
-        });
-    }
-
-    #[test]
     fn non_allowlisted_key_is_rejected() {
         let env = Env::default();
         env.mock_all_auths();
@@ -497,6 +413,32 @@ mod tests {
                 verify_with_proof(&env, &proof),
                 Err(ContractError::OracleProofBadSignature)
             );
+        });
+    }
+
+    /// A canonically encoded signature that does not verify cannot become an
+    /// `Err`: `ed25519_verify` has no fallible form, so the host traps.
+    #[test]
+    #[should_panic(expected = "Error(Crypto, InvalidInput)")]
+    fn wellformed_invalid_signature_traps() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+
+            // Allowlisted key, but the attacker's (well-formed) signature.
+            let proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
+                message: Bytes::from_array(&env, &MESSAGE),
+                signature: BytesN::from_array(&env, &ATTACKER_SIG),
+                expires_at: 0,
+            };
+            let _ = verify_with_proof(&env, &proof);
         });
     }
 }

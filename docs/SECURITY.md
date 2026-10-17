@@ -951,46 +951,27 @@ hash for upgrades, not an identity claim.)
 - `OracleProof { oracle_pubkey, message, signature, expires_at }` — a signed
   attestation from an off-chain oracle.
 - `verify_with_proof(env, proof)` — checks, in order: the proof is
-  structurally well-formed (`OracleProofBadLayout`, 58), the signing key is on
-  the allowlist (`OracleProofNotAllowlisted`, 59 — always, for an empty
-  allowlist), the proof has not expired (`OracleProofExpired`, 60;
-  `expires_at == 0` disables the check — production callers should always set
-  a real value), and finally that `signature` is a valid Ed25519 signature over
-  `message` under `oracle_pubkey` (`OracleProofBadSignature`, 61, for a
-  non-canonical encoding).
+  structurally well-formed (`OracleProofBadLayout`, 58: empty `message` or
+  all-zero `signature`), the signing key is on the allowlist
+  (`OracleProofNotAllowlisted`, 59, including an empty allowlist), the proof
+  has not expired (`OracleProofExpired`, 60; `expires_at == 0` disables the
+  check — production callers should always set a real value), the signature
+  is a canonical encoding (`OracleProofBadSignature`, 61), and finally that
+  `signature` is a valid Ed25519 signature over `message` under
+  `oracle_pubkey`.
 
-**Invalid proof fails.** Every rejection above returns its own error code. An
-allowlisted key with a well-formed signature that does not verify traps the
-host invocation instead of returning `Err` — `soroban_sdk`'s
-`Env::crypto().ed25519_verify` has no non-panicking form, so this fails the
-exact same way an invalid `require_auth()` signature already does everywhere
-else in this contract.
-
-### Contract entrypoints (Issue #584)
-
-- `set_oracle_allowlist(pubkeys)` — contract-admin auth; replaces the allowlist.
-- `get_oracle_allowlist()` — public read.
-- `verify_with_oracle_proof(github_username, proof)` — requires auth from the
-  record's registered `stellar_address`, the same initialization and pause
-  guards as `verify`, and then the checks above. On success it updates the
-  record, counters, `VerifiedEvent`, and audit log exactly as `verify` does
-  (including `AlreadyVerified` for a still-active verification).
-
-**Message layout.** `verify_with_oracle_proof` only accepts a proof whose
-`message` is exactly the bytes
-
-```text
-<github_username>:<stellar_address strkey>:<expires_at as decimal>
-```
-
-e.g. `octocat:GAAA…WHF:1700000000`, built by `oracle_proof::ownership_message`.
-Anything else is `OracleProofBadLayout`, so a proof signed for one
-username/address pair cannot verify another, and its expiry cannot be edited
-without breaking the signature. The message does not include the contract
-address: use a distinct oracle key per deployment so proofs cannot be replayed
-across instances. A proof is reusable until it expires — after a
-`revoke_verification`, the registrant can resubmit an unexpired proof — so
-oracles should issue short-lived proofs.
+**Invalid proof fails.** Each rejection above returns its own `Err` code. An
+allowlisted key with a canonically encoded signature that does not verify
+traps the host invocation (`Error(Crypto, InvalidInput)`) instead of
+returning `Err` — `soroban_sdk`'s `Env::crypto().ed25519_verify` has no
+non-panicking form, so this fails the exact same way an invalid
+`require_auth()` signature already does everywhere else in this contract.
+Tests in `src/oracle_proof.rs` cover every path with a fixed test keypair
+(`valid_allowlisted_proof_passes`, `bad_layout_is_rejected_with_layout_code`,
+`non_allowlisted_key_is_rejected`, `expired_proof_is_rejected`,
+`bad_signature_is_rejected_with_signature_code`,
+`wellformed_invalid_signature_traps`); run them with
+`cargo test oracle_proof`.
 
 **This is a signature-check interface, not GitHub verification.** The
 contract has no way to talk to the GitHub API and this change does not give

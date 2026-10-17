@@ -270,7 +270,7 @@
     {
       "code": 41,
       "name": "NoUpgradeProposalPending",
-      "description": "`approve_upgrade` / `execute_upgrade` / `cancel_upgrade_proposal` was called with no live proposal (Issue #301)"
+      "description": "`approve_upgrade` / `execute_upgrade` / `cancel_upgrade_proposal` was called with no live proposal (or a proposal id that does not match) (Issue #301)"
     },
     {
       "code": 42,
@@ -290,17 +290,17 @@
     {
       "code": 46,
       "name": "FallbackListFull",
-      "description": "`register` was given more fallback addresses than `MAX_FALLBACK_ADDRESSES` (Issue #238)"
+      "description": "`register` was given more fallback addresses than `MAX_FALLBACK_ADDRESSES`"
     },
     {
       "code": 47,
       "name": "UsernameTaken",
-      "description": "`rename` was called with a `new_username` that is already registered (Issue #233)"
+      "description": "`rename` was called with a `new_username` that is already registered"
     },
     {
       "code": 48,
       "name": "RotationRequired",
-      "description": "`register` was asked to change the registered address while the rotation delay is armed (Issue #234)"
+      "description": "`register` was asked to change the registered address while the rotation delay is armed (Issue #234) \u2014 use the request/execute rotation flow"
     },
     {
       "code": 49,
@@ -330,7 +330,7 @@
     {
       "code": 54,
       "name": "DualControlRequired",
-      "description": "`batch_remove` was called with a batch larger than the configured dual-control threshold — use `propose_batch_remove` / `execute_batch_remove` instead (Issue #219)"
+      "description": "`batch_remove` was called with a batch larger than the configured dual-control threshold (Issue #219) \u2014 use `propose_batch_remove` / `execute_batch_remove` instead"
     },
     {
       "code": 55,
@@ -340,7 +340,7 @@
     {
       "code": 56,
       "name": "NoPendingBatchRemove",
-      "description": "`execute_batch_remove` / `cancel_batch_remove` was called with no live or unexpired proposal (Issue #219)"
+      "description": "`execute_batch_remove` / `cancel_batch_remove` was called with no live (or already-expired) proposal (Issue #219)"
     },
     {
       "code": 57,
@@ -350,22 +350,22 @@
     {
       "code": 58,
       "name": "OracleProofBadLayout",
-      "description": "`verify_with_oracle_proof` given an empty message, all-zero signature, or a message not bound to the username/address/expiry (Issue #584)"
+      "description": "`verify_with_proof`: empty `message` or all-zero `signature` (structurally malformed proof)"
     },
     {
       "code": 59,
       "name": "OracleProofNotAllowlisted",
-      "description": "`verify_with_oracle_proof` signed by a key not on the oracle allowlist (Issue #584)"
+      "description": "`verify_with_proof`: `oracle_pubkey` is not on the oracle allowlist (always, when it is empty)"
     },
     {
       "code": 60,
       "name": "OracleProofExpired",
-      "description": "`verify_with_oracle_proof` with a non-zero `expires_at` in the past (Issue #584)"
+      "description": "`verify_with_proof`: non-zero `expires_at` is earlier than the ledger timestamp"
     },
     {
       "code": 61,
       "name": "OracleProofBadSignature",
-      "description": "`verify_with_oracle_proof` with a non-canonical signature encoding (Issue #584)"
+      "description": "`verify_with_proof`: signature is not a canonical Ed25519 encoding"
     }
   ],
   "events": [
