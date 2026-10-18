@@ -15,7 +15,7 @@ use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, String, V
 
 use trustbridge_contract::{
     AuditEventType, AuditLogEntry, ContractError, Role, RoleGrantCancelledEvent,
-    RoleGrantPendingEvent, TrustBridgeContract,
+    RoleGrantPendingEvent, TrustBridgeContract, VerifierAllowEntry, MAX_VERIFIERS,
 };
 
 fn setup_test_env() -> (Env, Address, Address, Address, Address) {
@@ -161,25 +161,116 @@ fn test_integration_guardian_pause_is_allowed_for_admin_or_guardian() {
 }
 
 #[test]
-fn test_integration_guardian_pause_rejects_non_admin_non_guardian() {
-    let (env, _admin, _user1, _user2, contract_id) = setup_test_env();
+fn test_integration_emergency_pause_blocks_verify_and_clears() {
+    let (env, admin, user1, _user2, contract_id) = setup_test_env();
     let guardian = Address::generate(&env);
-    let outsider = Address::generate(&env);
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::set_guardian(env.clone(), guardian.clone()).unwrap();
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "octocat"),
+            user1.clone(),
+            Vec::new(&env),
+        )
+        .unwrap();
     });
 
+    env.mock_all_auths();
     env.as_contract(&contract_id, || {
+        TrustBridgeContract::emergency_pause(env.clone(), guardian.clone()).unwrap();
+        assert!(TrustBridgeContract::is_emergency_paused(env.clone()));
+
+        // register blocked while paused
         assert_eq!(
-            TrustBridgeContract::emergency_pause(env.clone(), outsider.clone()),
-            Err(ContractError::NotAuthorized)
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, "newuser"),
+                user1.clone(),
+                Vec::new(&env)
+            ),
+            Err(ContractError::Paused)
         );
+
+        // verify blocked while paused with the same Paused error as the
+        // ordinary pause path (distinct from auth / not-registered errors)
         assert_eq!(
-            TrustBridgeContract::clear_emergency_pause(env.clone()),
-            Err(ContractError::NotAuthorized)
+            TrustBridgeContract::verify(env.clone(), user1.clone(), s(&env, "octocat")),
+            Err(ContractError::Paused)
         );
+
+        // clear path restores mutators
+        TrustBridgeContract::clear_emergency_pause(env.clone()).unwrap();
+        assert!(!TrustBridgeContract::is_emergency_paused(env.clone()));
+        assert_eq!(
+            TrustBridgeContract::verify(env.clone(), user1.clone(), s(&env, "octocat")),
+            Ok(())
+        );
+    });
+}
+
+// ── Public page privacy redaction (Issue #627) ──────────────────────────────
+
+#[test]
+fn test_integration_public_page_redacts_unverified_addresses() {
+    let (env, admin, user1, user2, contract_id) = setup_test_env();
+    let zero = Address::from_str(
+        &env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "alice"),
+            user1.clone(),
+            Vec::new(&env),
+        )
+        .unwrap();
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "bob"),
+            user2.clone(),
+            Vec::new(&env),
+        )
+        .unwrap();
+        // Verify only alice; bob stays unverified.
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
+    });
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
+        let mut by_name: std::collections::BTreeMap<String, _> =
+            page.records.into_iter().collect();
+        // Total must include both registrations.
+        assert_eq!(page.total, 2);
+
+        let alice = by_name
+            .remove(&s(&env, "alice"))
+            .expect("alice must be on the public page");
+        assert_ne!(alice.stellar_address, zero, "verified address must not be redacted");
+
+        let bob = by_name
+            .remove(&s(&env, "bob"))
+            .expect("bob must be on the public page");
+        assert_eq!(bob.stellar_address, zero, "unverified address must be redacted");
+        assert_eq!(bob.payout_address, zero, "unverified payout must be redacted");
+    });
+}
+
+#[test]
+fn test_integration_public_page_empty_registry() {
+    let (env, _admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
+        assert_eq!(page.records.len(), 0);
+        assert_eq!(page.total, 0);
+        assert!(!page.has_more);
     });
 }
 
@@ -3392,7 +3483,10 @@ fn test_unauthorized_attempt_logged_on_failed_admin_call() {
 
         // emergency_pause with a non-admin/non-guardian caller → NotAuthorized
         let result = TrustBridgeContract::emergency_pause(env.clone(), user1.clone());
-        assert_eq!(result, Err(trustbridge_contract::ContractError::NotAuthorized));
+        assert_eq!(
+            result,
+            Err(trustbridge_contract::ContractError::NotAuthorized)
+        );
 
         let logs_after = TrustBridgeContract::get_audit_logs(env.clone());
         let stats_after = TrustBridgeContract::get_audit_stats(env.clone());
@@ -3430,8 +3524,7 @@ fn test_successful_call_does_not_log_unauthorized() {
 
         let stats_after = TrustBridgeContract::get_audit_stats(env.clone());
         assert_eq!(
-            stats_after.unauthorized_attempts,
-            stats_before.unauthorized_attempts,
+            stats_after.unauthorized_attempts, stats_before.unauthorized_attempts,
             "successful call must not increment unauthorized_attempts"
         );
     });
@@ -3459,14 +3552,16 @@ fn test_unauthorized_attempt_suppressed_when_log_unauthorized_false() {
 
         // Trigger an auth failure
         let result = TrustBridgeContract::emergency_pause(env.clone(), user1.clone());
-        assert_eq!(result, Err(trustbridge_contract::ContractError::NotAuthorized));
+        assert_eq!(
+            result,
+            Err(trustbridge_contract::ContractError::NotAuthorized)
+        );
 
         let stats_after = TrustBridgeContract::get_audit_stats(env.clone());
         let logs_after = TrustBridgeContract::get_audit_logs(env.clone());
 
         assert_eq!(
-            stats_after.unauthorized_attempts,
-            stats_before.unauthorized_attempts,
+            stats_after.unauthorized_attempts, stats_before.unauthorized_attempts,
             "no counter increment when log_unauthorized is false"
         );
         assert_eq!(
@@ -3495,9 +3590,11 @@ fn test_unauthorized_attempt_verify_non_verifier() {
         let stats_before = TrustBridgeContract::get_audit_stats(env.clone());
 
         // user1 has no Verifier role → NotAuthorized
-        let result =
-            TrustBridgeContract::verify(env.clone(), user1.clone(), s(&env, "octocat"));
-        assert_eq!(result, Err(trustbridge_contract::ContractError::NotAuthorized));
+        let result = TrustBridgeContract::verify(env.clone(), user1.clone(), s(&env, "octocat"));
+        assert_eq!(
+            result,
+            Err(trustbridge_contract::ContractError::NotAuthorized)
+        );
 
         let stats_after = TrustBridgeContract::get_audit_stats(env.clone());
         assert_eq!(
@@ -3544,14 +3641,12 @@ fn test_set_audit_config_non_admin_rejected() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        let result = TrustBridgeContract::set_audit_config(
-            env.clone(),
-            user1.clone(),
-            true,
-            1000,
-            true,
+        let result =
+            TrustBridgeContract::set_audit_config(env.clone(), user1.clone(), true, 1000, true);
+        assert_eq!(
+            result,
+            Err(trustbridge_contract::ContractError::NotAuthorized)
         );
-        assert_eq!(result, Err(trustbridge_contract::ContractError::NotAuthorized));
 
         // Config must be unchanged (still default)
         let cfg = TrustBridgeContract::get_audit_config(env.clone());
@@ -3569,14 +3664,8 @@ fn test_set_audit_config_emits_audit_log_entry() {
     env.as_contract(&contract_id, || {
         let logs_before = TrustBridgeContract::get_audit_logs(env.clone());
 
-        TrustBridgeContract::set_audit_config(
-            env.clone(),
-            admin.clone(),
-            true,
-            1000,
-            true,
-        )
-        .unwrap();
+        TrustBridgeContract::set_audit_config(env.clone(), admin.clone(), true, 1000, true)
+            .unwrap();
 
         let logs_after = TrustBridgeContract::get_audit_logs(env.clone());
         assert_eq!(logs_after.len(), logs_before.len() + 1);
@@ -3600,13 +3689,7 @@ fn test_set_audit_config_unauthorized_attempt_self_logged() {
     env.as_contract(&contract_id, || {
         let stats_before = TrustBridgeContract::get_audit_stats(env.clone());
 
-        let _ = TrustBridgeContract::set_audit_config(
-            env.clone(),
-            user1.clone(),
-            false,
-            0,
-            false,
-        );
+        let _ = TrustBridgeContract::set_audit_config(env.clone(), user1.clone(), false, 0, false);
 
         let stats_after = TrustBridgeContract::get_audit_stats(env.clone());
         assert_eq!(
@@ -3678,7 +3761,10 @@ fn test_restage_overwrites_previous_hash() {
         TrustBridgeContract::stage_wasm(env.clone(), admin.clone(), hash_b.clone()).unwrap();
 
         let staged = TrustBridgeContract::get_staged(env.clone()).unwrap();
-        assert_eq!(staged.wasm_hash, hash_b, "second stage must overwrite first");
+        assert_eq!(
+            staged.wasm_hash, hash_b,
+            "second stage must overwrite first"
+        );
     });
 }
 
@@ -3691,7 +3777,10 @@ fn test_stage_wasm_non_upgrader_random_rejected() {
         let hash = make_wasm_hash(&env, 0xFF);
 
         let result = TrustBridgeContract::stage_wasm(env.clone(), user1.clone(), hash);
-        assert_eq!(result, Err(trustbridge_contract::ContractError::NotAuthorized));
+        assert_eq!(
+            result,
+            Err(trustbridge_contract::ContractError::NotAuthorized)
+        );
 
         // Staging must not have occurred
         assert!(TrustBridgeContract::get_staged(env.clone()).is_none());
@@ -3729,7 +3818,10 @@ fn test_clear_staged_non_admin_rejected() {
 
         // Non-admin tries to clear → NotAuthorized
         let result = TrustBridgeContract::clear_staged(env.clone(), user1.clone());
-        assert_eq!(result, Err(trustbridge_contract::ContractError::NotAuthorized));
+        assert_eq!(
+            result,
+            Err(trustbridge_contract::ContractError::NotAuthorized)
+        );
 
         // Hash must still be staged
         assert!(TrustBridgeContract::get_staged(env.clone()).is_some());
@@ -3770,7 +3862,10 @@ fn test_clear_staged_admin_only_upgrader_rejected() {
 
         // Upgrader cannot clear
         let result = TrustBridgeContract::clear_staged(env.clone(), user1.clone());
-        assert_eq!(result, Err(trustbridge_contract::ContractError::NotAuthorized));
+        assert_eq!(
+            result,
+            Err(trustbridge_contract::ContractError::NotAuthorized)
+        );
 
         // Hash still present
         assert!(TrustBridgeContract::get_staged(env.clone()).is_some());
@@ -3803,5 +3898,289 @@ fn test_staged_wasm_metadata_fields_populated() {
         assert_eq!(staged.wasm_hash, hash);
         assert_eq!(staged.staged_by, admin);
         assert_eq!(staged.staged_at, 99_000);
+    });
+}
+
+// ── Bot account deny paths with stable reason codes (Issue #644) ────────────
+//
+// Registration itself has no bot-pattern deny rule: a bot account registers
+// like any other and is flagged post-hoc via `set_bot_status` (Issue #236).
+// The deny paths that *do* exist for bot-flag management return documented,
+// stable `ContractError` codes so dashboard/indexer pipelines can classify
+// failures without parsing human-readable messages.
+
+/// Re-registering a flagged bot account preserves the `is_bot` flag — a
+/// bot cannot shed its flag by re-registering, and a legitimate CI bot
+/// keeps its flag across address refreshes.
+#[test]
+fn test_bot_flag_preserved_across_reregistration() {
+    let (env, _admin, user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "ci-bot"),
+            user1.clone(),
+            Vec::new(&env),
+        )
+        .unwrap();
+        TrustBridgeContract::set_bot_status(env.clone(), user1.clone(), s(&env, "ci-bot"), true)
+            .unwrap();
+
+        // Same address re-registers (e.g. metadata refresh).
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "ci-bot"),
+            user1.clone(),
+            Vec::new(&env),
+        )
+        .unwrap();
+
+        let record = TrustBridgeContract::get_address(env.clone(), s(&env, "ci-bot")).unwrap();
+        assert!(record.is_bot, "is_bot must survive re-registration");
+    });
+}
+
+/// An unauthorized caller setting bot status gets `NotAuthorized` (code 3)
+/// and the attempt is recorded in the audit log for bot-mitigation pipelines.
+#[test]
+fn test_set_bot_status_unauthorized_returns_stable_code() {
+    let (env, _admin, user1, user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "ci-bot"),
+            user2.clone(),
+            Vec::new(&env),
+        )
+        .unwrap();
+
+        let stats_before = TrustBridgeContract::get_audit_stats(env.clone());
+
+        // user1 is neither the admin nor the registrant → NotAuthorized.
+        let result = TrustBridgeContract::set_bot_status(
+            env.clone(),
+            user1.clone(),
+            s(&env, "ci-bot"),
+            true,
+        );
+        assert_eq!(result, Err(ContractError::NotAuthorized));
+        assert_eq!(
+            ContractError::NotAuthorized.code(),
+            3,
+            "dashboard pipelines rely on the stable code"
+        );
+
+        let stats_after = TrustBridgeContract::get_audit_stats(env.clone());
+        assert_eq!(
+            stats_after.unauthorized_attempts,
+            stats_before.unauthorized_attempts + 1,
+            "unauthorized bot-flag attempts must be audit-logged"
+        );
+    });
+}
+
+/// Flagging an unregistered username returns `NotRegistered` (code 4).
+#[test]
+fn test_set_bot_status_unregistered_returns_stable_code() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let result = TrustBridgeContract::set_bot_status(
+            env.clone(),
+            admin.clone(),
+            s(&env, "ghost-bot"),
+            true,
+        );
+        assert_eq!(result, Err(ContractError::NotRegistered));
+        assert_eq!(ContractError::NotRegistered.code(), 4);
+    });
+}
+
+/// While paused, bot-flag management fails with `Paused` (code 7) *before*
+/// any bot-specific logic runs — the pause check is the first guard.
+#[test]
+fn test_set_bot_status_paused_fails_before_bot_logic() {
+    let (env, admin, user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "ci-bot"),
+            user1.clone(),
+            Vec::new(&env),
+        )
+        .unwrap();
+        TrustBridgeContract::pause(env.clone(), 1).unwrap();
+
+        let result = TrustBridgeContract::set_bot_status(
+            env.clone(),
+            admin.clone(),
+            s(&env, "ci-bot"),
+            true,
+        );
+        assert_eq!(result, Err(ContractError::Paused));
+        assert_eq!(ContractError::Paused.code(), 7);
+
+        // Registration is likewise blocked before any bot handling.
+        let reg = TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "new-bot"),
+            user1.clone(),
+            Vec::new(&env),
+        );
+        assert_eq!(reg, Err(ContractError::Paused));
+    });
+}
+
+// ── Verifier allowlist public API (Issue #638) ──────────────────────────────
+//
+// `set_verifier_allowlist` is an internal `src/storage.rs` helper, *not* a
+// public entrypoint — the on-chain surface is `add_verifier` / `remove_verifier`
+// (Issue #293). These tests exercise that public surface; SECURITY.md documents
+// the internal-only status, and auth_matrix.csv correctly has no row for the
+// internal helper.
+
+/// Round-trip the public allowlist API: add → inspect → remove.
+#[test]
+fn test_verifier_allowlist_public_api_round_trip() {
+    let (env, admin, verifier, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        // Fresh contract: empty allowlist, full slots.
+        assert_eq!(TrustBridgeContract::get_verifiers(env.clone()).len(), 0);
+        assert_eq!(
+            TrustBridgeContract::verifier_slots_remaining(env.clone()),
+            MAX_VERIFIERS
+        );
+
+        // Add (expires_at = 0 → no expiry).
+        TrustBridgeContract::add_verifier(env.clone(), verifier.clone(), 0).unwrap();
+
+        let list = TrustBridgeContract::get_verifiers(env.clone());
+        assert_eq!(list.len(), 1);
+        let entry: VerifierAllowEntry = list.get(0).unwrap();
+        assert_eq!(entry.address, verifier);
+        assert_eq!(entry.expires_at, 0);
+
+        assert!(TrustBridgeContract::is_active_verifier(
+            env.clone(),
+            verifier.clone()
+        ));
+        assert_eq!(
+            TrustBridgeContract::verifier_slots_remaining(env.clone()),
+            MAX_VERIFIERS - 1
+        );
+        // add_verifier also grants Role::Verifier.
+        assert_eq!(
+            TrustBridgeContract::get_role(env.clone(), verifier.clone()),
+            Some(Role::Verifier)
+        );
+
+        // Remove.
+        TrustBridgeContract::remove_verifier(env.clone(), verifier.clone()).unwrap();
+        assert_eq!(TrustBridgeContract::get_verifiers(env.clone()).len(), 0);
+        assert!(!TrustBridgeContract::is_active_verifier(
+            env.clone(),
+            verifier.clone()
+        ));
+        assert_eq!(
+            TrustBridgeContract::verifier_slots_remaining(env.clone()),
+            MAX_VERIFIERS
+        );
+        // Role is revoked with the allowlist entry.
+        assert_eq!(
+            TrustBridgeContract::get_role(env.clone(), verifier.clone()),
+            None
+        );
+    });
+    let _ = admin;
+}
+
+/// Removing an address that is not on the allowlist returns
+/// `VerifierNotAllowlisted` (code 32).
+#[test]
+fn test_remove_verifier_not_listed_returns_stable_code() {
+    let (env, _admin, verifier, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let result = TrustBridgeContract::remove_verifier(env.clone(), verifier.clone());
+        assert_eq!(result, Err(ContractError::VerifierNotAllowlisted));
+        assert_eq!(ContractError::VerifierNotAllowlisted.code(), 32);
+    });
+}
+
+/// A non-zero `expires_at` not in the future returns
+/// `VerifierExpiryInPast` (code 33).
+#[test]
+fn test_add_verifier_expiry_in_past_returns_stable_code() {
+    let (env, _admin, verifier, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        soroban_sdk::testutils::Ledger::set_timestamp(&env.ledger(), 10_000);
+        let result = TrustBridgeContract::add_verifier(env.clone(), verifier.clone(), 5_000);
+        assert_eq!(result, Err(ContractError::VerifierExpiryInPast));
+        assert_eq!(ContractError::VerifierExpiryInPast.code(), 33);
+    });
+}
+
+/// Exceeding `MAX_VERIFIERS` returns `VerifierAllowlistFull` (code 31).
+#[test]
+fn test_add_verifier_cap_returns_stable_code() {
+    let (env, _admin, _verifier, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        for _ in 0..MAX_VERIFIERS {
+            let v = Address::generate(&env);
+            TrustBridgeContract::add_verifier(env.clone(), v, 0).unwrap();
+        }
+        assert_eq!(
+            TrustBridgeContract::verifier_slots_remaining(env.clone()),
+            0,
+            "list must be full before the overflowing add"
+        );
+
+        let overflow = Address::generate(&env);
+        let result = TrustBridgeContract::add_verifier(env.clone(), overflow, 0);
+        assert_eq!(result, Err(ContractError::VerifierAllowlistFull));
+        assert_eq!(ContractError::VerifierAllowlistFull.code(), 31);
+    });
+}
+
+/// An expired entry stops authorizing and is pruned by `prune_expired_verifiers`
+/// (callable by anyone); `is_active_verifier` reports `false` once expired.
+#[test]
+fn test_verifier_allowlist_expiry_blocks_and_prunes() {
+    let (env, _admin, verifier, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        soroban_sdk::testutils::Ledger::set_timestamp(&env.ledger(), 1_000);
+        TrustBridgeContract::add_verifier(env.clone(), verifier.clone(), 2_000).unwrap();
+        assert!(TrustBridgeContract::is_active_verifier(
+            env.clone(),
+            verifier.clone()
+        ));
+
+        // Jump past expiry.
+        soroban_sdk::testutils::Ledger::set_timestamp(&env.ledger(), 3_000);
+        assert!(!TrustBridgeContract::is_active_verifier(
+            env.clone(),
+            verifier.clone()
+        ));
+
+        // Anyone may prune the already-inactive entry.
+        let pruned = TrustBridgeContract::prune_expired_verifiers(env.clone()).unwrap();
+        assert_eq!(pruned, 1);
+        assert_eq!(TrustBridgeContract::get_verifiers(env.clone()).len(), 0);
     });
 }

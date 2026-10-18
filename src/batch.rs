@@ -9,6 +9,7 @@ use super::{
     storage_is_active_verifier, verifier_allowlist_active,
 };
 use crate::storage::{charge_verify_rate, is_verification_expired, set_verified_at};
+use crate::utils::is_zero_address;
 use crate::{AuditEventType, AuditLogEntry, ContractError, Role, VerifiedEvent};
 use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
@@ -191,6 +192,10 @@ pub(super) fn batch_verify(
         let Some(record) = get_record(&env, &username) else {
             continue;
         };
+        // A zero/burn bound address is a binding failure, not a success.
+        if is_zero_address(&env, &record.stellar_address) {
+            continue;
+        }
         let active = record.verified && !is_verification_expired(&env, &username);
         if active || pending.iter().any(|existing| existing == username) {
             continue;
@@ -202,6 +207,9 @@ pub(super) fn batch_verify(
     let mut newly_verified: u32 = 0;
     for username in pending.iter() {
         let Some(mut record) = get_record(&env, &username) else {
+            continue;
+        };
+        if is_zero_address(&env, &record.stellar_address) {
             continue;
         };
 

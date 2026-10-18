@@ -10,7 +10,13 @@ source of truth for topic symbols, field names, and types — mismatches between
 docs and on-chain `#[contractevent]` definitions are tracked as documentation
 bugs.
 
-Key events to watch:
+Cursor pagination over mirrored events must decode **topics** and **data**
+separately ([EVENT_INDEXING.md](EVENT_INDEXING.md)). `topic[0]` is always the
+snake_case event symbol. Additional `#[topic]` fields follow in struct order
+(Soroban allows at most a handful of indexed topics; this contract uses at most
+two extra). Remaining fields are in the XDR **data** map, in the order listed
+below — do not assume struct declaration order if you are looking at a wrapper
+type; these rows match `src/events.rs` emission.
 
 | Event | Topic symbol | Key data fields |
 |---|---|---|
@@ -28,9 +34,11 @@ Key events to watch:
 > instead of re-exporting the registry; the latest event per `github_username`
 > (by ledger order) is authoritative.
 
-> **Note:** `RoleRevokedEvent` does **not** include the `role` field in its data
-> payload. If your indexer needs to know which role was revoked, correlate the
-> revocation with the most recent `RoleGrantedEvent` for that address.
+> **Pause events:** `admin` is an indexed topic. `reason_code` and `domain` are
+> data fields. `EmergencyClearedEvent` has no reason code.
+
+> **RoleGrantPendingEvent:** decode `role`, `admin`, `activate_at`, and
+> `timestamp` from data. Only `address` is topic-indexed besides the symbol.
 
 ## Features & Integration Overview
 

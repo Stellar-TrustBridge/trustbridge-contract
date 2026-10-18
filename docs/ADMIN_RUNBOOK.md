@@ -520,6 +520,13 @@ Gotchas:
   governance round can replace it.
 - If a staged WASM slot is set (`stage_wasm` / `get_staged`), the proposal hash
   must match it or `execute_upgrade` fails with `StagedWasmMismatch`.
+- `clear_staged` is **idempotent**. Admin-only. If nothing is staged (retry
+  after an aborted upgrade, a second clear, or after `execute_upgrade` already
+  emptied the slot), the call returns `Ok(())`, leaves no `stgwasm` instance
+  key, and does **not** emit `StagedWasmClearedEvent`. A non-admin caller is
+  rejected with `NotAuthorized` before any storage write. `stage_wasm` and
+  `clear_staged` are sequential on-chain operations; the contract does not
+  define extra concurrency beyond "last successful call wins".
 - Execute fails with `UpgradeProposalDelayActive` while the delay is running and
   `UpgradeProposalInsufficientApprovals` until the threshold is met — both are
   transient, so retrying after more approvals / time is expected.

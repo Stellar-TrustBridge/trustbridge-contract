@@ -28,6 +28,24 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
+  clippy:
+    name: Clippy deny warnings
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run clippy with denied warnings
+        run: cargo clippy --all-targets -- -D warnings
+
   abi-consistency:
     name: Error codes and event topics
     runs-on: ubuntu-latest
@@ -41,6 +59,16 @@ jobs:
 
       - name: Check event topics
         run: ./scripts/check_event_topics.sh
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Regenerate ABI JSON then validate snapshot
+        run: |
+          python3 scripts/generate_abi_json.py
+          python3 scripts/generate_abi_json.py --self-test
+          python3 scripts/generate_abi_json.py --check
+          cargo test --test abi_entrypoints_golden -- --nocapture
 
   oracle-proof-tests:
     name: oracle_proof unit tests

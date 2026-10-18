@@ -74,6 +74,76 @@
   "errors": [
     {
       "code": 1,
+      "name": "ContractInitialized",
+      "description": "`initialize` called"
+    },
+    {
+      "code": 2,
+      "name": "UserRegistered",
+      "description": "`register` / `register_sponsored` succeeded"
+    },
+    {
+      "code": 3,
+      "name": "UserRemoved",
+      "description": "`remove` / `batch_remove` removed a record"
+    },
+    {
+      "code": 4,
+      "name": "UserVerified",
+      "description": "`verify` / `batch_verify` verified a record"
+    },
+    {
+      "code": 5,
+      "name": "AdminAction",
+      "description": "Generic admin operation"
+    },
+    {
+      "code": 6,
+      "name": "UnauthorizedAttempt",
+      "description": "Auth check failed; gated on `log_unauthorized`"
+    },
+    {
+      "code": 7,
+      "name": "DataExported",
+      "description": "Paginated export operation"
+    },
+    {
+      "code": 8,
+      "name": "VerificationRevoked",
+      "description": "`revoke_verification` revoked a record"
+    },
+    {
+      "code": 9,
+      "name": "UserRenamed",
+      "description": "`rename` moved a registration"
+    },
+    {
+      "code": 10,
+      "name": "ContractPaused",
+      "description": "`pause` / `emergency_pause` / `set_paused`"
+    },
+    {
+      "code": 11,
+      "name": "ContractUnpaused",
+      "description": "`unpause` / `clear_emergency_pause`"
+    },
+    {
+      "code": 12,
+      "name": "RoleChanged",
+      "description": "`set_role` / `activate_role` granted a role"
+    },
+    {
+      "code": 13,
+      "name": "ContractUpgraded",
+      "description": "`upgrade` replaced the WASM"
+    },
+    {
+      "code": 14,
+      "name": "AuditConfigChanged",
+      "description": "`set_audit_config` mutated the config"
+    },
+    {
+      "code": 1,
       "name": "AlreadyInitialized",
       "description": "Contract already has an admin"
     },
@@ -366,6 +436,11 @@
       "code": 61,
       "name": "OracleProofBadSignature",
       "description": "`verify_with_proof`: signature is not a canonical Ed25519 encoding"
+    },
+    {
+      "code": 62,
+      "name": "AddressMismatch",
+      "description": "`verify_with_oracle_proof`: proof message is not bound to the record's current `stellar_address`"
     }
   ],
   "events": [

@@ -536,8 +536,7 @@ mod tests {
         env.ledger().set_timestamp(1_000);
         let proposer = Address::generate(&env);
         // delay_secs = 3_600 → executable_at = 4_600
-        let proposal =
-            create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 3_600).unwrap();
+        let proposal = create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 3_600).unwrap();
 
         // One second before executable_at: still blocked.
         env.ledger().set_timestamp(4_599);
@@ -710,7 +709,8 @@ mod tests {
         let signer_a = Address::generate(&env);
         let signer_b = Address::generate(&env);
 
-        let proposal = create_upgrade_proposal(&env, proposer.clone(), hash(&env, 0x01), 0).unwrap();
+        let proposal =
+            create_upgrade_proposal(&env, proposer.clone(), hash(&env, 0x01), 0).unwrap();
         record_approval(&env, proposal.id, signer_a.clone()).unwrap();
         record_approval(&env, proposal.id, signer_b.clone()).unwrap();
 
@@ -733,8 +733,7 @@ mod tests {
         // Set proposed_at near the maximum so adding any delay would overflow.
         env.ledger().set_timestamp(u64::MAX - 1);
         let proposer = Address::generate(&env);
-        let proposal =
-            create_upgrade_proposal(&env, proposer, hash(&env, 0x01), u64::MAX).unwrap();
+        let proposal = create_upgrade_proposal(&env, proposer, hash(&env, 0x01), u64::MAX).unwrap();
 
         assert_eq!(
             proposal.executable_at,

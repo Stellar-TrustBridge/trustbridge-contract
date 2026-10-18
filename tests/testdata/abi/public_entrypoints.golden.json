@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "source": "docs/abi.json",
+  "entrypoints": [
+    {
+      "name": "batch_remove",
+      "arity": 2
+    },
+    {
+      "name": "get_address",
+      "arity": 1
+    },
+    {
+      "name": "get_address_if_verified",
+      "arity": 1
+    },
+    {
+      "name": "get_all_registered",
+      "arity": 0
+    },
+    {
+      "name": "get_oracle_allowlist",
+      "arity": 0
+    },
+    {
+      "name": "get_registered_paginated",
+      "arity": 2
+    },
+    {
+      "name": "initialize",
+      "arity": 1
+    },
+    {
+      "name": "is_address_zero",
+      "arity": 1
+    },
+    {
+      "name": "is_username_valid",
+      "arity": 1
+    },
+    {
+      "name": "max_username_len",
+      "arity": 0
+    },
+    {
+      "name": "register",
+      "arity": 3
+    },
+    {
+      "name": "register_sponsored",
+      "arity": 3
+    },
+    {
+      "name": "remove",
+      "arity": 2
+    },
+    {
+      "name": "set_oracle_allowlist",
+      "arity": 1
+    },
+    {
+      "name": "usernames_match",
+      "arity": 2
+    },
+    {
+      "name": "verify",
+      "arity": 2
+    },
+    {
+      "name": "verify_with_oracle_proof",
+      "arity": 2
+    }
+  ]
+}

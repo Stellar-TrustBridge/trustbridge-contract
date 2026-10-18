@@ -73,6 +73,7 @@ fn variant_for_name(name: &str) -> ContractError {
         "OracleProofNotAllowlisted" => ContractError::OracleProofNotAllowlisted,
         "OracleProofExpired" => ContractError::OracleProofExpired,
         "OracleProofBadSignature" => ContractError::OracleProofBadSignature,
+        "AddressMismatch" => ContractError::AddressMismatch,
         _ => panic!(
             "unknown ContractError in golden file: {name}. \
              Add the variant to variant_for_name, or fix the golden entry."
@@ -218,5 +219,30 @@ fn golden_codes_are_unique_and_ascending() {
             "golden codes must be unique and ascending; {code} follows {previous}"
         );
         previous = code;
+    }
+}
+
+//! Display-string parity tests (Issue #625).
+//!
+//! The human-readable `Display` message for each variant must match the
+//! documented catalog in docs/ABI.md so operators decoding failed invocations
+//! see consistent wording.
+
+#[test]
+fn display_strings_match_documented_catalog() {
+    let cases: &[(ContractError, &str)] = &[
+        (ContractError::InvalidUsername, "invalid github username"),
+        (ContractError::Paused, "contract is paused"),
+        (ContractError::NotAuthorized, "caller not authorized"),
+        (ContractError::NetworkMismatch, "network mismatch"),
+        (ContractError::InvalidPauseReason, "invalid pause reason"),
+        (ContractError::UsernameTaken, "username taken"),
+        (ContractError::RoleExpired, "role expired"),
+        (ContractError::OracleProofBadSignature, "oracle proof bad signature"),
+        (ContractError::AlreadyInitialized, "contract already initialized"),
+        (ContractError::VerifyRateLimited, "verify rate limited"),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(error.to_string(), *expected, "display string drifted for {error:?}");
     }
 }

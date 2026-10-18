@@ -163,9 +163,9 @@ pub fn ownership_message(
 /// and signature checks.
 ///
 /// # Errors
-/// - [`ContractError::OracleProofBadLayout`] if `proof.message` is not the
-///   canonical ownership message for this subject, plus every error of
-///   [`verify_with_proof`].
+/// - [`ContractError::AddressMismatch`] if `proof.message` is not the
+///   canonical ownership message for this username and `stellar_address`.
+/// - Every error of [`verify_with_proof`].
 pub fn verify_ownership_proof(
     env: &Env,
     github_username: &String,
@@ -173,7 +173,7 @@ pub fn verify_ownership_proof(
     proof: &OracleProof,
 ) -> Result<(), ContractError> {
     if proof.message != ownership_message(env, github_username, stellar_address, proof.expires_at) {
-        return Err(ContractError::OracleProofBadLayout);
+        return Err(ContractError::AddressMismatch);
     }
     verify_with_proof(env, proof)
 }
@@ -222,7 +222,9 @@ pub fn verify_with_oracle_proof(
     proof: &OracleProof,
 ) -> Result<(), ContractError> {
     verify_with_proof(env, proof).map_err(|_| ContractError::NotAuthorized)?;
-    crate::storage::set_oracle_verified(env, subject);
+    env.storage()
+        .instance()
+        .set(&(symbol_short!("orcvrfy"), subject.clone()), &true);
     Ok(())
 }
 
@@ -388,6 +390,24 @@ mod tests {
                 Err(ContractError::OracleProofBadLayout)
             );
         });
+    }
+
+    #[test]
+    fn ownership_proof_wrong_address_is_address_mismatch() {
+        let env = Env::default();
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        let name = String::from_str(&env, "octocat");
+        let proof = OracleProof {
+            oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
+            message: ownership_message(&env, &name, &bob, 0),
+            signature: BytesN::from_array(&env, &VALID_SIG),
+            expires_at: 0,
+        };
+        assert_eq!(
+            verify_ownership_proof(&env, &name, &alice, &proof),
+            Err(ContractError::AddressMismatch)
+        );
     }
 
     #[test]

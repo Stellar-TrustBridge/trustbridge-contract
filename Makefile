@@ -196,8 +196,10 @@ docs-check: ## Build rustdoc without opening browser (CI-equivalent)
 abi: ## Generate the machine-readable ABI JSON artifact
 	python3 scripts/generate_abi_json.py
 
-abi-check: ## Fail if docs/abi.json is stale vs docs/ABI.md (no files written)
+abi-check: ## Fail if docs/abi.json or the public-entrypoint golden is stale (no files written)
+	python3 scripts/generate_abi_json.py --self-test
 	python3 scripts/generate_abi_json.py --check
+	cargo test --test abi_entrypoints_golden -- --nocapture
 
 wasm-size: build ## Report release WASM size and check against budget (WASM_SIZE_LIMIT)
 	@if [ -f $(WASM_V1) ]; then \

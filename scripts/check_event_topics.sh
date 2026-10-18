@@ -48,7 +48,19 @@ grep -oE '^pub struct [A-Za-z0-9]+Event' "$EVENTS_RS" \
       }
       print out
     }' \
-  | sort -u > "$TMP/from_rust.txt"
+  > "$TMP/from_rust_raw.txt"
+
+# Duplicate derived topics would collide on the event stream (Issue #643).
+# `#[contractevent]` derives the topic from the struct name, so two event
+# structs whose snake_case names match emit the same topic and the indexer
+# would silently label one `unknown`.
+DUPES="$(sort "$TMP/from_rust_raw.txt" | uniq -d)"
+if [[ -n "$DUPES" ]]; then
+  fail "duplicate event topics derived from $EVENTS_RS (two structs map to the same topic):"
+  sed 's/^/  /' <<<"$DUPES" >&2
+fi
+
+sort -u "$TMP/from_rust_raw.txt" > "$TMP/from_rust.txt"
 
 if [[ ! -s "$TMP/from_rust.txt" ]]; then
   fail "no event structs found in $EVENTS_RS — has the file moved?"

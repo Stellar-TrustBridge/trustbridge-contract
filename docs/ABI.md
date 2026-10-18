@@ -95,6 +95,14 @@ attacker cannot suppress their own trace via a failed disable-then-probe).
 > Codes are **append-only**. Indexers store the numeric discriminant; renumbering
 > silently re-labels historical entries. New variants must be added at the end.
 
+`tests/testdata/abi/public_entrypoints.golden.json` is a sorted snapshot of
+public function names and arity taken from `docs/abi.json`. `make abi-check`
+and `tests/abi_entrypoints_golden.rs` fail when an entrypoint is removed,
+renamed, or changes arity. Refresh with
+`python3 scripts/generate_abi_json.py --update-entrypoints-golden` only for an
+intentional public ABI change (Issue #631). See
+[the ABI testdata README](../tests/testdata/abi/README.md).
+
 `tests/testdata/bindings/get_address_simulate.v1.json` is a versioned golden of
 the `ScVal` XDR that `simulateTransaction` returns for `get_address` (hit and
 miss). `tests/bindings_golden.rs` fails when the contract encoding drifts, and CI
@@ -303,6 +311,7 @@ struct ChallengeRecord {
 | 59 | `OracleProofNotAllowlisted` | `verify_with_proof`: `oracle_pubkey` is not on the oracle allowlist (always, when it is empty) |
 | 60 | `OracleProofExpired` | `verify_with_proof`: non-zero `expires_at` is earlier than the ledger timestamp |
 | 61 | `OracleProofBadSignature` | `verify_with_proof`: signature is not a canonical Ed25519 encoding |
+| 62 | `AddressMismatch` | `verify_with_oracle_proof`: proof message is not bound to the record's current `stellar_address` |
 
 > **`NetworkMismatch` moved from 21 to 30.** This table previously listed it at
 > code 21 while the enum had `InvalidPauseReason` there and no `NetworkMismatch`
@@ -1036,7 +1045,8 @@ record's current `stellar_address` — see
 
 **Auth:** the registered `stellar_address`.
 
-**Errors:** `NotInitialized`, `Paused`, `NotRegistered`,
+**Errors:** `NotInitialized`, `Paused`, `NotRegistered`, `ZeroAddress`,
+`AddressMismatch` (62),
 `OracleProofBadLayout` (58), `OracleProofNotAllowlisted` (59),
 `OracleProofExpired` (60), `OracleProofBadSignature` (61), `AlreadyVerified`.
 A well-formed signature that does not verify traps the invocation.
@@ -1612,7 +1622,10 @@ Returns the current WASM upgrade timelock cooldown period in seconds.
 ### `add_verifier(verifier: Address, expires_at: u64) -> Result<(), ContractError>`
 
 Adds `verifier` to the campaign allowlist and grants it `Role::Verifier`
-(Issue #293). Admin-only.
+(Issue #293). Admin-only. This — together with `remove_verifier` — is the
+**only** way to mutate the allowlist: the `set_verifier_allowlist` helper in
+`src/storage.rs` is internal-only and not an on-chain entrypoint
+(Issue #638; see `docs/SECURITY.md`).
 
 - **Cap:** at most `MAX_VERIFIERS` (10) concurrently active members. A new
   address over the cap → `VerifierAllowlistFull`. Expired entries are pruned

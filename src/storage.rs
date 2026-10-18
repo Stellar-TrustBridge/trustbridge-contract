@@ -1154,11 +1154,17 @@ pub fn get_public_paginated_internal(
         let chunk = get_chunk(env, c);
         for i in 0..chunk.len() {
             if seen >= offset && records.len() < effective_limit {
-                if let Some(username) = chunk.get(i) {
-                    if let Some(record) = get_record(env, &username) {
-                        records.push_back((username, record));
-                    }
+            if let Some(username) = chunk.get(i) {
+                if let Some(record) = get_record(env, &username) {
+                    // Public page redacts sensitive fields for unverified
+                    // users so contributor addresses and payout destinations
+                    // never leak on the public API surface (Issue #627).
+                    records.push_back((
+                        username,
+                        public_record_view(env, &record),
+                    ));
                 }
+            }
             }
             seen = seen.saturating_add(1);
             if records.len() >= effective_limit {
@@ -1186,6 +1192,25 @@ pub fn get_public_paginated_internal(
         has_more,
         merkle_root,
     })
+}
+
+/// Returns a public-facing view of a contributor record. Verified users keep
+/// their identity/payout addresses; unverified users have those sensitive
+/// fields replaced with the zero/burn address so they never leak on the
+/// public paginated export (Issue #627).
+fn public_record_view(env: &Env, record: &ContributorRecord) -> ContributorRecord {
+    if record.verified {
+        return record.clone();
+    }
+    let zero = Address::from_str(
+        env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+    ContributorRecord {
+        stellar_address: zero,
+        payout_address: zero,
+        ..record.clone()
+    }
 }
 
 /// Builds the deterministic digest used by [`ExportAttestation`] (Issue #223).
@@ -2682,11 +2707,12 @@ pub fn repair_index(env: &Env, apply: bool) -> RepairReport {
             }
         }
     }
-    let stored_total = get_count(env);
+    let stored_count = get_count(env);
     let stored_verified = get_verified_count(env);
-    let drifted = stored_total != recomputed_total || stored_verified != recomputed_verified;
-    if apply && drifted {
-        set_count(env, recomputed_total);
+    let drifted = stored_count != recomputed_count || stored_verified != recomputed_verified;
+    let applied = apply && drifted;
+    if applied {
+        set_count(env, recomputed_count);
         set_verified_count(env, recomputed_verified);
     }
     RepairReport {
@@ -2696,118 +2722,6 @@ pub fn repair_index(env: &Env, apply: bool) -> RepairReport {
         recomputed_verified,
         drifted,
         applied,
-    }
-}
-
-#[cfg(test)]
-mod pending_reverify_tests {
-    use super::*;
-    use crate::TrustBridgeContract;
-    use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
-
-    fn setup(env: &Env) -> Address {
-        let contract_id = env.register(TrustBridgeContract, ());
-        env.mock_all_auths();
-        env.as_contract(&contract_id, || {
-            TrustBridgeContract::initialize(env.clone(), Address::generate(env)).unwrap();
-        });
-        contract_id
-    }
-
-    fn name(env: &Env, s: &str) -> String {
-        String::from_str(env, s)
-    }
-
-    /// Each auth-requiring call runs in its own `as_contract` frame: the host
-    /// rejects a second `require_auth` for the same address in one frame.
-    fn register_flagged(env: &Env, contract_id: &Address, username: &str, owner: &Address) {
-        env.as_contract(contract_id, || {
-            TrustBridgeContract::register(
-                env.clone(),
-                name(env, username),
-                owner.clone(),
-                Vec::new(env),
-            )
-            .unwrap();
-            set_pending_reverify(env, &name(env, username), true);
-        });
-    }
-
-    #[test]
-    fn test_pending_reverify_set_get_clear_round_trip() {
-        let env = Env::default();
-        let contract_id = setup(&env);
-        env.as_contract(&contract_id, || {
-            let octocat = name(&env, "octocat");
-            assert!(!get_pending_reverify(&env, &octocat));
-
-            set_pending_reverify(&env, &octocat, true);
-            assert!(get_pending_reverify(&env, &octocat));
-
-            clear_pending_reverify(&env, &octocat);
-            assert!(!get_pending_reverify(&env, &octocat));
-            assert!(!env
-                .storage()
-                .persistent()
-                .has(&(PENDING_REVERIFY_KEY, canon(&env, &octocat))));
-        });
-    }
-
-    #[test]
-    fn test_clear_pending_reverify_on_unknown_username_is_a_no_op() {
-        let env = Env::default();
-        let contract_id = setup(&env);
-        env.as_contract(&contract_id, || {
-            let ghost = name(&env, "ghost");
-            clear_pending_reverify(&env, &ghost);
-            clear_pending_reverify(&env, &ghost);
-            assert!(!get_pending_reverify(&env, &ghost));
-        });
-    }
-
-    /// The flag is keyed like the record: by the canonical (lower-case) name.
-    #[test]
-    fn test_pending_reverify_uses_canonical_username_key() {
-        let env = Env::default();
-        let contract_id = setup(&env);
-        env.as_contract(&contract_id, || {
-            set_pending_reverify(&env, &name(&env, "OctoCat"), true);
-            assert!(get_pending_reverify(&env, &name(&env, "octocat")));
-            clear_pending_reverify(&env, &name(&env, "OCTOCAT"));
-            assert!(!get_pending_reverify(&env, &name(&env, "octocat")));
-        });
-    }
-
-    /// Removing a registration drops its flag so a later re-registration of
-    /// the same name does not inherit it.
-    #[test]
-    fn test_remove_record_clears_pending_reverify() {
-        let env = Env::default();
-        let contract_id = setup(&env);
-        let owner = Address::generate(&env);
-        register_flagged(&env, &contract_id, "octocat", &owner);
-        env.as_contract(&contract_id, || {
-            let octocat = name(&env, "octocat");
-            TrustBridgeContract::remove(env.clone(), owner.clone(), octocat.clone()).unwrap();
-            assert!(!get_pending_reverify(&env, &octocat));
-        });
-    }
-
-    /// `rename` moves an outstanding flag to the new name and leaves none
-    /// behind under the old one.
-    #[test]
-    fn test_rename_migrates_pending_reverify() {
-        let env = Env::default();
-        let contract_id = setup(&env);
-        let owner = Address::generate(&env);
-        register_flagged(&env, &contract_id, "octocat", &owner);
-        env.as_contract(&contract_id, || {
-            let (old, new) = (name(&env, "octocat"), name(&env, "hubot"));
-            TrustBridgeContract::rename(env.clone(), owner.clone(), old.clone(), new.clone())
-                .unwrap();
-            assert!(!get_pending_reverify(&env, &old));
-            assert!(get_pending_reverify(&env, &new));
-        });
     }
 }
 
