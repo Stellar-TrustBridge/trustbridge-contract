@@ -258,6 +258,29 @@ type BotStatusChangedEvent @entity(immutable: true) {
 }
 
 """
+One `RoleGrantPendingEvent`: a `set_role` grant queued behind the
+`set_role_delay` timelock (Issue #630). Topic: `role_grant_pending_event`.
+`address` is the event topic. Field names mirror `src/events.rs` exactly:
+`role` (u32 `Role` discriminant), `admin`, `activate_at` (earliest ledger
+timestamp at which `activate_role` succeeds), `timestamp`. No `domain` field
+is emitted on this event. See docs/subgraph/README.md for the handler mapping,
+docs/ADMIN_RUNBOOK.md timelocked role grants for the operator flow, and
+docs/DASHBOARD_SYNC.md for dashboard state. Distinct from `RoleGrantedEvent`,
+which fires on the instant path or on activation.
+"""
+type RoleGrantPendingEvent @entity(immutable: true) {
+  "Stable event id (Issue #283)."
+  id: ID!
+  address: Bytes!
+  role: Int!
+  admin: Bytes!
+  activateAt: BigInt!
+  timestamp: BigInt!
+  ledgerSequence: BigInt!
+  txHash: Bytes!
+}
+
+"""
 Derived, mutable aggregate: current best-known state of one GitHub username on
 one contract instance. Rebuilt by the mappings from the event stream; the
 contract's own storage remains the source of truth for reconciliation.

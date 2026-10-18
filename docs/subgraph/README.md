@@ -59,6 +59,24 @@ the contract does not emit.
 | `RotationRequestedEvent` | `rotation_requested_event` | `github_username` (topic), `current_address`, `new_address`, `executable_at`, `timestamp` | `RotationRequestedEvent` |
 | `RotationExecutedEvent` | `rotation_executed_event` | `github_username` (topic), `old_address`, `new_address`, `timestamp` | `RotationExecutedEvent` |
 | `RotationCancelledEvent` | `rotation_cancelled_event` | `github_username` (topic), `cancelled_by`, `timestamp` | `RotationCancelledEvent` |
+| `RoleGrantPendingEvent` | `role_grant_pending_event` | `address` (topic), `role`, `admin`, `activate_at`, `timestamp` | `RoleGrantPendingEvent` |
+
+> **Pending role grants (Issue #630):** `set_role` behind a `set_role_delay`
+> timelock emits `RoleGrantPendingEvent` instead of `RoleGrantedEvent`. Handler:
+> upsert a `RoleGrantPendingEvent` entity keyed by the stable event id above,
+> keyed additionally on `(address)` for dashboard lookup of the queued grant;
+> on `RoleGrantedEvent` (activation) or `RoleGrantCancelledEvent` /
+> `remove_role`, mark the pending row superseded/cancelled so no orphan remains.
+> `activate_at == 0` never occurs on-chain (queued grants always carry a future
+> `activate_at`); treat `activate_at == 0` as the instant-grant path, i.e. expect
+> `RoleGrantedEvent` directly. Only one pending grant per target exists by design
+> (`set_pending_role` overwrites). Topic symbols: see `TOPIC_TABLE` in
+> [`scripts/event_indexer.sh`](../../scripts/event_indexer.sh) and
+> [`scripts/check_event_topics.sh`](../../scripts/check_event_topics.sh).
+> Timelock operator flow: [ADMIN_RUNBOOK timelocked role grants](../ADMIN_RUNBOOK.md#timelocked-role-grants-issue-220).
+> Instant vs pending: `RoleGrantedEvent` fires on immediate `set_role` or on
+> `activate_role`; `RoleGrantPendingEvent` fires only when the grant is queued.
+> Dashboard state: cross-link [DASHBOARD_SYNC.md](../DASHBOARD_SYNC.md#abi-event-reference).
 
 Notes and gotchas:
 

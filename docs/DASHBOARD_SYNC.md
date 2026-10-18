@@ -22,6 +22,7 @@ Key events to watch:
 | `UpgradedEvent` | `upgraded_event` | `version`, `timestamp` |
 | `PausedEvent` / `UnpausedEvent` | `paused_event` / `unpaused_event` | `timestamp` |
 | `RoleGrantedEvent` / `RoleRevokedEvent` | `role_granted_event` / `role_revoked_event` | `role`, `admin`, `timestamp` / `admin`, `timestamp` |
+| `RoleGrantPendingEvent` | `role_grant_pending_event` | `address` (topic), `role`, `admin`, `activate_at`, `timestamp` — queued behind `set_role_delay`; see [subgraph handler mapping](subgraph/README.md) and [ADMIN_RUNBOOK timelocked grants](ADMIN_RUNBOOK.md#timelocked-role-grants-issue-220) |
 
 > **Bot flag:** update the dashboard's `is_bot` column from `BotStatusChangedEvent`
 > instead of re-exporting the registry; the latest event per `github_username`
