@@ -212,6 +212,8 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 
 - **Auth:** admin only. After this, only the admin can `emergency_pause`.
 
+> Capability table: [SECURITY.md guardian vs admin](SECURITY.md#guardian-vs-admin-capabilities-issue-635) — guardian can only `emergency_pause`; all upgrade, role-grant, and `batch_remove` paths are admin-only.
+
 ---
 
 ### Role recipes

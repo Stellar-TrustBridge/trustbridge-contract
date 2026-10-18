@@ -97,6 +97,26 @@ This is enforced by tests, not left as a comment:
 
 ## Admin Key Management
 
+### Guardian vs admin capabilities (Issue #635)
+
+Guardian is a narrowly-scoped circuit-breaker key, not a second admin. Source
+of truth is `src/lib.rs` (`emergency_pause` allows admin **or** guardian;
+everything else below requires admin) and `tests/auth_matrix.csv`.
+
+| Entrypoint | Admin | Guardian | Verifier | Notes |
+|---|---|---|---|---|
+| `emergency_pause` | ✅ | ✅ (exclusive non-admin path) | ❌ | Only entrypoint the guardian can call; matches `emergency_pause,guardian` allow row |
+| `clear_emergency_pause` | ✅ | ❌ (`NotAuthorized`) | ❌ | Guardian deliberately cannot clear; admin review required |
+| `set_guardian` / `remove_guardian` | ✅ | ❌ | ❌ | Guardian onboarding is admin-only; see [ADMIN_RUNBOOK guardian recipes](ADMIN_RUNBOOK.md#guardian-recipes) |
+| `set_role` / `remove_role` / `set_role_with_expiry` / `activate_role` | ✅ | ❌ | ❌ | Guardian cannot grant roles, even to itself, unless it also holds admin |
+| `upgrade` / `stage_wasm` / `attest_upgrade` / multisig upgrade propose/approve/execute | ✅ | ❌ | ❌ | WASM upgrade paths remain multisig-gated admin-only |
+| `batch_remove` (incl. dual-control propose/execute) | ✅ | ❌ | ❌ | Large removes need admin, never guardian |
+| `pause` / `unpause` | ✅ | ❌ | ❌ | Plain pause is admin-only; guardian path is `emergency_pause` only |
+
+Notes: an expired guardian role behaves like any expired role (treated as
+absent at auth time). Guardian onboarding: [ADMIN_RUNBOOK](ADMIN_RUNBOOK.md#guardian-recipes);
+incident freeze flow: [ADMIN_RUNBOOK freeze during an incident](ADMIN_RUNBOOK.md#freeze-during-an-incident).
+
 The admin address is **immutable** after `initialize` unless rotated via the
 two-step admin transfer flow introduced in Issue #195.
 
