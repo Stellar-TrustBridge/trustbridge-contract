@@ -183,6 +183,70 @@ fn test_integration_guardian_pause_rejects_non_admin_non_guardian() {
     });
 }
 
+// ── Public page privacy redaction (Issue #627) ──────────────────────────────
+
+#[test]
+fn test_integration_public_page_redacts_unverified_addresses() {
+    let (env, admin, user1, user2, contract_id) = setup_test_env();
+    let zero = Address::from_str(
+        &env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "alice"),
+            user1.clone(),
+            Vec::new(&env),
+        )
+        .unwrap();
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "bob"),
+            user2.clone(),
+            Vec::new(&env),
+        )
+        .unwrap();
+        // Verify only alice; bob stays unverified.
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
+    });
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
+        let mut by_name: std::collections::BTreeMap<String, _> =
+            page.records.into_iter().collect();
+        // Total must include both registrations.
+        assert_eq!(page.total, 2);
+
+        let alice = by_name
+            .remove(&s(&env, "alice"))
+            .expect("alice must be on the public page");
+        assert_ne!(alice.stellar_address, zero, "verified address must not be redacted");
+
+        let bob = by_name
+            .remove(&s(&env, "bob"))
+            .expect("bob must be on the public page");
+        assert_eq!(bob.stellar_address, zero, "unverified address must be redacted");
+        assert_eq!(bob.payout_address, zero, "unverified payout must be redacted");
+    });
+}
+
+#[test]
+fn test_integration_public_page_empty_registry() {
+    let (env, _admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
+        assert_eq!(page.records.len(), 0);
+        assert_eq!(page.total, 0);
+        assert!(!page.has_more);
+    });
+}
+
 // ── Full lifecycle ────────────────────────────────────────────────────────────
 
 #[test]

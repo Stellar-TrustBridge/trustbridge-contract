@@ -1154,11 +1154,17 @@ pub fn get_public_paginated_internal(
         let chunk = get_chunk(env, c);
         for i in 0..chunk.len() {
             if seen >= offset && records.len() < effective_limit {
-                if let Some(username) = chunk.get(i) {
-                    if let Some(record) = get_record(env, &username) {
-                        records.push_back((username, record));
-                    }
+            if let Some(username) = chunk.get(i) {
+                if let Some(record) = get_record(env, &username) {
+                    // Public page redacts sensitive fields for unverified
+                    // users so contributor addresses and payout destinations
+                    // never leak on the public API surface (Issue #627).
+                    records.push_back((
+                        username,
+                        public_record_view(env, &record),
+                    ));
                 }
+            }
             }
             seen = seen.saturating_add(1);
             if records.len() >= effective_limit {
@@ -1186,6 +1192,25 @@ pub fn get_public_paginated_internal(
         has_more,
         merkle_root,
     })
+}
+
+/// Returns a public-facing view of a contributor record. Verified users keep
+/// their identity/payout addresses; unverified users have those sensitive
+/// fields replaced with the zero/burn address so they never leak on the
+/// public paginated export (Issue #627).
+fn public_record_view(env: &Env, record: &ContributorRecord) -> ContributorRecord {
+    if record.verified {
+        return record.clone();
+    }
+    let zero = Address::from_str(
+        env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+    ContributorRecord {
+        stellar_address: zero,
+        payout_address: zero,
+        ..record.clone()
+    }
 }
 
 /// Builds the deterministic digest used by [`ExportAttestation`] (Issue #223).
