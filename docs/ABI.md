@@ -1612,7 +1612,10 @@ Returns the current WASM upgrade timelock cooldown period in seconds.
 ### `add_verifier(verifier: Address, expires_at: u64) -> Result<(), ContractError>`
 
 Adds `verifier` to the campaign allowlist and grants it `Role::Verifier`
-(Issue #293). Admin-only.
+(Issue #293). Admin-only. This — together with `remove_verifier` — is the
+**only** way to mutate the allowlist: the `set_verifier_allowlist` helper in
+`src/storage.rs` is internal-only and not an on-chain entrypoint
+(Issue #638; see `docs/SECURITY.md`).
 
 - **Cap:** at most `MAX_VERIFIERS` (10) concurrently active members. A new
   address over the cap → `VerifierAllowlistFull`. Expired entries are pruned

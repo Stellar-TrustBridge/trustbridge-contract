@@ -280,6 +280,48 @@ any caller could push an arbitrary username into cooldown and block its
 registration. It was removed in Issue #296. `is_registration_in_cooldown()`
 remains as the read-only view of the enforced state.
 
+### Bot Account Registration and Flagging (Issue #644)
+
+Bot/CI accounts are **not denied at registration time**. A bot account
+registers like any other contributor; the mitigation is a post-registration
+flag, `is_bot`, set through `set_bot_status` (Issue #236) by the contract
+admin or the registrant itself. This is deliberate: legitimate CI bots
+(e.g. release automation, Wave tooling) must be able to register when policy
+allows, and a username-pattern deny list at `register` would either block
+those accounts or chase an endless stream of novel bot names.
+
+Every deny path that *does* exist on the bot-flag surface returns a
+documented, stable `ContractError` code so dashboard and bot-mitigation
+pipelines can classify failures without parsing messages:
+
+| Path | Condition | Error | Code |
+|------|-----------|-------|------|
+| `set_bot_status` | Caller is neither the admin nor the record's registrant | `NotAuthorized` | 3 |
+| `set_bot_status` | `github_username` is not registered | `NotRegistered` | 4 |
+| `set_bot_status` | Contract is paused (checked before any bot logic) | `Paused` | 7 |
+| `register` / `register_sponsored` | Contract is paused | `Paused` | 7 |
+| `register` / `register_sponsored` | Username fails GitHub shape validation | `InvalidUsername` | 11 |
+
+Additional invariants:
+
+- **The flag survives re-registration.** `register` copies `is_bot` from the
+  existing record; a bot cannot shed its flag by re-registering, and a
+  legitimate CI bot keeps its flag across an address refresh.
+- **Unauthorized `set_bot_status` attempts are audit-logged.** The
+  `NotAuthorized` path calls `record_unauthorized_attempt` (Issue #412), so
+  probing against the bot-flag surface appears in `get_audit_logs` and bumps
+  `AuditStats.unauthorized_attempts`.
+- **`BotStatusChangedEvent`** is emitted on every successful flag change so
+  dashboards can exclude `is_bot == true` records from human contributor
+  stats (see [DASHBOARD_SYNC.md](DASHBOARD_SYNC.md)).
+
+Covered by `tests/integration.rs`
+(`test_set_bot_status_unauthorized_returns_stable_code`,
+`test_set_bot_status_unregistered_returns_stable_code`,
+`test_set_bot_status_paused_fails_before_bot_logic`,
+`test_bot_flag_preserved_across_reregistration`) and the unit tests in
+`src/lib.rs` (`test_bot_set_by_unauthorized_fails`, …).
+
 ---
 
 ## Username Squatting Mitigations
@@ -931,6 +973,44 @@ only create a denial-of-service against recovery.
 - **Reads are never rate-limited.** Only the mutating verify/revoke paths carry
   the counter.
 - Off-chain / RPC-level rate limiting is out of scope for the contract.
+
+## Verifier Allowlist Management (Issue #293 / #638)
+
+The campaign verifier allowlist is managed **exclusively through the public
+entrypoints `add_verifier` and `remove_verifier`** (admin-only). The
+`set_verifier_allowlist` helper in `src/storage.rs` is an **internal
+implementation detail** — it is not exported from `src/lib.rs`, has no
+on-chain entrypoint, and cannot be invoked by any caller. There is
+correspondingly no row for it in `tests/auth_matrix.csv`; the matrix
+covers only the public surface (`add_verifier`, `remove_verifier`).
+
+State-changing allowlist surface, all admin-gated:
+
+| Entrypoint | Purpose | Key errors |
+|---|---|---|
+| `add_verifier(verifier, expires_at)` | Add or refresh an entry; also grants `Role::Verifier` | `VerifierExpiryInPast` (33), `VerifierAllowlistFull` (31) |
+| `remove_verifier(verifier)` | Drop an entry; also revokes `Role::Verifier` | `VerifierNotAllowlisted` (32) |
+| `prune_expired_verifiers()` | Drop expired entries (permissionless) | — |
+
+Read-only surface (no auth): `get_verifiers()`, `is_active_verifier(addr)`,
+`verifier_slots_remaining()`.
+
+Semantics (full detail in `docs/ABI.md`):
+
+- At most `MAX_VERIFIERS` (10) concurrently active members; expired entries
+  are pruned before the cap check, so a lapsed member never blocks a new one.
+- `expires_at` is a ledger timestamp; `0` means no expiry. A non-zero value
+  must be strictly in the future.
+- Once the allowlist has been populated at least once, `verify` /
+  `batch_verify` require the caller to be an *active* allowlist member — a
+  bare `set_role(Verifier)` grant is no longer sufficient.
+
+Integration coverage for the public surface lives in `tests/integration.rs`
+(`test_verifier_allowlist_public_api_round_trip`,
+`test_remove_verifier_not_listed_returns_stable_code`,
+`test_add_verifier_expiry_in_past_returns_stable_code`,
+`test_add_verifier_cap_returns_stable_code`,
+`test_verifier_allowlist_expiry_blocks_and_prunes`).
 
 ---
 

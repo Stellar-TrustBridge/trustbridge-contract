@@ -367,11 +367,7 @@ mod tests {
         leaves.push_back(l3.clone());
 
         // Expected: root = node(node(l0,l1), node(l2,l3)) — no promotion needed.
-        let expected = node_hash(
-            &env,
-            &node_hash(&env, &l0, &l1),
-            &node_hash(&env, &l2, &l3),
-        );
+        let expected = node_hash(&env, &node_hash(&env, &l0, &l1), &node_hash(&env, &l2, &l3));
         assert_eq!(
             root_of(&env, &leaves),
             expected,

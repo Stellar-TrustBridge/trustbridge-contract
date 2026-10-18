@@ -19,6 +19,8 @@ pub use domain::{EventDomain, EVENT_DOMAIN_VERSION};
 pub use error::{ContractError, ErrorCategory};
 pub use events::{
     AttestationClearedEvent,
+    // Audit config (Issue #412)
+    AuditConfigChangedEvent,
     BatchRemoveCancelledEvent,
     BatchRemoveExecutedEvent,
     BatchRemoveProposedEvent,
@@ -54,8 +56,6 @@ pub use events::{
     VerifiedEvent,
     // Staged WASM (Issue #300)
     WasmStagedEvent,
-    // Audit config (Issue #412)
-    AuditConfigChangedEvent,
 };
 pub use multisig_upgrade::{UpgradeProposal, MAX_UPGRADE_SIGNERS};
 pub use oracle_proof::{
@@ -77,8 +77,8 @@ use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, 
 use crate::storage::{
     add_to_index, add_verifier as storage_add_verifier, build_record_proof,
     bump_ever_verified_count, charge_verify_rate, clear_pending_reverify, get_admin,
-    get_audit_logs, get_audit_stats, get_challenge, get_cooldown as storage_get_cooldown,
-    get_count, get_emergency_pause, get_emergency_pause_ts,
+    get_audit_config as storage_get_audit_config, get_audit_logs, get_audit_stats, get_challenge,
+    get_cooldown as storage_get_cooldown, get_count, get_emergency_pause, get_emergency_pause_ts,
     get_ever_verified_count as storage_get_ever_verified_count,
     get_guardian as storage_get_guardian, get_index,
     get_last_event_ledger as storage_get_last_event_ledger, get_last_upgrade,
@@ -99,18 +99,16 @@ use crate::storage::{
     remove_pending_rotation, remove_record, remove_role as storage_remove_role,
     remove_verifier as storage_remove_verifier, remove_wasm_attestation,
     require_attestation_if_required, require_initialized, require_not_paused,
-    require_role_not_expired, run_migration_steps, set_challenge,
-    set_cooldown as storage_set_cooldown, set_count, set_emergency_pause, set_emergency_pause_ts,
-    set_ever_verified_count, set_guardian_address, set_last_action, set_last_event_ledger,
-    set_last_upgrade, set_network_id, set_paused as set_paused_state, set_pending_reverify,
-    set_pending_role, set_pending_rotation, set_record, set_role as storage_set_role,
-    set_role_delay as storage_set_role_delay, set_rotation_delay as storage_set_rotation_delay,
-    set_verified_count, set_verify_limit, set_verify_limit as storage_set_verify_limit,
-    set_version, set_wasm_attestation, set_wasm_provenance, verifier_allowlist_active,
-    verifier_slots_remaining, get_audit_config as storage_get_audit_config,
-    set_audit_config as storage_set_audit_config,
-    PendingRoleGrant as PendingRoleGrantRecord, ADMIN_KEY,
-    DEFAULT_CHALLENGE_DELAY_SECS,
+    require_role_not_expired, run_migration_steps, set_audit_config as storage_set_audit_config,
+    set_challenge, set_cooldown as storage_set_cooldown, set_count, set_emergency_pause,
+    set_emergency_pause_ts, set_ever_verified_count, set_guardian_address, set_last_action,
+    set_last_event_ledger, set_last_upgrade, set_network_id, set_paused as set_paused_state,
+    set_pending_reverify, set_pending_role, set_pending_rotation, set_record,
+    set_role as storage_set_role, set_role_delay as storage_set_role_delay,
+    set_rotation_delay as storage_set_rotation_delay, set_verified_count, set_verify_limit,
+    set_verify_limit as storage_set_verify_limit, set_version, set_wasm_attestation,
+    set_wasm_provenance, verifier_allowlist_active, verifier_slots_remaining,
+    PendingRoleGrant as PendingRoleGrantRecord, ADMIN_KEY, DEFAULT_CHALLENGE_DELAY_SECS,
 };
 
 use crate::utils::{
@@ -1522,11 +1520,7 @@ impl TrustBridgeContract {
         let role = storage_get_role(&env, &caller);
         let is_upgrader = matches!(role, Some(crate::storage::Role::Upgrader));
         if caller != admin && !is_upgrader {
-            Self::record_unauthorized_attempt(
-                &env,
-                &caller,
-                String::from_str(&env, "stage_wasm"),
-            );
+            Self::record_unauthorized_attempt(&env, &caller, String::from_str(&env, "stage_wasm"));
             return Err(ContractError::NotAuthorized);
         }
 
@@ -1708,8 +1702,15 @@ impl TrustBridgeContract {
 
         push_audit_entry(
             &env,
-            AuditLogEntry::new(AuditEventType::AdminAction, proposal.proposed_at, Some(caller))
-                .with_details(soroban_sdk::String::from_str(&env, "propose_multisig_upgrade")),
+            AuditLogEntry::new(
+                AuditEventType::AdminAction,
+                proposal.proposed_at,
+                Some(caller),
+            )
+            .with_details(soroban_sdk::String::from_str(
+                &env,
+                "propose_multisig_upgrade",
+            )),
         );
 
         Ok(())
@@ -1941,7 +1942,10 @@ impl TrustBridgeContract {
                 env.ledger().timestamp(),
                 Some(caller),
             )
-            .with_details(soroban_sdk::String::from_str(&env, "cancel_upgrade_proposal")),
+            .with_details(soroban_sdk::String::from_str(
+                &env,
+                "cancel_upgrade_proposal",
+            )),
         );
 
         Ok(())
@@ -3141,11 +3145,7 @@ impl TrustBridgeContract {
 
         caller.require_auth();
         if let Err(e) = Self::require_remove_auth(&caller, &admin, &record.stellar_address) {
-            Self::record_unauthorized_attempt(
-                &env,
-                &caller,
-                String::from_str(&env, "remove"),
-            );
+            Self::record_unauthorized_attempt(&env, &caller, String::from_str(&env, "remove"));
             return Err(e);
         }
 
@@ -3512,11 +3512,7 @@ impl TrustBridgeContract {
             storage_get_role(&env, &caller) == Some(Role::Verifier)
         };
         if !is_admin && !is_verifier {
-            Self::record_unauthorized_attempt(
-                &env,
-                &caller,
-                String::from_str(&env, "verify"),
-            );
+            Self::record_unauthorized_attempt(&env, &caller, String::from_str(&env, "verify"));
             return Err(ContractError::NotAuthorized);
         }
         // Per-verifier, per-ledger anti-grief cap (Issue #292). Charged before
@@ -3849,11 +3845,7 @@ impl TrustBridgeContract {
 
         caller.require_auth();
         if let Err(e) = Self::require_remove_auth(&caller, &admin, &record.stellar_address) {
-            Self::record_unauthorized_attempt(
-                &env,
-                &caller,
-                String::from_str(&env, "rename"),
-            );
+            Self::record_unauthorized_attempt(&env, &caller, String::from_str(&env, "rename"));
             return Err(e);
         }
 

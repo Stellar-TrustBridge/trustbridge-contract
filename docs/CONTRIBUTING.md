@@ -459,6 +459,56 @@ table, and uploads the raw CSV as the `register-budget-report` build artifact
 (`continue-on-error`) without failing the overall job, so a cap breach is
 visible in the CI summary and artifact without blocking merges.
 
+### Bindings golden refresh (simulate XDR fixtures)
+
+`tests/bindings_golden.rs` pins the base64 XDR that `simulateTransaction`
+returns for `get_address` (hit and miss) against the checked-in fixture
+`tests/testdata/bindings/get_address_simulate.v1.json`. `trustbridge-action`
+(`src/soroban.ts`) vendors that fixture instead of hand-mocking XDR, so an
+intentional return-type change here must ship with a coordinated fixture
+bump — see [`tests/testdata/bindings/README.md`](../tests/testdata/bindings/README.md)
+for the fixture format and the action-side consumption steps.
+
+To verify the fixture matches the current contract encoding:
+
+```bash
+make bindings-golden
+# equivalent: cargo test --test bindings_golden
+```
+
+To regenerate after an intentional change to `get_address`'s return type or
+the fixture format:
+
+```bash
+UPDATE_GOLDEN=1 cargo test --test bindings_golden
+```
+
+Then, in the same PR:
+
+1. **Bump `FIXTURE_VERSION`** in `tests/bindings_golden.rs` and rename the
+   fixture file to `get_address_simulate.vN.json` on **any breaking change**
+   (return-type shape, `ScMap` key set/order, or field types). Additive-only
+   changes that keep the existing decode path working keep the version.
+2. **Update the TypeScript side.** `scripts/check_fixture_pairing.sh` fails
+   when the Rust fixtures change without a matching `ts-differential-tests/`
+   update (or the reverse), so land the decoder/fixture change in
+   `ts-differential-tests/` in the same PR.
+3. **Notify `trustbridge-action` consumers.** Open or update an issue in
+   `Stellar-TrustBridge/trustbridge-action` so the pinned fixture version is
+   bumped in the action's tests in the same release window. CI uploads the
+   fixture as the `bindings-golden-fixtures` workflow artifact, which the
+   action can vendor from a tagged run.
+4. **Note the bump in `CHANGELOG.md`.**
+
+CI fails the fixture comparison until the regenerated JSON is committed, so
+an un-bumped golden blocks the pipeline by design.
+
+Cross-ABI goldens that follow the same "regenerate + commit" rule:
+`abi/contract_error_codes.golden` (error-code stability, Issue #402) and
+`abi/export_page.layout.golden` (export page layout). The
+`abi` make target checks the error-code golden; see `make help` for the
+individual targets.
+
 ---
 
 ## Snapshot Stabilization Policy
