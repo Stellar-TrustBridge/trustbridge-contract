@@ -154,7 +154,7 @@ numbers are informational and are not linted.
 | `"evt_ledger"` | `LAST_EVENT_LEDGER_KEY` | 111 | Ledger sequence containing the most recently emitted contract event (Issue #282) |
 | `"prov"` | `PROV_KEY` | 113 | Key for the WASM provenance record (Wave #24). |
 | `"attest"` | `ATTEST_KEY` | 115 | Key for the pending upgrade attestation (Wave #24). |
-| `"adt_log"` | `AUDIT_LOG_KEY` | 117 | Key for audit log entries list. |
+| `"adt_log"` | `AUDIT_LOG_KEY` | 117 | Key for audit log entries list. Ring buffer capped at `MAX_AUDIT_LOG_ENTRIES` (100): `push_audit_entry` evicts the oldest (`pop_front`) on overflow; `AuditConfig.max_events` (default 1000, Issue #412) is the admin-tunable retention target and is not yet wired as the storage cap. |
 | `"adt_stat"` | `AUDIT_STATS_KEY` | 119 | Key for audit stats. |
 | `"chllng"` | `CHALLENGE_KEY` | 121 | Key prefix for per-username challenge records (Issue #214). |
 | `"pause_rsn"` | `PAUSE_RSN_KEY` / `PAUSE_REASON_KEY` | 127 | Key for the pause reason code (Issue #211). |

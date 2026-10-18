@@ -253,4 +253,35 @@ mod tests {
         let attacker = Address::generate(&env);
         AuditConfig::assert_can_mutate(&attacker, &admin);
     }
+
+    #[test]
+    fn audit_log_rotates_at_max_capacity() {
+        let env = Env::default();
+        let contract_id = env.register(crate::TrustBridgeContract, ());
+        env.as_contract(&contract_id, || {
+            let cap = crate::storage::MAX_AUDIT_LOG_ENTRIES as usize;
+            for i in 0..(cap as u64 + 5) {
+                crate::storage::push_audit_entry(
+                    &env,
+                    AuditLogEntry::new(AuditEventType::UserRegistered, i, None),
+                );
+            }
+            let logs = crate::storage::get_audit_logs(&env);
+            assert_eq!(logs.len(), cap as u32);
+            // Oldest evicted: first retained entry carries timestamp 5.
+            assert_eq!(logs.get(0).unwrap().timestamp, 5);
+            // Newest retained: last entry carries timestamp cap+4.
+            assert_eq!(logs.get(cap as u32 - 1).unwrap().timestamp, cap as u64 + 4);
+            // Stats counters stay monotonic across eviction.
+            let stats = crate::storage::get_audit_stats(&env);
+            assert_eq!(stats.total_events, cap as u32 + 5);
+            assert_eq!(stats.registrations, cap as u32 + 5);
+            // get_audit_logs returns newest entries in order.
+            let mut prev = logs.get(0).unwrap().timestamp;
+            for entry in logs.iter().skip(1) {
+                assert!(entry.timestamp > prev);
+                prev = entry.timestamp;
+            }
+        });
+    }
 }
