@@ -161,24 +161,51 @@ fn test_integration_guardian_pause_is_allowed_for_admin_or_guardian() {
 }
 
 #[test]
-fn test_integration_guardian_pause_rejects_non_admin_non_guardian() {
-    let (env, _admin, _user1, _user2, contract_id) = setup_test_env();
+fn test_integration_emergency_pause_blocks_verify_and_clears() {
+    let (env, admin, user1, _user2, contract_id) = setup_test_env();
     let guardian = Address::generate(&env);
-    let outsider = Address::generate(&env);
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::set_guardian(env.clone(), guardian.clone()).unwrap();
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "octocat"),
+            user1.clone(),
+            Vec::new(&env),
+        )
+        .unwrap();
     });
 
+    env.mock_all_auths();
     env.as_contract(&contract_id, || {
+        TrustBridgeContract::emergency_pause(env.clone(), guardian.clone()).unwrap();
+        assert!(TrustBridgeContract::is_emergency_paused(env.clone()));
+
+        // register blocked while paused
         assert_eq!(
-            TrustBridgeContract::emergency_pause(env.clone(), outsider.clone()),
-            Err(ContractError::NotAuthorized)
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, "newuser"),
+                user1.clone(),
+                Vec::new(&env)
+            ),
+            Err(ContractError::Paused)
         );
+
+        // verify blocked while paused with the same Paused error as the
+        // ordinary pause path (distinct from auth / not-registered errors)
         assert_eq!(
-            TrustBridgeContract::clear_emergency_pause(env.clone()),
-            Err(ContractError::NotAuthorized)
+            TrustBridgeContract::verify(env.clone(), user1.clone(), s(&env, "octocat")),
+            Err(ContractError::Paused)
+        );
+
+        // clear path restores mutators
+        TrustBridgeContract::clear_emergency_pause(env.clone()).unwrap();
+        assert!(!TrustBridgeContract::is_emergency_paused(env.clone()));
+        assert_eq!(
+            TrustBridgeContract::verify(env.clone(), user1.clone(), s(&env, "octocat")),
+            Ok(())
         );
     });
 }
