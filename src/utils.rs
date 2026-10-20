@@ -249,6 +249,41 @@ pub fn generate_event_id(env: &Env, nonce: u32) -> u64 {
     (timestamp << 32) | (nonce as u64)
 }
 
+/// Maximum memo/free-text field length in bytes (Issue #682).
+pub const MAX_MEMO_LEN: usize = 256;
+
+/// Validates a memo/free-text field (Issue #682).
+///
+/// Rejects, uniformly and byte-wise:
+/// - empty memos and memos longer than [`MAX_MEMO_LEN`] bytes;
+/// - ASCII C0 control characters (`0x00`–`0x1F`, incl. tab/newline) and DEL (`0x7F`);
+/// - Unicode C1 control characters (`U+0080`–`U+009F`, UTF-8 `0xC2 0x80`–`0xC2 0x9F`).
+///
+/// Other printable UTF-8 is accepted. Malformed memos break indexers and UI,
+/// so callers should reject before persisting or emitting.
+#[allow(dead_code)] // Issue #682: covered by tests; staged for memo-bearing call sites.
+pub fn is_valid_memo(s: &String) -> bool {
+    let len = s.len() as usize;
+    if len == 0 || len > MAX_MEMO_LEN {
+        return false;
+    }
+    let mut buf = [0u8; MAX_MEMO_LEN];
+    s.copy_into_slice(&mut buf[..len]);
+    let bytes = &buf[..len];
+    let mut i = 0;
+    while i < len {
+        let b = bytes[i];
+        if b < 0x20 || b == 0x7F {
+            return false;
+        }
+        if b == 0xC2 && i + 1 < len && (0x80..=0x9F).contains(&bytes[i + 1]) {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +292,40 @@ mod tests {
 
     fn s(env: &Env, value: &str) -> String {
         String::from_str(env, value)
+    }
+
+    // ── Memo validation (Issue #682) ─────────────────────────────────────────
+
+    #[test]
+    fn test_memo_printable_accepted() {
+        let env = Env::default();
+        assert!(is_valid_memo(&s(&env, "Verified via PR #42 — thanks!")));
+        assert!(is_valid_memo(&s(&env, "café ✓")));
+        let max = "a".repeat(MAX_MEMO_LEN);
+        assert!(is_valid_memo(&s(&env, &max)));
+    }
+
+    #[test]
+    fn test_memo_control_characters_rejected() {
+        let env = Env::default();
+        assert!(!is_valid_memo(&s(&env, "a\x00b")));
+        assert!(!is_valid_memo(&s(&env, "a\x01b")));
+        assert!(!is_valid_memo(&s(&env, "a\tb")));
+        assert!(!is_valid_memo(&s(&env, "a\nb")));
+        assert!(!is_valid_memo(&s(&env, "a\rb")));
+        assert!(!is_valid_memo(&s(&env, "a\x1bb")));
+        assert!(!is_valid_memo(&s(&env, "a\x1fb")));
+        assert!(!is_valid_memo(&s(&env, "a\x7fb")));
+        assert!(!is_valid_memo(&s(&env, "a\u{80}b")));
+        assert!(!is_valid_memo(&s(&env, "a\u{9f}b")));
+    }
+
+    #[test]
+    fn test_memo_empty_and_oversized_rejected() {
+        let env = Env::default();
+        assert!(!is_valid_memo(&s(&env, "")));
+        let over = "a".repeat(MAX_MEMO_LEN + 1);
+        assert!(!is_valid_memo(&s(&env, &over)));
     }
 
     // ── Basic helpers ─────────────────────────────────────────────────────────

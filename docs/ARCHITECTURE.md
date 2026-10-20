@@ -423,6 +423,44 @@ sequenceDiagram
     C->>C: Emit VerifiedEvent
 ```
 
+### End-to-end: register → verify → export (Issue #681)
+
+```mermaid
+sequenceDiagram
+    participant U as Contributor
+    participant V as Admin / Verifier
+    participant O as Oracle (off-chain)
+    participant C as Contract
+    participant D as Dashboard / Indexer
+
+    U->>C: register(username, address, ...)
+    Note over U,C: address.require_auth(), not paused, username validated
+    C->>C: Store ContributorRecord, idx, count
+    C-->>D: RegisteredEvent
+    alt Admin / verifier path
+        V->>C: verify(caller, username)
+        Note over V,C: caller.require_auth() + admin or Verifier role
+    else Oracle proof path
+        O-->>U: signed "<username>:<address>:<expires_at>"
+        U->>C: verify_with_oracle_proof(username, proof)
+        Note over U,C: record address require_auth(), allowlisted key, unexpired
+    end
+    C->>C: mark_verified (verified = true, vcount++)
+    C-->>D: VerifiedEvent
+    D->>C: get_registered_paginated(cursor, limit)
+    D->>C: export_attestation(username)
+    C-->>D: Attestation / page (read-only, works while paused)
+```
+
+| Stage | Entrypoint(s) | Auth | Pause | Failure codes |
+|---|---|---|---|---|
+| Register | `register`, `register_sponsored` | registrant address | blocked | `InvalidUsername`, `CooldownActive`, `ZeroAddress`, `Paused` |
+| Verify | `verify`, `verify_with_oracle_proof` | admin/Verifier, or record address + oracle proof | blocked | `NotRegistered`, `AlreadyVerified`, `NotAuthorized`, `OracleProof*` |
+| Export | `get_registered_paginated`, `export_attestation` | see [ABI](ABI.md) | reads allowed | `NotRegistered`, invalid cursor |
+
+Dashboard consumers should follow [DASHBOARD_SYNC](DASHBOARD_SYNC.md): replay
+events for incremental state, use paginated reads for full resync.
+
 ---
 
 ## Error Handling

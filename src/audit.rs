@@ -2,7 +2,7 @@
 ///
 /// This module provides structured audit events for compliance and debugging,
 /// including admin actions, registrations, and verification events.
-use soroban_sdk::{contracttype, Address, String};
+use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
 /// Types of audit events that can be recorded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -224,6 +224,35 @@ impl AuditStats {
     }
 }
 
+/// Returns up to `limit` entries whose absolute sequence number is
+/// `>= start_seq` (Issue #683).
+///
+/// `logs` is the retained ring buffer (oldest first) and `total_events` the
+/// lifetime append count from [`AuditStats`], so the entry at index `i` has
+/// sequence `total_events - logs.len() + i`. Sequence numbers never shift when
+/// new events append or old ones are evicted, so a reader resuming from the
+/// last seen sequence + 1 never re-reads or skips a retained entry. If
+/// `start_seq` has already been evicted the page starts at the oldest
+/// retained entry. `limit == 0` or `start_seq` past the newest entry yields an
+/// empty page.
+#[allow(dead_code)] // Issue #683: covered by tests; staged for a paginated audit read.
+pub fn page_by_sequence(
+    env: &Env,
+    logs: &Vec<AuditLogEntry>,
+    total_events: u32,
+    start_seq: u32,
+    limit: u32,
+) -> Vec<AuditLogEntry> {
+    let mut page = Vec::new(env);
+    let first_seq = total_events.saturating_sub(logs.len());
+    let mut idx = start_seq.saturating_sub(first_seq);
+    while idx < logs.len() && page.len() < limit {
+        page.push_back(logs.get_unchecked(idx));
+        idx += 1;
+    }
+    page
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,5 +312,49 @@ mod tests {
                 prev = entry.timestamp;
             }
         });
+    }
+
+    fn seq_entry(seq: u64) -> AuditLogEntry {
+        AuditLogEntry::new(AuditEventType::UserRegistered, seq, None)
+    }
+
+    #[test]
+    fn page_by_sequence_stable_under_concurrent_appends() {
+        let env = Env::default();
+        let mut logs = Vec::new(&env);
+        for i in 0..5u64 {
+            logs.push_back(seq_entry(i));
+        }
+        let first = page_by_sequence(&env, &logs, 5, 0, 3);
+        assert_eq!(first.len(), 3);
+        assert_eq!(first.get_unchecked(2).timestamp, 2);
+
+        // Append while the reader is between pages, evicting the oldest entry
+        // (ring buffer of 5): index-based paging would now skip seq 3.
+        logs.pop_front();
+        logs.push_back(seq_entry(5));
+        let second = page_by_sequence(&env, &logs, 6, 3, 3);
+        assert_eq!(second.len(), 3);
+        assert_eq!(second.get_unchecked(0).timestamp, 3);
+        assert_eq!(second.get_unchecked(2).timestamp, 5);
+    }
+
+    #[test]
+    fn page_by_sequence_edge_cases() {
+        let env = Env::default();
+        let empty = Vec::new(&env);
+        assert_eq!(page_by_sequence(&env, &empty, 0, 0, 10).len(), 0);
+
+        let mut logs = Vec::new(&env);
+        for i in 10..13u64 {
+            logs.push_back(seq_entry(i));
+        }
+        // limit 0 and start past the end yield empty pages.
+        assert_eq!(page_by_sequence(&env, &logs, 13, 10, 0).len(), 0);
+        assert_eq!(page_by_sequence(&env, &logs, 13, 13, 5).len(), 0);
+        // Evicted start clamps to the oldest retained entry.
+        let page = page_by_sequence(&env, &logs, 13, 0, 5);
+        assert_eq!(page.len(), 3);
+        assert_eq!(page.get_unchecked(0).timestamp, 10);
     }
 }

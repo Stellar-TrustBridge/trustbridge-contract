@@ -43,6 +43,25 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 
 ---
 
+### Oracle and guardian trust boundaries (Issue #684)
+
+Source of truth: `src/oracle_proof.rs` (`verify_with_proof`,
+`verify_ownership_proof`) and `src/lib.rs` (`verify_with_oracle_proof`,
+`set_oracle_allowlist`, `emergency_pause`, `set_guardian`).
+
+| Scenario | What the attacker can do | What the contract enforces | Operator response |
+|---|---|---|---|
+| **Oracle key compromise** | Sign ownership proofs for any username/address pair | Proof must still be signed by an allowlisted key, bound to `<username>:<address>:<expires_at>`, unexpired, and the record's bound `stellar_address` must `require_auth()` — a stolen oracle key alone cannot verify a record the attacker does not control | `emergency_pause`, then `set_oracle_allowlist` without the key; `revoke_verification` for records verified by it during the window |
+| **Oracle replay** | Resubmit an old proof | Message binds username, address and expiry; `OracleProofExpired` after `expires_at`; `AlreadyVerified` on an active record | Issue short-lived proofs (`expires_at != 0`) |
+| **Malformed / forged proof** | Submit garbage or unsigned data | Stable errors: `OracleProofBadLayout` → `OracleProofNotAllowlisted` → `OracleProofExpired` → `OracleProofBadSignature`; invalid well-formed signatures trap with no state written | Triage by error code |
+| **Empty allowlist** | — | Every proof fails `OracleProofNotAllowlisted`; oracle path is closed by default | Allowlist is admin-only |
+| **Guardian misuse** | Call `emergency_pause` to freeze writes (liveness DoS) | Guardian cannot clear the pause, grant roles, upgrade, remove records, or touch the oracle allowlist; public reads stay available while paused | Admin `clear_emergency_pause`, then `remove_guardian` / `set_guardian` to rotate |
+| **Guardian key compromise** | Same as misuse | Blast radius limited to pause; no data mutation path | As above; expired guardian roles are treated as absent |
+
+Pause semantics: `verify_with_oracle_proof` checks `require_not_paused`
+before any proof work, so a pause mid-incident leaves no partial privileged
+state. Proofs and oracle keys are never echoed into events or audit details.
+
 ## Cross-Contract Callers and Admin Exports
 
 A sibling contract (for example, a payout contract) may call this registry
@@ -477,6 +496,13 @@ Deliberate non-goals:
   not ownership. Ownership remains the admin verification step.
 
 ---
+
+### Memo / free-text fields (Issue #682)
+
+`utils::is_valid_memo` rejects, byte-wise and uniformly: empty memos, memos
+over `MAX_MEMO_LEN` (256) bytes, ASCII C0 controls (`0x00`–`0x1F`, incl.
+tab/newline), DEL (`0x7F`), and Unicode C1 controls (`U+0080`–`U+009F`).
+Other printable UTF-8 is accepted. Tests live in `src/utils.rs`.
 
 ## Unicode Rejection Policy
 
@@ -1538,3 +1564,13 @@ another. Every repair is an explicit, auditable admin transaction.
 Covered by `tests/repair_index.rs`, which drifts the counters against a
 known-good fixture and checks both the dry-run report and the corrected
 on-chain state after `apply = true`.
+
+## Audit Log Pagination Stability (Issue #683)
+
+The audit log is a ring buffer of `MAX_AUDIT_LOG_ENTRIES`; index-based paging
+would skip or repeat entries when new events append (and old ones evict)
+between page reads, hiding unauthorized attempts. `audit::page_by_sequence`
+pages by absolute sequence number (`AuditStats.total_events - logs.len() + i`),
+which never shifts. Readers resume from the last seen sequence + 1. An evicted
+`start_seq` clamps to the oldest retained entry; `limit == 0` or a start past
+the newest entry returns an empty page. Tests live in `src/audit.rs`.
