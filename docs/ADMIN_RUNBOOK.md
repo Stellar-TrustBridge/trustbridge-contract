@@ -519,7 +519,13 @@ Gotchas:
   contract WASM; a bad `--wasm-hash` bricks the contract until another
   governance round can replace it.
 - If a staged WASM slot is set (`stage_wasm` / `get_staged`), the proposal hash
-  must match it or `execute_upgrade` fails with `StagedWasmMismatch`.
+  must match it or `execute_upgrade` fails with `StagedWasmMismatch`. The
+  single-admin `upgrade` path enforces the same check (Issue #680).
+- **Expiry (Issue #678):** a proposal expires 7 days
+  (`UPGRADE_PROPOSAL_EXPIRY_SECS`) after `executable_at`. Once expired,
+  `approve_upgrade` / `execute_upgrade` fail with `NoUpgradeProposalPending`;
+  a new `propose_multisig_upgrade` replaces it (new proposal id), or the admin
+  may `cancel_upgrade_proposal` it to clear storage.
 - `clear_staged` is **idempotent**. Admin-only. If nothing is staged (retry
   after an aborted upgrade, a second clear, or after `execute_upgrade` already
   emptied the slot), the call returns `Ok(())`, leaves no `stgwasm` instance

@@ -176,6 +176,7 @@ The full table lives in `scripts/event_indexer.sh` (`TOPIC_TABLE`).
 | `rotation_requested_event` | `rotation_requested` | `admin` |
 | `rotation_executed_event` | `rotation_executed` | `admin` |
 | `rotation_cancelled_event` | `rotation_cancelled` | `admin` |
+| `oracle_allowlist_rotated_event` | `oracle_allowlist_rotated` | `admin` |
 | `upgraded_event` | `upgraded` | `upgrade` |
 | `upgrade_attested_event` | `upgrade_attested` | `upgrade` |
 | `attestation_cleared_event` | `attestation_cleared` | `upgrade` |
@@ -188,6 +189,11 @@ An event whose `topic[0]` does not match any row is written with
 indexer pointed at a newer contract version must keep recording events it does not
 recognise — losing the stream entirely at the moment an unknown event appears would
 be worse than a gap in classification.
+
+Topic uniqueness is enforced twice: `scripts/check_event_topics.sh` fails CI if
+two structs in `src/events.rs` derive the same topic, and
+`tests/event_topic_uniqueness.rs` asserts the same inside `cargo test`
+(Issue #677).
 
 ### Adding a new event kind
 

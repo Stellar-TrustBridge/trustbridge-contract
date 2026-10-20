@@ -415,6 +415,18 @@ pub struct UpgradeProposalCancelledEvent {
     pub timestamp: u64,
 }
 
+/// Emitted when the admin rotates the oracle signer allowlist via
+/// `set_oracle_allowlist` (Issue #679). Carries the new key count only; the
+/// keys themselves are readable via `get_oracle_allowlist`.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleAllowlistRotatedEvent {
+    #[topic]
+    pub rotated_by: Address,
+    pub key_count: u32,
+    pub timestamp: u64,
+}
+
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerificationConfiguredEvent {

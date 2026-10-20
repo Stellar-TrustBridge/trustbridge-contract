@@ -289,9 +289,9 @@ struct ChallengeRecord {
 | 35 | `RoleGrantNotReady` | `activate_role` before the grant's timelock elapsed (Issue #220) |
 | 36 | `ProvenanceMissing` | `assert_build` / `set_provenance_digests` before any provenance record exists (Issue #225) |
 | 37 | `ProvenanceMismatch` | `assert_build` given a hash that does not match stored provenance (Issue #225) |
-| 39 | `StagedWasmMismatch` | `upgrade` / `execute_upgrade` was given a WASM hash that does not match the staged-WASM slot (Issue #300) |
-| 40 | `UpgradeProposalAlreadyPending` | `propose_multisig_upgrade` was called while a proposal is already live (Issue #301) |
-| 41 | `NoUpgradeProposalPending` | `approve_upgrade` / `execute_upgrade` / `cancel_upgrade_proposal` was called with no live proposal (or a proposal id that does not match) (Issue #301) |
+| 39 | `StagedWasmMismatch` | `upgrade` / `execute_upgrade` was given a WASM hash that does not match the staged-WASM slot (Issue #300); fails closed with no state change (Issue #680) |
+| 40 | `UpgradeProposalAlreadyPending` | `propose_multisig_upgrade` was called while an unexpired proposal is already live (Issue #301, #678) |
+| 41 | `NoUpgradeProposalPending` | `approve_upgrade` / `execute_upgrade` / `cancel_upgrade_proposal` was called with no live proposal (or a proposal id that does not match); `approve_upgrade` / `execute_upgrade` also return it for an expired proposal (Issue #301, #678) |
 | 42 | `UpgradeProposalAlreadyApproved` | `approve_upgrade` was called by an address that already approved this proposal (Issue #301) |
 | 43 | `UpgradeProposalDelayActive` | `execute_upgrade` was called before the proposal's delay elapsed (Issue #301) |
 | 44 | `UpgradeProposalInsufficientApprovals` | `execute_upgrade` was called before the approval threshold was met (Issue #301) |
@@ -1027,6 +1027,8 @@ verification. **Auth:** contract admin.
 
 **Errors:** `NotInitialized`.
 
+**Events:** `OracleAllowlistRotatedEvent` on every successful call (Issue #679).
+
 ### `get_oracle_allowlist() -> Vec<BytesN<32>>`
 
 Returns the current oracle allowlist (empty if never set). Read-only, no auth.
@@ -1701,8 +1703,13 @@ authentication and the upgrade timelock cooldown.
 |---|---|
 | **Auth** | Admin |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `Paused`, `CooldownActive`, `UnattestedWasm`, `AttestationExpired` |
+| **Errors** | `NotInitialized`, `Paused`, `StagedWasmMismatch`, `CooldownActive`, `UnattestedWasm`, `AttestationExpired` |
 | **Events** | `UpgradedEvent` |
+
+If a hash is staged (`stage_wasm`) and differs from `new_wasm_hash`, the call
+fails closed with `StagedWasmMismatch` before the cooldown or attestation
+checks, leaving the staged slot and provenance untouched (Issue #680; covered
+by `tests/staged_wasm_mismatch.rs`).
 
 Records a `WasmProvenance` entry for the new hash: what it replaced, who
 authorised it, when, at what version, and whether it had been attested. The
@@ -2062,6 +2069,21 @@ before execution.
 | Test | What it checks |
 |------|----------------|
 | `test_upgrade_proposal_cancelled_event_shape` | One event emitted; topic symbol `"upgrade_proposal_cancelled_event"`; `proposal_id` topic matches |
+
+### OracleAllowlistRotatedEvent (Issue #679)
+
+```
+topics: ["oracle_allowlist_rotated_event", rotated_by]
+data:   { key_count, timestamp }
+```
+
+Emitted when the admin replaces the oracle signer allowlist via
+`set_oracle_allowlist`. Only the key count is published; read the keys with
+`get_oracle_allowlist`.
+
+| Test | What it checks |
+|------|----------------|
+| `test_admin_rotation_replaces_allowlist_and_emits_event` | One event emitted; topics and data match |
 
 ---
 

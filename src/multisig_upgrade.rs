@@ -28,6 +28,14 @@
 //! Cancellation is available to any admin at any time before execution:
 //! `cancel_upgrade_proposal(proposal_id)` → `UpgradeProposalCancelledEvent`.
 //!
+//! ## Expiry (Issue #678)
+//!
+//! A proposal expires `UPGRADE_PROPOSAL_EXPIRY_SECS` after its
+//! `executable_at`.  An expired proposal can no longer be approved or
+//! executed (both fail with `NoUpgradeProposalPending`) and no longer blocks
+//! `propose_multisig_upgrade`, which replaces it.  Admins may still
+//! `cancel_upgrade_proposal` it to clear storage explicitly.
+//!
 //! ## Approval threshold
 //!
 //! Configured on-chain via `set_upgrade_threshold(m)`.  Default `1` retains
@@ -104,6 +112,11 @@ pub struct UpgradeProposal {
 /// the storage footprint of the `approvers` vec.
 pub const MAX_UPGRADE_SIGNERS: u32 = 20;
 
+/// Seconds after `executable_at` at which a proposal expires (7 days).
+///
+/// Bounds how long a stale proposal can block a new one (Issue #678).
+pub const UPGRADE_PROPOSAL_EXPIRY_SECS: u64 = 7 * 24 * 60 * 60;
+
 // ── Storage helpers ────────────────────────────────────────────────────────────
 
 /// Current approval threshold (default 1 = single-admin, no change to
@@ -159,22 +172,35 @@ pub fn clear_upgrade_proposal(env: &Env) {
 
 // ── Business logic ─────────────────────────────────────────────────────────────
 
+/// Returns `true` once the ledger time has reached the proposal's expiry
+/// (`executable_at + UPGRADE_PROPOSAL_EXPIRY_SECS`).
+#[must_use]
+pub fn is_proposal_expired(env: &Env, proposal: &UpgradeProposal) -> bool {
+    env.ledger().timestamp()
+        >= proposal
+            .executable_at
+            .saturating_add(UPGRADE_PROPOSAL_EXPIRY_SECS)
+}
+
 /// Creates a new upgrade proposal.
 ///
 /// The proposer is recorded as the first approver.  Returns the new proposal.
 ///
 /// # Errors
 ///
-/// - [`ContractError::UpgradeProposalAlreadyPending`] if a proposal is already
-///   live (cancel or execute it first).
+/// - [`ContractError::UpgradeProposalAlreadyPending`] if an unexpired proposal
+///   is already live (cancel or execute it first).  An expired proposal is
+///   replaced.
 pub fn create_upgrade_proposal(
     env: &Env,
     proposer: Address,
     wasm_hash: BytesN<32>,
     delay_secs: u64,
 ) -> Result<UpgradeProposal, ContractError> {
-    if get_upgrade_proposal(env).is_some() {
-        return Err(ContractError::UpgradeProposalAlreadyPending);
+    if let Some(existing) = get_upgrade_proposal(env) {
+        if !is_proposal_expired(env, &existing) {
+            return Err(ContractError::UpgradeProposalAlreadyPending);
+        }
     }
     let id = alloc_proposal_id(env);
     let now = env.ledger().timestamp();
@@ -198,7 +224,8 @@ pub fn create_upgrade_proposal(
 ///
 /// # Errors
 ///
-/// - [`ContractError::NoUpgradeProposalPending`] if there is no live proposal.
+/// - [`ContractError::NoUpgradeProposalPending`] if there is no live proposal
+///   or it has expired.
 /// - [`ContractError::UpgradeProposalAlreadyApproved`] if `approver` has
 ///   already approved this proposal.
 pub fn record_approval(
@@ -208,7 +235,7 @@ pub fn record_approval(
 ) -> Result<UpgradeProposal, ContractError> {
     let mut proposal = get_upgrade_proposal(env).ok_or(ContractError::NoUpgradeProposalPending)?;
 
-    if proposal.id != proposal_id {
+    if proposal.id != proposal_id || is_proposal_expired(env, &proposal) {
         return Err(ContractError::NoUpgradeProposalPending);
     }
 
@@ -240,8 +267,8 @@ pub fn has_enough_approvals(env: &Env, proposal: &UpgradeProposal) -> bool {
 ///
 /// # Errors
 ///
-/// - [`ContractError::NoUpgradeProposalPending`] if there is no live proposal
-///   or the `proposal_id` does not match.
+/// - [`ContractError::NoUpgradeProposalPending`] if there is no live proposal,
+///   the `proposal_id` does not match, or the proposal has expired.
 /// - [`ContractError::UpgradeProposalDelayActive`] if the delay has not elapsed.
 /// - [`ContractError::UpgradeProposalInsufficientApprovals`] if approval
 ///   threshold has not been met.
@@ -251,7 +278,7 @@ pub fn require_proposal_executable(
 ) -> Result<UpgradeProposal, ContractError> {
     let proposal = get_upgrade_proposal(env).ok_or(ContractError::NoUpgradeProposalPending)?;
 
-    if proposal.id != proposal_id {
+    if proposal.id != proposal_id || is_proposal_expired(env, &proposal) {
         return Err(ContractError::NoUpgradeProposalPending);
     }
 

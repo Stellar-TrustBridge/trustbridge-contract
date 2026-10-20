@@ -1098,6 +1098,20 @@ Tests in `src/oracle_proof.rs` cover every path with a fixed test keypair
 `wellformed_invalid_signature_traps`); run them with
 `cargo test oracle_proof`.
 
+**Allowlist rotation (Issue #679).** `set_oracle_allowlist` is the rotation
+entry point: admin auth is required, the new list fully replaces the old one
+(an empty list disables oracle verification), and every successful call emits
+`OracleAllowlistRotatedEvent { rotated_by, key_count, timestamp }` so
+indexers can alert on rotations. Keys themselves are not published in the
+event. A non-admin caller fails auth and the stored allowlist is unchanged.
+Covered by `tests/oracle_allowlist_rotation.rs`.
+
+**Multisig proposal expiry (Issue #678).** An upgrade proposal expires
+`UPGRADE_PROPOSAL_EXPIRY_SECS` (7 days) after `executable_at`. Expired
+proposals cannot be approved or executed (`NoUpgradeProposalPending`) and are
+replaced by the next `propose_multisig_upgrade`, so a stale proposal cannot
+block an emergency fix. Covered by `tests/multisig_upgrade.rs`.
+
 **This is a signature-check interface, not GitHub verification.** The
 contract has no way to talk to the GitHub API and this change does not give
 it one — see **Out of Scope** above, which still applies unchanged. How the

@@ -101,12 +101,26 @@ pub fn require_staged_wasm_consistent(
     env: &Env,
     wasm_hash: &BytesN<32>,
 ) -> Result<(), ContractError> {
+    require_staged_hash_matches(env, wasm_hash)?;
+    crate::storage::require_attestation_if_required(env)?;
+    Ok(())
+}
+
+/// Validates only the staged-slot half of [`require_staged_wasm_consistent`].
+///
+/// Used by the single-admin `upgrade` path, which enforces attestation itself
+/// via `consume_attestation` (Issue #680).
+///
+/// # Errors
+///
+/// - [`ContractError::StagedWasmMismatch`] when a staged hash exists and
+///   differs from `wasm_hash`.
+pub fn require_staged_hash_matches(env: &Env, wasm_hash: &BytesN<32>) -> Result<(), ContractError> {
     if let Some(staged) = get_staged_wasm(env) {
         if staged.wasm_hash != *wasm_hash {
             return Err(ContractError::StagedWasmMismatch);
         }
     }
-    crate::storage::require_attestation_if_required(env)?;
     Ok(())
 }
 

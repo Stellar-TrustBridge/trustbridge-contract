@@ -31,6 +31,8 @@ pub use events::{
     EmergencyClearedEvent,
     EmergencyPausedEvent,
     GuardianChangedEvent,
+    // Oracle allowlist rotation (Issue #679)
+    OracleAllowlistRotatedEvent,
     PausedEvent,
     RegisteredEvent,
     RemovedEvent,
@@ -57,7 +59,7 @@ pub use events::{
     // Staged WASM (Issue #300)
     WasmStagedEvent,
 };
-pub use multisig_upgrade::{UpgradeProposal, MAX_UPGRADE_SIGNERS};
+pub use multisig_upgrade::{UpgradeProposal, MAX_UPGRADE_SIGNERS, UPGRADE_PROPOSAL_EXPIRY_SECS};
 pub use oracle_proof::{
     get_oracle_allowlist, set_oracle_allowlist, verify_with_proof, OracleProof,
 };
@@ -1313,6 +1315,9 @@ impl TrustBridgeContract {
 
         let admin = get_admin(&env)?;
         admin.require_auth();
+
+        // Fail fast if a staged hash is present and differs (Issue #680).
+        crate::staged_wasm::require_staged_hash_matches(&env, &new_wasm_hash)?;
 
         let now = env.ledger().timestamp();
 
@@ -3557,6 +3562,9 @@ impl TrustBridgeContract {
     /// `verify_with_oracle_proof` accepts. An empty list disables oracle
     /// verification entirely.
     ///
+    /// Emits `OracleAllowlistRotatedEvent` on every successful rotation
+    /// (Issue #679).
+    ///
     /// # Auth
     ///
     /// Requires auth from the contract admin.
@@ -3567,7 +3575,14 @@ impl TrustBridgeContract {
     pub fn set_oracle_allowlist(env: Env, pubkeys: Vec<BytesN<32>>) -> Result<(), ContractError> {
         require_initialized(&env)?;
         let admin = get_admin(&env)?;
+        let key_count = pubkeys.len();
         crate::oracle_proof::set_oracle_allowlist(&env, &admin, pubkeys);
+        crate::events::OracleAllowlistRotatedEvent {
+            rotated_by: admin,
+            key_count,
+            timestamp: env.ledger().timestamp(),
+        }
+        .publish(&env);
         Ok(())
     }
 

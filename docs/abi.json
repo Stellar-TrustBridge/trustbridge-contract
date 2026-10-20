@@ -330,17 +330,17 @@
     {
       "code": 39,
       "name": "StagedWasmMismatch",
-      "description": "`upgrade` / `execute_upgrade` was given a WASM hash that does not match the staged-WASM slot (Issue #300)"
+      "description": "`upgrade` / `execute_upgrade` was given a WASM hash that does not match the staged-WASM slot (Issue #300); fails closed with no state change (Issue #680)"
     },
     {
       "code": 40,
       "name": "UpgradeProposalAlreadyPending",
-      "description": "`propose_multisig_upgrade` was called while a proposal is already live (Issue #301)"
+      "description": "`propose_multisig_upgrade` was called while an unexpired proposal is already live (Issue #301, #678)"
     },
     {
       "code": 41,
       "name": "NoUpgradeProposalPending",
-      "description": "`approve_upgrade` / `execute_upgrade` / `cancel_upgrade_proposal` was called with no live proposal (or a proposal id that does not match) (Issue #301)"
+      "description": "`approve_upgrade` / `execute_upgrade` / `cancel_upgrade_proposal` was called with no live proposal (or a proposal id that does not match); `approve_upgrade` / `execute_upgrade` also return it for an expired proposal (Issue #301, #678)"
     },
     {
       "code": 42,
@@ -603,6 +603,14 @@
         "proposal_id"
       ],
       "data": "{ wasm_hash, cancelled_by, timestamp }"
+    },
+    {
+      "name": "OracleAllowlistRotatedEvent",
+      "topics": [
+        "\"oracle_allowlist_rotated_event\"",
+        "rotated_by"
+      ],
+      "data": "{ key_count, timestamp }"
     }
   ]
 }

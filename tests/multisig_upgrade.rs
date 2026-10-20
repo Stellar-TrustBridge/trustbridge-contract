@@ -662,3 +662,99 @@ fn test_propose_preserves_live_proposal_state_on_already_pending_error() {
         assert_eq!(live.approvers.len(), 1);
     });
 }
+
+// ── Expiry (Issue #678) ───────────────────────────────────────────────────────
+
+#[test]
+fn test_proposal_usable_until_expiry_boundary() {
+    let (env, admin, upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_upgrade_threshold(env.clone(), admin.clone(), 2).unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), hash(&env, 0xE1), 100)
+            .unwrap();
+    });
+
+    // One second before expiry (executable_at = 1_100) approval still works.
+    env.ledger()
+        .set_timestamp(1_100 + trustbridge_contract::UPGRADE_PROPOSAL_EXPIRY_SECS - 1);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::approve_upgrade(env.clone(), upgrader.clone(), 0).unwrap();
+    });
+}
+
+#[test]
+fn test_expired_proposal_cannot_be_approved_or_executed() {
+    let (env, admin, upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_upgrade_threshold(env.clone(), admin.clone(), 2).unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), hash(&env, 0xE2), 100)
+            .unwrap();
+    });
+
+    env.ledger()
+        .set_timestamp(1_100 + trustbridge_contract::UPGRADE_PROPOSAL_EXPIRY_SECS);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::approve_upgrade(env.clone(), upgrader.clone(), 0),
+            Err(ContractError::NoUpgradeProposalPending)
+        );
+        assert_eq!(
+            TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), 0),
+            Err(ContractError::NoUpgradeProposalPending)
+        );
+        // Failed calls leave the stored proposal untouched (no partial state).
+        let stored = TrustBridgeContract::get_upgrade_proposal(env.clone()).unwrap();
+        assert_eq!(stored.approvers.len(), 1);
+    });
+}
+
+#[test]
+fn test_expired_proposal_is_replaced_by_new_proposal() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), hash(&env, 0xE3), 100)
+            .unwrap();
+    });
+
+    env.ledger()
+        .set_timestamp(1_100 + trustbridge_contract::UPGRADE_PROPOSAL_EXPIRY_SECS);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), hash(&env, 0xE4), 100)
+            .unwrap();
+        let live = TrustBridgeContract::get_upgrade_proposal(env.clone()).unwrap();
+        assert_eq!(live.id, 1);
+        assert_eq!(live.wasm_hash, hash(&env, 0xE4));
+    });
+}
+
+#[test]
+fn test_admin_can_cancel_expired_proposal() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), hash(&env, 0xE5), 100)
+            .unwrap();
+    });
+
+    env.ledger()
+        .set_timestamp(1_100 + trustbridge_contract::UPGRADE_PROPOSAL_EXPIRY_SECS);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::cancel_upgrade_proposal(env.clone(), admin.clone(), 0).unwrap();
+        assert!(TrustBridgeContract::get_upgrade_proposal(env.clone()).is_none());
+    });
+}
