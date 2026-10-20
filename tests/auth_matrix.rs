@@ -33,7 +33,20 @@ use soroban_sdk::{
 use trustbridge_contract::{ContractError, OracleProof, Role, TrustBridgeContract};
 
 const MATRIX: &str = include_str!("auth_matrix.csv");
-const LIB_SRC: &str = include_str!("../src/lib.rs");
+/// Every file holding a `#[contractimpl]` block on `TrustBridgeContract`
+/// (split out of `lib.rs` in Issue #601).
+const CONTRACT_SRCS: &[&str] = &[
+    include_str!("../src/contract/admin.rs"),
+    include_str!("../src/contract/roles.rs"),
+    include_str!("../src/contract/governance.rs"),
+    include_str!("../src/contract/config.rs"),
+    include_str!("../src/contract/registry.rs"),
+    include_str!("../src/contract/verify.rs"),
+    include_str!("../src/contract/rotation.rs"),
+    include_str!("../src/contract/health.rs"),
+    include_str!("../src/contract/challenge.rs"),
+    include_str!("../src/contract/maintenance.rs"),
+];
 
 /// Fixed registrant (contract-type, so `mock_auths` can sign for it) that the
 /// oracle proof fixture below binds to.
@@ -712,16 +725,20 @@ fn check_row(row: &Row) -> Option<std::string::String> {
 /// Guard: every entrypoint whose body calls `require_auth` needs a CSV row.
 #[test]
 fn every_auth_gated_entrypoint_has_a_matrix_row() {
-    let start = LIB_SRC
-        .find("#[contractimpl]\nimpl TrustBridgeContract {")
-        .expect("contractimpl block not found");
-    let body = &LIB_SRC[start..];
-    let body = &body[..body.find("\n#[cfg(test)]").unwrap_or(body.len())];
+    let bodies: std::vec::Vec<&str> = CONTRACT_SRCS
+        .iter()
+        .map(|src| {
+            let start = src
+                .find("#[contractimpl]\nimpl TrustBridgeContract {")
+                .expect("contractimpl block not found");
+            &src[start..]
+        })
+        .collect();
     let covered: std::collections::BTreeSet<std::string::String> =
         rows().into_iter().map(|r| r.operation).collect();
-    let missing: std::vec::Vec<&str> = body
-        .split("\n    pub fn ")
-        .skip(1)
+    let missing: std::vec::Vec<&str> = bodies
+        .iter()
+        .flat_map(|body| body.split("\n    pub fn ").skip(1))
         .filter(|f| f.contains("require_auth"))
         .map(|f| f.split('(').next().unwrap())
         .filter(|name| !covered.contains(*name))

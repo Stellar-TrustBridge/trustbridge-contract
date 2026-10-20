@@ -2164,6 +2164,54 @@ pub fn set_audit_config(env: &Env, config: &crate::audit::AuditConfig) {
 //   that can be deserialized (stale ones fail silently so the batch is never
 //   partially-poison).  The step is a no-op on a clean deployment.
 
+/// `ContributorRecord` as laid out by v1.0.0, before `registered_at` was
+/// narrowed to `u32` (Issue #605). Only read by the NormalizeRegisteredAt step.
+/// Not exported to the contract spec, so the ABI is unchanged.
+#[soroban_sdk::contracttype(export = false)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyContributorRecordV100 {
+    pub stellar_address: Address,
+    pub payout_address: Address,
+    pub registered_at: u64,
+    pub verified: bool,
+    pub is_bot: bool,
+}
+
+impl LegacyContributorRecordV100 {
+    /// Converts to the current layout. Timestamps past `u32::MAX` saturate
+    /// rather than wrap so a corrupt value never moves a record backwards.
+    #[must_use]
+    pub fn normalize(self) -> ContributorRecord {
+        ContributorRecord {
+            stellar_address: self.stellar_address,
+            payout_address: self.payout_address,
+            registered_at: u32::try_from(self.registered_at).unwrap_or(u32::MAX),
+            verified: self.verified,
+            is_bot: self.is_bot,
+        }
+    }
+}
+
+/// Reads a record in either the current or the v1.0.0 layout. Returns `None`
+/// for a missing entry or one matching neither layout, so a single unreadable
+/// record never aborts the migration batch.
+fn load_record_any_layout(env: &Env, github_username: &String) -> Option<ContributorRecord> {
+    let key = (REG_KEY, canon(env, github_username));
+    let raw: soroban_sdk::Val = env.storage().persistent().get(&key)?;
+    if let Ok(record) =
+        <ContributorRecord as soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>::try_from_val(
+            env, &raw,
+        )
+    {
+        return Some(record);
+    }
+    <LegacyContributorRecordV100 as soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>::try_from_val(
+        env, &raw,
+    )
+    .ok()
+    .map(LegacyContributorRecordV100::normalize)
+}
+
 /// Describes one migration step in the registry table.
 pub struct MigrationStep {
     /// The version this step migrates **from** (exclusive lower bound).
@@ -2203,7 +2251,7 @@ pub fn run_migration_steps(env: &Env, current: (u32, u32, u32), target: (u32, u3
             let index = get_index(env);
             for i in 0..index.len() {
                 if let Some(username) = index.get(i) {
-                    if let Some(record) = get_record(env, &username) {
+                    if let Some(record) = load_record_any_layout(env, &username) {
                         // Re-serialise with the current layout.
                         set_record(env, &username, &record);
                     }
@@ -2830,6 +2878,148 @@ mod pending_reverify_tests {
                 .unwrap();
             assert!(!get_pending_reverify(&env, &old));
             assert!(get_pending_reverify(&env, &new));
+        });
+    }
+}
+
+#[cfg(test)]
+mod normalize_registered_at_migration_tests {
+    //! NormalizeRegisteredAt against synthetic v1.0.0 records (Issue #605).
+    use super::*;
+    use crate::version::Version;
+    use crate::{TrustBridgeContract, CONTRACT_VERSION};
+    use soroban_sdk::{testutils::Address as _, Address, Env, String};
+
+    const V1_0_0: (u32, u32, u32) = (1, 0, 0);
+
+    fn setup(env: &Env) -> Address {
+        let contract_id = env.register(TrustBridgeContract, ());
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), Address::generate(env)).unwrap();
+        });
+        contract_id
+    }
+
+    fn legacy(env: &Env, registered_at: u64) -> LegacyContributorRecordV100 {
+        LegacyContributorRecordV100 {
+            stellar_address: Address::generate(env),
+            payout_address: Address::generate(env),
+            registered_at,
+            verified: true,
+            is_bot: false,
+        }
+    }
+
+    /// Writes a record with the v1.0.0 `u64` layout straight into storage,
+    /// exactly as a pre-1.1.0 deployment would have left it.
+    fn seed_legacy(env: &Env, username: &String, record: &LegacyContributorRecordV100) {
+        let key = (REG_KEY, canon(env, username));
+        env.storage().persistent().set(&key, record);
+        add_to_index(env, username);
+    }
+
+    fn stored_as_current_layout(env: &Env, username: &String) -> Option<ContributorRecord> {
+        let key = (REG_KEY, canon(env, username));
+        let raw: soroban_sdk::Val = env.storage().persistent().get(&key)?;
+        <ContributorRecord as soroban_sdk::TryFromVal<Env, soroban_sdk::Val>>::try_from_val(
+            env, &raw,
+        )
+        .ok()
+    }
+
+    #[test]
+    fn test_v100_records_normalized_to_u32_registered_at() {
+        let env = Env::default();
+        let id = setup(&env);
+        let target = CONTRACT_VERSION.to_tuple();
+        env.as_contract(&id, || {
+            let alice = String::from_str(&env, "alice");
+            let bob = String::from_str(&env, "bob");
+            let a = legacy(&env, 1_700_000_000);
+            let b = legacy(&env, 42);
+            seed_legacy(&env, &alice, &a);
+            seed_legacy(&env, &bob, &b);
+            assert!(stored_as_current_layout(&env, &alice).is_none());
+
+            assert_eq!(run_migration_steps(&env, V1_0_0, target), 1);
+
+            let ra = stored_as_current_layout(&env, &alice).expect("alice normalized");
+            assert_eq!(ra.registered_at, 1_700_000_000u32);
+            assert_eq!(ra.stellar_address, a.stellar_address);
+            assert_eq!(ra.payout_address, a.payout_address);
+            assert!(ra.verified);
+            let rb = stored_as_current_layout(&env, &bob).expect("bob normalized");
+            assert_eq!(rb.registered_at, 42);
+            assert_eq!(get_index(&env).len(), 2);
+            assert_eq!(get_record(&env, &alice), Some(ra));
+        });
+    }
+
+    #[test]
+    fn test_out_of_range_u64_timestamp_saturates() {
+        let env = Env::default();
+        let id = setup(&env);
+        env.as_contract(&id, || {
+            let u = String::from_str(&env, "carol");
+            seed_legacy(&env, &u, &legacy(&env, u64::from(u32::MAX) + 10));
+            run_migration_steps(&env, V1_0_0, CONTRACT_VERSION.to_tuple());
+            assert_eq!(get_record(&env, &u).unwrap().registered_at, u32::MAX);
+        });
+    }
+
+    #[test]
+    fn test_migration_is_idempotent() {
+        let env = Env::default();
+        let id = setup(&env);
+        let target = CONTRACT_VERSION.to_tuple();
+        env.as_contract(&id, || {
+            let u = String::from_str(&env, "dave");
+            seed_legacy(&env, &u, &legacy(&env, 1_000));
+            assert_eq!(run_migration_steps(&env, V1_0_0, target), 1);
+            let first = get_record(&env, &u).unwrap();
+            // Partial re-run from v1.0.0 must rewrite identically.
+            assert_eq!(run_migration_steps(&env, V1_0_0, target), 1);
+            assert_eq!(get_record(&env, &u).unwrap(), first);
+            // Already at target: nothing applies.
+            assert_eq!(run_migration_steps(&env, target, target), 0);
+        });
+    }
+
+    #[test]
+    fn test_fresh_deploy_skips_step_and_keeps_records() {
+        let env = Env::default();
+        let id = setup(&env);
+        let current = CONTRACT_VERSION.to_tuple();
+        env.as_contract(&id, || {
+            assert_eq!(run_migration_steps(&env, current, (1, 2, 0)), 0);
+            assert_eq!(get_index(&env).len(), 0);
+        });
+    }
+
+    #[test]
+    fn test_migrate_entrypoint_bumps_version_after_normalizing() {
+        let env = Env::default();
+        let id = setup(&env);
+        env.as_contract(&id, || {
+            set_version(&env, V1_0_0);
+            seed_legacy(&env, &String::from_str(&env, "erin"), &legacy(&env, 7));
+        });
+        let target = Version::new(1, 1, 0).to_tuple();
+        env.as_contract(&id, || {
+            TrustBridgeContract::migrate(env.clone(), target).unwrap();
+        });
+        env.as_contract(&id, || {
+            assert_eq!(get_version(&env), Some(target));
+            let r = stored_as_current_layout(&env, &String::from_str(&env, "erin")).unwrap();
+            assert_eq!(r.registered_at, 7);
+        });
+        // Rollback / same-version re-migrate is explicitly unsupported.
+        env.as_contract(&id, || {
+            assert_eq!(
+                TrustBridgeContract::migrate(env.clone(), V1_0_0),
+                Err(crate::ContractError::InvalidVersion)
+            );
         });
     }
 }

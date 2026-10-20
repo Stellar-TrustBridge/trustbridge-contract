@@ -36,14 +36,16 @@ reference and migration guide from manual probing.
 Every `src/*.rs` file on disk is listed here — no more, no fewer
 (`audit.rs`, `batch.rs`, `domain.rs`, `error.rs`, `events.rs`, `lib.rs`,
 `merkle.rs`, `multisig_upgrade.rs`, `oracle_proof.rs`, `staged_wasm.rs`,
-`storage.rs`, `utils.rs`, `version.rs`). `src/lib.rs` owns the public
-contract interface (`TrustBridgeContract`) and all business logic; every
-other module is a helper it composes. Test-only code lives outside `src/`
-(see below) — no `src/` module exists solely for tests.
+`storage.rs`, `utils.rs`, `version.rs`), plus the `src/contract/` entrypoint
+modules and the `src/test.rs` unit-test module listed in the
+[module map](#module-map). `src/lib.rs` owns module wiring, re-exports and
+the `TrustBridgeContract` type; its entrypoints live in `src/contract/`.
 
 | Module | Responsibility |
 |--------|----------------|
-| `src/lib.rs` | Public contract interface (`TrustBridgeContract`), business logic, unit tests |
+| `src/lib.rs` | Module wiring, `pub use` re-exports, `#[contract] TrustBridgeContract`, shared private helpers (`event_domain`, `mark_verified`, …) |
+| `src/contract/*.rs` | `#[contractimpl]` entrypoints, one block per concern — see [module map](#module-map) |
+| `src/test.rs` | Unit tests for the contract entrypoints (`#[cfg(test)]` only) |
 | `src/storage.rs` | Storage keys, `ContributorRecord` / `Stats` types, persistence helpers, flat/chunked index maintenance, opaque cursor pagination internals (Issue #215) |
 | `src/events.rs` | Soroban contract events with topics (`#[contractevent]` structs) |
 | `src/error.rs` | Typed error enum (`ContractError`) and off-chain retry classification (`ErrorCategory`) |
@@ -62,6 +64,33 @@ other module is a helper it composes. Test-only code lives outside `src/`
 > it directly through the public read surface (see `docs/ABI.md` §
 > Cross-Contract Read Interface); a `registry_read_stub.rs` trait fixture was
 > staged for this and removed as unused (Issue #297).
+
+### Module map
+
+`TrustBridgeContract` entrypoints are split across `src/contract/` (Issue #601).
+Each file holds one `#[contractimpl]` block on the same type; Soroban merges
+them, so the exported entrypoints and contract spec are unchanged by the split.
+Every file starts with `use crate::*;` so it sees the same imports and private
+helpers that lived beside the single block in `lib.rs`. Helper methods shared
+between files are `pub(crate)` — `#[contractimpl]` only exports `pub fn`, so
+they stay off the ABI.
+
+| File | Entrypoints |
+|------|-------------|
+| `contract/admin.rs` | `initialize`, `pause` / `unpause`, guardian, emergency pause |
+| `contract/roles.rs` | Role grants (timelocked / expiring), network tag, verifier allowlist |
+| `contract/governance.rs` | Cooldown / verify limits, versioning, upgrade attestation & provenance, `upgrade`, staged WASM, multisig upgrade |
+| `contract/config.rs` | Verification config / expiry, audit logs and audit config |
+| `contract/registry.rs` | `migrate`, username helpers, `register` / `register_sponsored`, TTL, `remove` / `batch_remove` (dual control), lookups, exports, `set_paused` |
+| `contract/verify.rs` | `verify`, oracle allowlist & proofs, `batch_verify`, `revoke_verification`, bot status, verified count |
+| `contract/rotation.rs` | `rename`, delayed address rotation |
+| `contract/health.rs` | Pause reason, stats, last event ledger, `get_health` |
+| `contract/challenge.rs` | Challenge-period flow |
+| `contract/maintenance.rs` | Status helpers, reserved usernames, `compact_index`, `repair_index` |
+
+New entrypoints go in the file matching their concern; add a file (and list it
+here, in `contract/mod.rs`, and in `CONTRACT_SRCS` in `tests/auth_matrix.rs`)
+only for a genuinely new concern.
 
 ### `lib.rs` re-export strategy
 
@@ -117,14 +146,16 @@ constants everything else names. `events.rs` only depends on `domain.rs`
 | Pagination parity across the three export APIs (Issue #302) | `tests/pagination_parity.rs` |
 | Export page layout golden | `tests/export_page_layout.rs`, `abi/export_page.layout.golden` |
 | Timelocked role grants (Issues #220, #648) | `tests/integration.rs`, `tests/auth_matrix.csv` |
-| Audit reads (Issue #646) | `tests/integration.rs`, `src/lib.rs` unit tests |
+| Audit reads (Issue #646) | `tests/integration.rs`, `src/test.rs` unit tests |
+| Domain binding (Issue #659) | `tests/domain_binding.rs`, `tests/network_mismatch.rs`, `tests/username_case_fold.rs` |
+| NormalizeRegisteredAt migration (Issue #605) | `src/storage.rs` (`normalize_registered_at_migration_tests`) |
 | Dual-control batch_remove (Issue #219) | `tests/batch_remove_dual_control.rs` |
 | Challenge flow (Issue #214) | `tests/challenge.rs` |
 | Merkle proofs (Issue #216) | `tests/merkle_export.rs` |
 | Error-code stability (Issue #402) | `tests/contract_error_codes.rs`, `abi/contract_error_codes.golden` |
 | Bindings golden | `tests/bindings_golden.rs` |
 | Counter model proofs (Issue #241) | `tests/counter_proofs.rs` |
-| Property fuzz suite | `src/lib.rs` unit tests, `tests/fuzz/seeds.txt` — see `docs/REGISTRY_INVARIANTS.md` |
+| Property fuzz suite | `src/test.rs` unit tests, `tests/fuzz/seeds.txt` — see `docs/REGISTRY_INVARIANTS.md` |
 
 Related docs: [ABI](ABI.md) (entry-point reference, pagination selection
 guide, audit reads) · [REGISTRY_INVARIANTS](REGISTRY_INVARIANTS.md)
@@ -138,9 +169,9 @@ guide, audit reads) · [REGISTRY_INVARIANTS](REGISTRY_INVARIANTS.md)
   uses a small xorshift generator instead (see
   `docs/REGISTRY_INVARIANTS.md`). Integration tests under `tests/` link std
   normally.
-- When splitting a module (e.g. a future pagination or governance module),
-  update this table, the sketch above, and the `pub use` list in `lib.rs` in
-  the same PR.
+- When splitting a module (e.g. a future pagination module), update this
+  table, the sketch above, the [module map](#module-map), and the `pub use`
+  list in `lib.rs` in the same PR.
 
 ---
 
@@ -487,6 +518,35 @@ compatibility floor at 1.0.0 for callers that want to assert it explicitly.
 - **TTL extension:** Persistent entries may need periodic TTL extension on mainnet; document in [DEPLOYMENT.md](DEPLOYMENT.md). Estimator TTL schedule: [STORAGE_RENT_ESTIMATOR.md](STORAGE_RENT_ESTIMATOR.md).
 - **Username normalization:** Consider enforcing lowercase GitHub handles off-chain and in client SDKs.
 - **Multisig admin:** Admin address can be a multisig or smart account — no contract changes required.
+
+## Data Migrations
+
+`migrate(new_version)` (admin-only, `contract/registry.rs`) runs every step in
+`storage::MIGRATION_STEPS` whose `from_version` lies in `[current, new_version)`
+via `storage::run_migration_steps`, then records `new_version`. The version
+bump is the idempotency guard: a second `migrate` to the same or a lower
+version fails with `InvalidVersion`. **Rollback is not supported** — there is
+no down-migration, and the record layout change below is one-way.
+
+### v1.0.0 → v1.1.0: NormalizeRegisteredAt (Issue #605)
+
+v1.0.0 stored `ContributorRecord.registered_at` as `u64`; v1.1.0 narrows it to
+`u32`. The step walks the flat index and reads each record with
+`load_record_any_layout`, which accepts either the current layout or the
+v1.0.0 layout (`LegacyContributorRecordV100`, not exported to the contract
+spec) and rewrites it as the current layout. Legacy timestamps above
+`u32::MAX` saturate instead of wrapping. Records matching neither layout are
+skipped, so one bad entry cannot abort the batch.
+
+- **Fresh deploys** (`current >= 1.1.0`) skip the step entirely.
+- **Re-running** from v1.0.0 (e.g. after a partial migration) rewrites
+  already-normalized records identically.
+- Only records reachable from the flat index are visited; chunked-index pages
+  hold usernames only, so they need no rewrite.
+
+Tests: `storage::normalize_registered_at_migration_tests` seed synthetic
+v1.0.0 records directly into storage and assert normalization, saturation,
+idempotency, the fresh-deploy no-op and the post-`migrate` version.
 
 ## Migration Window Reads
 

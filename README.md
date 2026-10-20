@@ -48,7 +48,7 @@ This contract provides that mapping **on-chain**:
 - `get_address` — read-only lookup
 - `remove` — self-service or admin removal
 - `verify` — admin or `Verifier`-role holder marks contributor as GitHub-verified
-- `revoke_verification` — admin or `Verifier`-role holder revokes verified status
+- `revoke_verification` — admin or `Revoker`-role holder revokes verified status (a `Verifier` cannot revoke)
 - `get_all_registered` — admin-only full export for dashboard sync
 - `scripts/export_registry.sh` / `scripts/validate_registry.sh` — CLI export to JSON and validate-only diff against live state (see [Registry Export & Import](docs/DEPLOYMENT.md#registry-export--import))
 - `scripts/trustbridge_client.py` — typed Python wrappers for operator reads and batch operations. CLI/RPC failures raise `StellarCLIError` with an actionable `HINT:` line on stderr; operator scripts exit `0` on success and non-zero on failure (see [Admin Runbook](docs/ADMIN_RUNBOOK.md#python-operator-client))

@@ -15,7 +15,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Impersonation (registering someone else's GitHub username) | `stellar_address.require_auth()` — only the address owner can register |
 | Unauthorized removal | `caller` must auth as registrant or admin |
 | Unauthorized admin-only actions | `admin.require_auth()` on `get_all_registered`, `get_registered_paginated`, `set_role`, `pause`/`unpause` |
-| Unauthorized verification actions | `caller.require_auth()` on `verify` / `revoke_verification`; `caller` must be the admin or hold `Role::Verifier` (checked via `has_role_or_admin`) — any other caller gets `NotAuthorized` |
+| Unauthorized verification actions | `caller.require_auth()` on `verify` / `revoke_verification`; `caller` must be the admin or hold `Role::Verifier` for `verify` / `Role::Revoker` for `revoke_verification` (checked via `has_role_or_admin`) — any other caller gets `NotAuthorized` |
 | Double initialization | `AlreadyInitialized` error |
 | Admin storage mutated after init | No public setter writes `ADMIN_KEY` — only `initialize` does, gated by `AlreadyInitialized` (Issue #97) |
 | Malformed or oversized username input | `InvalidUsername` error, checked before auth and before any write |
@@ -343,6 +343,26 @@ Covered by `tests/integration.rs`
 `src/lib.rs` (`test_bot_set_by_unauthorized_fails`, …).
 
 ---
+
+## Username ↔ Deployment Binding (Issue #659)
+
+A username binding is valid only inside one deployment — one contract
+instance on one network. `src/domain.rs` names that deployment with
+`EventDomain` (contract id, network id, contract version, envelope version),
+stamped on every event, and `initialize` records the network id that every
+later guarded call re-checks.
+
+`tests/domain_binding.rs` covers:
+
+| Rule | Test |
+|------|------|
+| Event domain names the live contract, network and version | `test_event_domain_matches_live_deployment` |
+| Two deployments / two networks never share a domain (replay-safe dedupe key) | `test_event_domain_differs_across_deployments`, `test_event_domain_differs_across_networks` |
+| `register` on a foreign network fails with `NetworkMismatch` and writes nothing | `test_register_on_foreign_network_fails_closed_without_binding` |
+| A case variant cannot rebind a username without the current owner's signature | `test_case_variant_takeover_requires_owner_signature` |
+| Reserved names are rejected case-insensitively (`UsernameReserved`) | `test_reserved_username_case_variant_rejected` |
+| Malformed usernames fail with the stable `InvalidUsername` | `test_malformed_usernames_fail_with_invalid_username` |
+| `register` while paused fails with `Paused` and leaves no binding | `test_register_while_paused_leaves_no_binding` |
 
 ## Username Squatting Mitigations
 
