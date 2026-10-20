@@ -167,6 +167,31 @@ model. A few things to keep in mind:
 
 ---
 
+## Recalibrating after a protocol or SDK upgrade (Issue #676)
+
+A Soroban protocol upgrade or `soroban-sdk` version bump changes the
+test-host metering model, which can shift every baseline at once. Stale
+baselines either false-fail CI (costs rose for everyone) or hide real
+regressions (costs fell, widening the effective headroom). After such an
+upgrade:
+
+1. Land the upgrade on its own branch, with **no** contract logic changes,
+   so any cost delta is attributable to the upgrade alone.
+2. Run `make bench-budget-ci` on the old baselines and save the output —
+   this is the "before" evidence of the shift.
+3. Run `make bench-update-samples` to regenerate `ci/bench-samples.csv`.
+4. Check that the shift is roughly uniform across operations. A single
+   operation moving far more than the rest is a regression to investigate,
+   not a recalibration.
+5. Confirm the new values still sit under the hard caps passed to
+   `scripts/check_bench_regression.sh` by the `bench-budget-ci` target
+   (`--hard-cpu-cap`, `--hard-mem-cap`). If not, raising a cap is a
+   separate, explicitly reviewed change.
+6. Run `make bench-regression-selftest` to confirm the regression gate still
+   passes on matching input and fails on a regression.
+7. Commit the regenerated CSV with the SDK/protocol bump and include the
+   before/after table and the new `soroban-sdk` version in the PR.
+
 ## Updating baselines intentionally
 
 1. Make your code change.

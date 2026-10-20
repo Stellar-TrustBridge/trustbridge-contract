@@ -703,3 +703,83 @@ fn test_parity_coverage_complete() {
         "Should have at least 24 parity tests covering all three APIs"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// § Cross-Entrypoint Cursor Parity (Issue #675)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Walking the admin and public cursor exports with the same `limit` after
+/// removals must yield identical pages — same records, same `next_cursor`,
+/// same `has_more` — at every step, and a cursor issued by one entrypoint
+/// must resume the other at the same position.
+#[test]
+fn test_parity_admin_and_public_cursor_walks_are_identical() {
+    let (env, admin, contract_id) = setup();
+    for i in 0..7 {
+        let user = Address::generate(&env);
+        register_user(&env, &contract_id, &std::format!("user{}", i), &user);
+    }
+    remove_user(&env, &contract_id, &admin, "user2");
+    remove_user(&env, &contract_id, &admin, "user5");
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let mut cursor: Option<BytesN<8>> = None;
+        let mut total = 0u32;
+        loop {
+            let admin_page =
+                TrustBridgeContract::get_registered_paginated(env.clone(), cursor.clone(), 2)
+                    .unwrap();
+            let public_page =
+                TrustBridgeContract::get_public_paginated(env.clone(), cursor.clone(), 2).unwrap();
+            assert_eq!(admin_page, public_page, "admin/public pages drifted");
+            total += admin_page.records.len();
+            if !admin_page.has_more {
+                break;
+            }
+            cursor = admin_page.next_cursor;
+        }
+        assert_eq!(total, 5, "both walks must cover every surviving record");
+    });
+}
+
+/// Failure path: both entrypoints must reject the same invalid inputs with
+/// the same stable error.
+#[test]
+fn test_parity_admin_and_public_reject_invalid_limit_identically() {
+    let (env, _admin, contract_id) = setup();
+    let user = Address::generate(&env);
+    register_user(&env, &contract_id, "user0", &user);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        for limit in [0u32, u32::MAX] {
+            let admin_res = TrustBridgeContract::get_registered_paginated(env.clone(), None, limit);
+            let public_res = TrustBridgeContract::get_public_paginated(env.clone(), None, limit);
+            assert_eq!(
+                admin_res.clone().err(),
+                public_res.clone().err(),
+                "limit={limit}: admin/public error mismatch"
+            );
+            assert_eq!(admin_res.ok(), public_res.ok(), "limit={limit}: page mismatch");
+        }
+    });
+}
+
+/// Failure path: uninitialized contract fails identically on both exports.
+#[test]
+fn test_parity_admin_and_public_fail_identically_when_uninitialized() {
+    let env = Env::default();
+    let contract_id = env.register(TrustBridgeContract, ());
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::get_registered_paginated(env.clone(), None, 2).err(),
+            Some(ContractError::NotInitialized)
+        );
+        assert_eq!(
+            TrustBridgeContract::get_public_paginated(env.clone(), None, 2).err(),
+            Some(ContractError::NotInitialized)
+        );
+    });
+}

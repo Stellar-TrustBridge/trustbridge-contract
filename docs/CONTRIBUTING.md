@@ -705,6 +705,12 @@ Always run with `--test-threads=1` (the Makefile targets do this automatically).
 Parallel execution contaminates the Soroban host's global budget state and
 produces unstable measurements.
 
+### After a Soroban protocol or `soroban-sdk` upgrade
+
+Follow [Recalibrating after a protocol or SDK upgrade](BENCHMARK_BUDGETS.md#recalibrating-after-a-protocol-or-sdk-upgrade-issue-676):
+bump the SDK in isolation, regenerate baselines with
+`make bench-update-samples`, and run `make bench-regression-selftest`.
+
 ### Updating baselines after an intentional cost change
 
 1. Make your code or dependency change.

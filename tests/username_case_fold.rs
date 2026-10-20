@@ -10,7 +10,7 @@
 
 use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
 
-use trustbridge_contract::TrustBridgeContract;
+use trustbridge_contract::{ContractError, TrustBridgeContract};
 
 fn setup() -> (Env, Address, Address) {
     let env = Env::default();
@@ -139,5 +139,63 @@ fn test_remove_by_case_variant_removes_the_canonical_record() {
         ));
         let stats = TrustBridgeContract::get_stats(env.clone());
         assert_eq!(stats.total, 0);
+    });
+}
+
+// ── Locale-independent folding (Issue #674) ───────────────────────────────
+
+/// `I`/`i` fold the same way under every locale: a Turkish-locale fold
+/// (`I` -> `ı`, `i` -> `İ`) would break this lookup.
+#[test]
+fn test_ascii_i_folds_without_turkish_locale_rules() {
+    let (env, _admin, contract_id) = setup();
+    let user = Address::generate(&env);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(env.clone(), s(&env, "ISAAC"), user.clone(), Vec::new(&env))
+            .unwrap();
+        let rec = TrustBridgeContract::get_address(env.clone(), s(&env, "isaac")).unwrap();
+        assert_eq!(rec.stellar_address, user);
+        assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 1);
+    });
+}
+
+/// Characters that some locale-aware or Unicode folds map onto ASCII
+/// letters must be rejected, never folded into an existing identity.
+#[test]
+fn test_locale_specific_case_folds_cannot_collide_with_ascii_identity() {
+    let (env, _admin, contract_id) = setup();
+    let owner = Address::generate(&env);
+    let attacker = Address::generate(&env);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(env.clone(), s(&env, "kim"), owner.clone(), Vec::new(&env))
+            .unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "strasse"), Address::generate(&env), Vec::new(&env))
+            .unwrap();
+
+        for variant in [
+            "K\u{0130}M",  // Turkish dotted capital I (İ)
+            "k\u{0131}m",  // Turkish dotless small i (ı)
+            "\u{212A}im",  // Kelvin sign (folds to `k` under Unicode)
+            "stra\u{00DF}e", // German sharp s (full-folds to `ss`)
+            "",
+        ] {
+            assert_eq!(
+                TrustBridgeContract::register(
+                    env.clone(),
+                    s(&env, variant),
+                    attacker.clone(),
+                    Vec::new(&env)
+                )
+                .err(),
+                Some(ContractError::InvalidUsername),
+                "{variant:?} must be rejected, not folded"
+            );
+        }
+
+        assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 2);
+        let rec = TrustBridgeContract::get_address(env.clone(), s(&env, "KIM")).unwrap();
+        assert_eq!(rec.stellar_address, owner);
     });
 }

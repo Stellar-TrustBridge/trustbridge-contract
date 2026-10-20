@@ -36,7 +36,7 @@ FUTURENET_FRIENDBOT_URL ?= https://friendbot-futurenet.stellar.org
 FUTURENET_IDENTITY ?= $(SOURCE)
 FUTURENET_DRY_RUN ?= false
 
-.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser soak-cursor storage-keys-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-batch-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
+.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser soak-cursor storage-keys-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-batch-register-budget bench-budget-ci bench-regression-selftest bench-update-samples fmt lint docs docs-check abi check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
         invoke-verify invoke-revoke-verification invoke-get-all-registered invoke-export-paginated \
@@ -130,6 +130,9 @@ bench-budget-ci: ## Run all bench tests + regression check against ci/bench-samp
 		--hard-cpu-cap 25000000 \
 		--hard-mem-cap 3000000 \
 		< bench-output.txt
+
+bench-regression-selftest: ## Self-test the bench regression gate (pass on baseline, fail on regression)
+	@bash scripts/test_check_bench_regression.sh
 
 bench-update-samples: ## Regenerate ci/bench-samples.csv from current test measurements (run after intentional cost changes)
 	@echo "Regenerating bench baselines — this will overwrite ci/bench-samples.csv."

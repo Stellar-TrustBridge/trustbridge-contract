@@ -412,6 +412,13 @@ as the caller submitted it in that call, for display/audit fidelity —
 indexers that need to correlate an event against export/lookup data should
 fold the event's username themselves before comparing.
 
+**Locale independence (Issue #674).** The fold is a fixed byte-wise ASCII
+map (`A`–`Z` → `a`–`z`) and never consults a locale, so `I` always folds to
+`i` (never Turkish `ı`). Characters that locale-aware or Unicode folds map
+onto ASCII — Turkish `İ`/`ı`, the Kelvin sign `K` (U+212A), German `ß` —
+are rejected with `InvalidUsername` before folding, so they can never
+collide with an existing identity. Covered by `tests/username_case_fold.rs`.
+
 **Explicitly out of scope** (tracked as separate work): Unicode case folding
 (`IDNA`/`UTS46`-style normalization) and homoglyph detection (e.g. Cyrillic
 `а` vs ASCII `a`) — see **Unicode Rejection Policy** below, which already

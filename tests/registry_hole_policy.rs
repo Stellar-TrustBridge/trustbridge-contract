@@ -222,3 +222,100 @@ fn test_index_membership_property_holds_at_chunk_boundary() {
     });
     assert_index_membership_property(&env, &contract_id);
 }
+
+// ── batch_remove sparse gaps (Issue #673) ─────────────────────────────────
+
+fn register_names(env: &Env, contract_id: &Address, names: &[&str]) {
+    env.mock_all_auths();
+    env.as_contract(contract_id, || {
+        for name in names {
+            TrustBridgeContract::register(
+                env.clone(),
+                s(env, name),
+                Address::generate(env),
+                Vec::new(env),
+            )
+            .unwrap();
+        }
+    });
+}
+
+/// Walks `get_public_paginated` to the end with a small page size.
+fn walk_public(env: &Env, contract_id: &Address, limit: u32) -> Vec<String> {
+    let mut out = Vec::new(env);
+    env.as_contract(contract_id, || {
+        let mut cursor = None;
+        loop {
+            let page = TrustBridgeContract::get_public_paginated(env.clone(), cursor, limit).unwrap();
+            for (name, _) in page.records.iter() {
+                out.push_back(name);
+            }
+            if !page.has_more {
+                break;
+            }
+            cursor = page.next_cursor;
+        }
+    });
+    out
+}
+
+/// Asserts the paginated walk yields each expected name exactly once.
+fn assert_walk_is_exactly(env: &Env, contract_id: &Address, limit: u32, expected: &[&str]) {
+    let seen = walk_public(env, contract_id, limit);
+    assert_eq!(seen.len() as usize, expected.len(), "limit={limit} skipped or repeated a record");
+    for name in expected {
+        assert!(seen.contains(s(env, name)), "limit={limit} skipped {name}");
+    }
+}
+
+/// Sparse, non-contiguous holes from one `batch_remove` (first, middle,
+/// last) must keep the membership property and must not cause a paginated
+/// walk to skip or repeat any survivor.
+#[test]
+fn test_batch_remove_sparse_gaps_keep_index_and_pagination_intact() {
+    let (env, admin, contract_id) = setup();
+    let names = ["u0", "u1", "u2", "u3", "u4", "u5", "u6", "u7"];
+    register_names(&env, &contract_id, &names);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let mut batch = Vec::new(&env);
+        for name in ["u0", "u3", "u4", "u7"] {
+            batch.push_back(s(&env, name));
+        }
+        let summary = TrustBridgeContract::batch_remove(env.clone(), admin.clone(), batch).unwrap();
+        assert_eq!(summary.successful, 4);
+        assert_eq!(summary.failed, 0);
+    });
+    assert_index_membership_property(&env, &contract_id);
+
+    for limit in [1u32, 2, 3] {
+        assert_walk_is_exactly(&env, &contract_id, limit, &["u1", "u2", "u5", "u6"]);
+    }
+}
+
+/// Failure paths: removing absent names leaves the index untouched and
+/// counts as `failed`; an empty batch is rejected with a stable error and
+/// writes nothing.
+#[test]
+fn test_batch_remove_failures_leave_no_holes() {
+    let (env, admin, contract_id) = setup();
+    register_names(&env, &contract_id, &["a0", "a1", "a2"]);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let mut batch = Vec::new(&env);
+        batch.push_back(s(&env, "missing"));
+        batch.push_back(s(&env, "a1"));
+        let summary = TrustBridgeContract::batch_remove(env.clone(), admin.clone(), batch).unwrap();
+        assert_eq!(summary.successful, 1);
+        assert_eq!(summary.failed, 1);
+
+        assert_eq!(
+            TrustBridgeContract::batch_remove(env.clone(), admin.clone(), Vec::new(&env)).err(),
+            Some(trustbridge_contract::ContractError::InvalidBatchSize)
+        );
+    });
+    assert_index_membership_property(&env, &contract_id);
+    assert_walk_is_exactly(&env, &contract_id, 1, &["a0", "a2"]);
+}

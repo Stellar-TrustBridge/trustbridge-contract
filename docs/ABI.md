@@ -1053,6 +1053,16 @@ A well-formed signature that does not verify traps the invocation.
 
 ---
 
+### Cursor parity guarantee (Issue #675)
+
+`get_registered_paginated` (admin) and `get_public_paginated` (public) share
+one cursor implementation. For the same `cursor` and `limit` they return
+identical `ExportPage` values (records, `next_cursor`, `has_more`), so a
+cursor issued by either entrypoint resumes the other at the same position,
+and both reject invalid input with the same `ContractError`. The only
+difference is auth: the admin variant requires admin auth. Enforced by
+`tests/pagination_parity.rs`.
+
 ## Pagination API Selection Guide (Issue #302)
 
 The contract exposes **three pagination APIs** for reading the registry. They

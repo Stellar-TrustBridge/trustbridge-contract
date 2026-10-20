@@ -67,6 +67,18 @@ compacts, re-registers the exact same names at new addresses, then asserts
 `get_stats().total`, `get_verified_count()`, the chunked index, and a full
 paginated walk all agree with the live record set (I10).
 
+### Hole policy
+
+Removals (`remove`, `batch_remove`) may leave index chunks below
+`CHUNK_SIZE`; such sparse gaps are allowed and are not compacted
+automatically (`compact_index` reclaims them). The correctness property is
+membership only: a username is in the flat index iff it appears in exactly
+one chunk and has a live record. Paginated exports must therefore return
+every surviving record exactly once regardless of how many holes a removal
+left, and a failed or rejected `batch_remove` (absent names, empty batch)
+must not create holes. Covered by `tests/registry_hole_policy.rs`
+(Issue #673).
+
 ### Challenge-period operations preserve count invariants (Issue #214)
 
 The squatter-challenge flow (`start_challenge`, `cancel_challenge`,
