@@ -437,6 +437,9 @@ human reading every reported diff.
 
 ## Troubleshooting
 
+For Futurenet wasm install / RPC failures, see the triage table in
+[`FUTURENET_ONBOARDING.md`](FUTURENET_ONBOARDING.md#troubleshooting-wasm-install-failures).
+
 ### `wasm32v1-none` target not installed
 
 ```bash

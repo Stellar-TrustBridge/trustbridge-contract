@@ -973,8 +973,16 @@ pub fn get_index_generation(env: &Env) -> u32 {
 }
 
 fn bump_index_generation(env: &Env) {
-    let next = get_index_generation(env).saturating_add(1);
+    let previous = get_index_generation(env);
+    let next = previous.saturating_add(1);
     env.storage().instance().set(&INDEX_GEN_KEY, &next);
+    // Let dashboards restart in-flight paginated syncs (Issue #688).
+    crate::events::IndexGenerationBumpedEvent {
+        previous_generation: previous,
+        generation: next,
+        timestamp: env.ledger().timestamp(),
+    }
+    .publish(env);
 }
 
 /// Packs a flat-index offset together with the current index generation into

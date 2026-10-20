@@ -45,7 +45,7 @@ FUTURENET_DRY_RUN ?= false
         invoke-propose-batch-remove invoke-execute-batch-remove invoke-cancel-batch-remove \
         invoke-get-pending-batch-remove \
         ttl-keeper \
-	export-registry validate-registry dr-test futurenet-smoke assert-build \
+	export-registry validate-registry dr-test futurenet-smoke test-futurenet-smoke assert-build \
 	xdr-fixtures diff-test
 
 help: ## Show this help
@@ -569,6 +569,9 @@ invoke-get-pending-batch-remove: require-contract-id ## View pending dual-contro
 dr-test: ## Run a non-destructive export/validate round-trip on a disposable instance
 	CONTRACT_ID=$(CONTRACT_ID) SOURCE=$(SOURCE) ADMIN_SOURCE=$(ADMIN_SOURCE) \
 		NETWORK=$(NETWORK) STELLAR=$(STELLAR) ./scripts/dr_test.sh
+
+test-futurenet-smoke: ## Offline checks for futurenet_smoke_test.sh happy and failure paths (Issue #687)
+	./scripts/test_futurenet_smoke.sh
 
 futurenet-smoke: ## Deploy and smoke-check Futurenet using pinned RPC and Friendbot endpoints
 	ADMIN=$(ADMIN) SOURCE=$(SOURCE) IDENTITY=$(FUTURENET_IDENTITY) \

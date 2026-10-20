@@ -25,6 +25,7 @@ type; these rows match `src/events.rs` emission.
 | `VerifiedEvent` | `verified_event` | `stellar_address`, `timestamp` |
 | `VerificationRevokedEvent` | `verification_revoked_event` | `stellar_address`, `timestamp` |
 | `RemovedEvent` | `removed_event` | `stellar_address`, `timestamp` |
+| `IndexGenerationBumpedEvent` | `index_generation_bumped_event` | `previous_generation`, `generation`, `timestamp` — see [Index generation bumps](#index-generation-bumps-issue-688) |
 | `UpgradedEvent` | `upgraded_event` | `version`, `timestamp` |
 | `PausedEvent` / `UnpausedEvent` | `paused_event` / `unpaused_event` | `timestamp` |
 | `RoleGrantedEvent` / `RoleRevokedEvent` | `role_granted_event` / `role_revoked_event` | `role`, `admin`, `timestamp` / `admin`, `timestamp` |
@@ -39,6 +40,24 @@ type; these rows match `src/events.rs` emission.
 
 > **RoleGrantPendingEvent:** decode `role`, `admin`, `activate_at`, and
 > `timestamp` from data. Only `address` is topic-indexed besides the symbol.
+
+## Index generation bumps (Issue #688)
+
+`remove` / `batch_remove` (any path through `storage::remove_from_index`) shift
+registry index positions and bump the index generation. Each bump publishes
+`IndexGenerationBumpedEvent` with `previous_generation`, `generation`, and
+`timestamp` (no extra topics). From that ledger on, every cursor issued under
+`previous_generation` fails with `InvalidCursor`.
+
+Dashboard handling:
+
+1. On `index_generation_bumped_event`, drop any stored pagination cursor.
+2. Restart the paginated sync from the first page (no cursor).
+3. Events are emitted once per bump, so a `batch_remove` of N records emits N
+   bumps; it is safe to debounce and restart once per ledger.
+
+A rejected removal (unauthorized, paused, unknown username) does not bump the
+generation and emits no event.
 
 ## Features & Integration Overview
 

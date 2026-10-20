@@ -446,6 +446,22 @@ pub struct AuditConfigChangedEvent {
     pub timestamp: u64,
 }
 
+/// Emitted whenever the registry index generation is bumped (Issue #688).
+///
+/// A bump means every pagination cursor issued before it is now rejected with
+/// `InvalidCursor`. Dashboards should subscribe to this event and restart any
+/// in-flight paginated sync from the first page instead of discovering the
+/// rebuild from a failed read.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexGenerationBumpedEvent {
+    /// Generation before the bump.
+    pub previous_generation: u32,
+    /// Generation now embedded in newly issued cursors.
+    pub generation: u32,
+    pub timestamp: u64,
+}
+
 #[cfg(test)]
 mod test {
     use crate::{TrustBridgeContract, TrustBridgeContractClient};

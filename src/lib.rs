@@ -31,6 +31,7 @@ pub use events::{
     EmergencyClearedEvent,
     EmergencyPausedEvent,
     GuardianChangedEvent,
+    IndexGenerationBumpedEvent,
     PausedEvent,
     RegisteredEvent,
     RemovedEvent,

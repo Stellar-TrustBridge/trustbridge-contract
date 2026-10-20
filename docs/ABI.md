@@ -326,6 +326,17 @@ variant and returns `None` for any unrecognized code. Every code round-trips
 through `from_code(variant.code()) == Some(variant)` — verified by the unit
 tests in `src/lib.rs` (`test_error_from_code_is_inverse_of_code`).
 
+#### User-facing message snapshot (Issue #686)
+
+The `Display` text of every live code is frozen in
+`abi/contract_error_messages.golden` (`<code> <Variant> <message>`).
+Integrators may key UX copy off either the numeric code or this message.
+`tests/contract_error_codes.rs` fails if a message drifts or a live code is
+missing, and `scripts/check_error_codes.sh` fails if the snapshot's codes
+disagree with the enum. Reserved and unknown codes carry no message.
+Rewording a message is an integrator-facing change: update `src/error.rs`, the
+snapshot, and `CHANGELOG.md` together.
+
 #### Off-chain retry classification
 
 `ContractError::category()` (`src/error.rs`) maps every variant to one of three
@@ -492,6 +503,17 @@ than checked at runtime.
 
 Passing more than 25 entries returns `InvalidBatchSize` (code 14) **before any
 state is written**.
+
+### Hard caps at a glance (Issue #685)
+
+| Entry point | Cap | Source | Accepted | Rejected with `InvalidBatchSize` |
+|-------------|-----|--------|----------|----------------------------------|
+| `batch_verify` | 25 | `MAX_WRITE_BATCH` / `BatchConfig::for_writes()` | 1..=25 | 0, ≥ 26 |
+| `batch_remove` | 25 | `MAX_WRITE_BATCH` / `BatchConfig::for_writes()` | 1..=25 | 0, ≥ 26 |
+| `extend_registry_ttl` | 100 | `BatchConfig::default()` | 1..=100 | 0, ≥ 101 |
+
+Boundary proofs (ceiling accepted, ceiling + 1 and empty rejected with no state
+change) live in `tests/batch_hard_caps.rs`.
 
 ### Fail-before-write
 

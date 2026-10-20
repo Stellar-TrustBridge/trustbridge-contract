@@ -214,6 +214,7 @@ registered_event|registered|registry
 removed_event|removed|registry
 renamed_event|renamed|registry
 bot_status_changed_event|bot_status_changed|registry
+index_generation_bumped_event|index_generation_bumped|registry
 verified_event|verified|attest
 verification_revoked_event|verification_revoked|attest
 verification_configured_event|verification_configured|attest

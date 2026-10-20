@@ -156,3 +156,26 @@ Or use the Make target:
 
 ```bash
 make invoke-register   CONTRACT_ID=$CONTRACT_ID   GITHUB_USER=$GITHUB_USER   STELLAR_ADDR=$STELLAR_ADDR
+
+## Troubleshooting wasm install failures
+
+Triage table for the most common `stellar contract upload` / `deploy` failures on
+Futurenet (Issue #687). `scripts/futurenet_smoke_test.sh` links here when the
+Stellar CLI is missing or `scripts/deploy.sh` fails; `make test-futurenet-smoke`
+checks those failure paths offline.
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| `Stellar CLI 'stellar' not found on PATH` | CLI not installed or not on `PATH` | `cargo install --locked stellar-cli@26.1.0`, or pass `STELLAR=/path/to/stellar` |
+| `error[E0463]: can't find crate for core` / target missing | `wasm32v1-none` target not installed | `rustup target add wasm32v1-none`, then `make build` |
+| `reference-types not enabled` / wasm validation error on upload | Built with legacy `wasm32-unknown-unknown` on Rust 1.82+ | Rebuild with `make build` (uses `wasm32v1-none`) |
+| `Account not found` / `txNoAccount` | Source identity not funded on Futurenet | Re-run Step 1 (Friendbot); Futurenet resets periodically |
+| `HostError: Budget, ExceededLimit` / `txInsufficientFee` on upload | WASM too large or fee too low | Check the size budget in `docs/DEPLOYMENT.md#wasm-size-budget`; retry with a higher `--fee` |
+| `network passphrase mismatch` / `NetworkMismatch` | Identity or RPC pointed at another network | Use `--network futurenet` and the pinned `FUTURENET_RPC_URL` |
+| `error sending request` / RPC timeout / HTTP 5xx | Futurenet RPC unavailable or rate-limited | Retry later; override `FUTURENET_RPC_URL` only with a known compatible endpoint |
+| `deployments/futurenet.json not found` | `deploy.sh` failed before writing output | Scroll up for the first error, fix it, then re-run `make futurenet-smoke` |
+| `Error(Contract, #1)` (`AlreadyInitialized`) on `initialize` | Re-running `INIT=true` against an existing contract | Deploy a fresh contract or skip `INIT` |
+
+Run `make futurenet-smoke FUTURENET_DRY_RUN=true` to print the resolved
+commands without contacting the network.
+

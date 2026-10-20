@@ -257,3 +257,76 @@ fn display_strings_match_documented_catalog() {
         );
     }
 }
+
+// User-facing message snapshot (Issue #686).
+//
+// `abi/contract_error_messages.golden` freezes the `Display` text of every
+// live code so integrators can map messages to UX copy without churn.
+
+const MESSAGES_GOLDEN: &str = include_str!("../abi/contract_error_messages.golden");
+
+/// Parse `<code> <Variant> <message>` lines, skipping comments and blanks.
+fn message_entries() -> Vec<(u32, String, String)> {
+    MESSAGES_GOLDEN
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let mut parts = line.splitn(3, ' ');
+            let code = parts
+                .next()
+                .and_then(|c| c.parse().ok())
+                .expect("message golden entries must start with a u32 code");
+            let name = parts.next().expect("missing variant name").to_string();
+            let message = parts.next().unwrap_or("").trim().to_string();
+            (code, name, message)
+        })
+        .collect()
+}
+
+#[test]
+fn display_messages_match_snapshot() {
+    for (code, name, message) in message_entries() {
+        let error = variant_for_name(&name);
+        assert_eq!(error.code(), code, "{name} snapshot code drifted");
+        assert!(!message.is_empty(), "{name} must have a non-empty message");
+        assert_eq!(
+            error.to_string(),
+            message,
+            "Display message for {name} drifted from abi/contract_error_messages.golden"
+        );
+    }
+}
+
+#[test]
+fn message_snapshot_covers_every_live_code() {
+    let live: Vec<(u32, String)> = entries()
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Entry::Live { code, name } => Some((code, name)),
+            Entry::Reserved { .. } => None,
+        })
+        .collect();
+    let snapshot: Vec<(u32, String)> = message_entries()
+        .into_iter()
+        .map(|(code, name, _)| (code, name))
+        .collect();
+    assert_eq!(
+        snapshot, live,
+        "abi/contract_error_messages.golden must list exactly the live codes, in order"
+    );
+}
+
+#[test]
+fn reserved_and_unknown_codes_have_no_message() {
+    let snapshot_codes: Vec<u32> = message_entries().iter().map(|(c, _, _)| *c).collect();
+    for entry in entries() {
+        if let Entry::Reserved { code } = entry {
+            assert!(
+                !snapshot_codes.contains(&code),
+                "reserved code {code} must not carry a user-facing message"
+            );
+        }
+    }
+    assert_eq!(ContractError::from_code(u32::MAX), None);
+}

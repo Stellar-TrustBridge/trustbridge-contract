@@ -34,12 +34,22 @@ if [[ "$DRY_RUN" == "true" ]]; then
   exit 0
 fi
 
+TROUBLESHOOT_DOC="docs/FUTURENET_ONBOARDING.md#troubleshooting-wasm-install-failures"
+
 if [[ -z "$ADMIN" ]]; then
   echo "ERROR: ADMIN must be set to a Futurenet G-address."
   exit 1
 fi
 
-NETWORK=futurenet INIT=true ADMIN="$ADMIN" SOURCE="$SOURCE" RPC_URL="$RPC_URL" STELLAR="$STELLAR" "$ROOT/scripts/deploy.sh"
+if ! command -v "$STELLAR" >/dev/null 2>&1; then
+  echo "ERROR: Stellar CLI '${STELLAR}' not found on PATH. See ${TROUBLESHOOT_DOC}"
+  exit 1
+fi
+
+if ! NETWORK=futurenet INIT=true ADMIN="$ADMIN" SOURCE="$SOURCE" RPC_URL="$RPC_URL" STELLAR="$STELLAR" "$ROOT/scripts/deploy.sh"; then
+  echo "ERROR: Futurenet wasm install/deploy failed. See ${TROUBLESHOOT_DOC}"
+  exit 1
+fi
 
 DEPLOY_FILE="deployments/futurenet.json"
 if [[ ! -f "$DEPLOY_FILE" ]]; then

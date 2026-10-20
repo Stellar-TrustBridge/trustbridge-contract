@@ -1,0 +1,69 @@
+# Frozen user-facing Display messages for ContractError (Issue #686).
+#
+# Format: `<code> <Variant> <message>`. Dashboards and the indexer map these
+# strings to UX copy, so a reworded message is an integrator-facing change.
+# `tests/contract_error_codes.rs` asserts every live code in
+# `contract_error_codes.golden` appears here and that `Display` matches.
+# To change a message on purpose, update src/error.rs, this file, and
+# CHANGELOG.md together.
+
+1 AlreadyInitialized contract already initialized
+2 NotInitialized contract not initialized
+3 NotAuthorized caller not authorized
+4 NotRegistered github username not registered
+5 AlreadyVerified username already verified
+6 NotVerified username not verified
+7 Paused contract is paused
+8 CooldownActive upgrade cooldown active
+9 InvalidVersion invalid version
+10 InvalidRole invalid role
+11 InvalidUsername invalid github username
+12 AttestationExpired attestation expired
+13 UnattestedWasm unattested wasm
+14 InvalidBatchSize invalid batch size
+15 InvalidReasonCode invalid reason code
+16 ZeroAddress zero address
+17 ChallengeAlreadyActive challenge already active
+18 NoChallengeActive no challenge active
+19 ChallengeNotResolvable challenge not resolvable
+20 ChallengeActive challenge active
+21 InvalidPauseReason invalid pause reason
+22 AlreadyReserved username already reserved
+23 NotReserved username not reserved
+24 UsernameReserved username reserved
+25 ReservedListFull reserved list full
+26 AdminTransferPending admin transfer pending
+27 AdminTransferDelayActive admin transfer delay active
+28 NoPendingAdminTransfer no pending admin transfer
+29 AttestationRequired attestation required
+30 NetworkMismatch network mismatch
+31 VerifierAllowlistFull verifier allowlist full
+32 VerifierNotAllowlisted verifier not allowlisted
+33 VerifierExpiryInPast verifier expiry in past
+34 NoPendingRoleGrant no pending role grant
+35 RoleGrantNotReady role grant not ready
+36 ProvenanceMissing provenance missing
+37 ProvenanceMismatch provenance mismatch
+39 StagedWasmMismatch staged wasm mismatch
+40 UpgradeProposalAlreadyPending upgrade proposal already pending
+41 NoUpgradeProposalPending no upgrade proposal pending
+42 UpgradeProposalAlreadyApproved upgrade proposal already approved
+43 UpgradeProposalDelayActive upgrade proposal delay active
+44 UpgradeProposalInsufficientApprovals upgrade proposal insufficient approvals
+46 FallbackListFull fallback list full
+47 UsernameTaken username taken
+48 RotationRequired rotation required
+49 RotationPending rotation pending
+50 NoRotationPending no rotation pending
+51 RotationNotReady rotation not ready
+52 InvalidCursor invalid cursor
+53 VerifyRateLimited verify rate limited
+54 DualControlRequired dual control required
+55 BatchRemoveProposalPending batch remove proposal pending
+56 NoPendingBatchRemove no pending batch remove
+57 RoleExpired role expired
+58 OracleProofBadLayout oracle proof bad layout
+59 OracleProofNotAllowlisted oracle proof not allowlisted
+60 OracleProofExpired oracle proof expired
+61 OracleProofBadSignature oracle proof bad signature
+62 AddressMismatch address mismatch

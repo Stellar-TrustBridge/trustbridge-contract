@@ -106,6 +106,26 @@ contract budget consumption with `ContractError::InvalidBatchSize`.
 
 ---
 
+### Batch hard caps and boundary tests (Issue #685)
+
+| Cap | Value | Applies to |
+|-----|-------|-----------|
+| `MAX_WRITE_BATCH` | 25 | `batch_verify`, `batch_remove` |
+| `BatchConfig::default().max_batch_size` | 100 | `extend_registry_ttl` |
+
+`tests/batch_hard_caps.rs` proves each cap accepts exactly its ceiling and
+rejects ceiling + 1 and empty input with `InvalidBatchSize` before any write.
+Raising a cap requires re-running the budget benchmarks above, not just editing
+the constant (see the `MAX_WRITE_BATCH` doc comment in `src/batch.rs`).
+
+> **Footprint note:** with the test host's default per-invocation resource
+> limits, a full 25-entry `batch_verify` of fresh records measured ~155
+> footprint ledger entries and ~77 write entries, above the 100 / 50 limits.
+> The boundary tests therefore disable resource limits, matching the existing
+> pagination tests. Operators submitting near-ceiling `batch_verify` calls on a
+> network with those limits should split into smaller batches until the
+> cap is re-derived against ledger-entry limits, not just CPU/memory.
+
 ## CI job
 
 The `bench-budget` job in `.github/workflows/ci.yml` runs after the main

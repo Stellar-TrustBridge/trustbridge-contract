@@ -127,6 +127,9 @@ impl Default for BatchConfig {
 ///
 /// Raising this requires re-running that benchmark, not just editing the
 /// constant.
+///
+/// Boundary behaviour (25 accepted, 26 and 0 rejected with `InvalidBatchSize`
+/// before any write) is pinned by `tests/batch_hard_caps.rs` (Issue #685).
 pub const MAX_WRITE_BATCH: u32 = 25;
 
 impl BatchConfig {

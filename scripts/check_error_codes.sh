@@ -131,6 +131,14 @@ if ! diff -u "$TMP/enum.txt" "$TMP/doccomment.txt" > "$TMP/doc.diff"; then
   sed 's/^/  /' "$TMP/doc.diff" >&2
 fi
 
+# --- 7. The user-facing message snapshot (Issue #686) lists the same codes.
+MESSAGES="abi/contract_error_messages.golden"
+grep -E '^[0-9]+ [A-Za-z][A-Za-z0-9]* .+$' "$MESSAGES" | awk '{print $1" "$2}' | sort -n > "$TMP/messages.txt"
+if ! diff -u "$TMP/enum.txt" "$TMP/messages.txt" > "$TMP/messages.diff"; then
+  fail "$MESSAGES does not match the enum (- enum, + messages):"
+  sed 's/^/  /' "$TMP/messages.diff" >&2
+fi
+
 if (( FAILED )); then
   printf '\nerror-codes: FAILED — see above. Each discriminant must mean exactly one thing\n' >&2
   printf 'error-codes: in src/error.rs, from_code, %s, and %s.\n' "$GOLDEN" "$ABI_MD" >&2
