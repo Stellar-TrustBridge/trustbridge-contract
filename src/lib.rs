@@ -2524,6 +2524,15 @@ impl TrustBridgeContract {
             return Err(ContractError::ZeroAddress);
         }
 
+        // The sponsor is a maintainer who vouches for the registration; a
+        // zero/placeholder sponsor has no real signer and is rejected before
+        // auth, mirroring the `stellar_address` guard above (Issue #300
+        // extended). On a live network `require_auth` would reject it, but
+        // `mock_all_auths` in tests/sandboxes bypasses that check.
+        if is_zero_address(&env, &sponsor) {
+            return Err(ContractError::ZeroAddress);
+        }
+
         if has_challenge(&env, &github_username) {
             return Err(ContractError::ChallengeActive);
         }
@@ -4123,6 +4132,17 @@ impl TrustBridgeContract {
         let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
         let pending = storage_get_pending_rotation(&env, &github_username)
             .ok_or(ContractError::NoRotationPending)?;
+
+        // Defense-in-depth: `request_address_rotation` already rejected a zero
+        // `new_address` before storing the pending rotation, but a tampered or
+        // repaired storage entry could still hold one. Re-check before the
+        // address is applied to the record, so a zero/burn address can never
+        // become a live registration's `stellar_address` through the rotation
+        // execute path (Issue #300 extended).
+        if is_zero_address(&env, &pending.new_address) {
+            remove_pending_rotation(&env, &github_username);
+            return Err(ContractError::ZeroAddress);
+        }
 
         let timestamp = env.ledger().timestamp();
         if timestamp < pending.executable_at {
@@ -6969,6 +6989,66 @@ mod test {
                 TrustBridgeContract::get_ever_verified_count(env.clone()),
                 1,
                 "the historical count still remembers it"
+            );
+        });
+    }
+
+    /// Defense-in-depth: `execute_address_rotation` must reject a pending
+    /// rotation whose stored `new_address` is the zero/burn address, even
+    /// though `request_address_rotation` already validates. A tampered or
+    /// repaired storage entry must never let a zero address become a live
+    /// registration (Issue #300 extended).
+    #[test]
+    fn test_execute_address_rotation_rejects_zero_new_address() {
+        let env = Env::default();
+        let (_admin, user, _other, contract_id) = setup(&env);
+        let zero = Address::from_str(&env, crate::utils::ZERO_ADDRESS_STRKEY);
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                username(&env, "octocat"),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+        });
+
+        // Simulate storage tampering: plant a pending rotation whose
+        // new_address is the zero address, bypassing the request guard.
+        env.as_contract(&contract_id, || {
+            set_pending_rotation(
+                &env,
+                &username(&env, "octocat"),
+                &crate::storage::PendingRotation {
+                    new_address: zero.clone(),
+                    requested_at: env.ledger().timestamp(),
+                    executable_at: 0, // already elapsed
+                },
+            );
+        });
+
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            let result =
+                TrustBridgeContract::execute_address_rotation(env.clone(), username(&env, "octocat"));
+            assert_eq!(result, Err(ContractError::ZeroAddress));
+        });
+
+        // The record must be untouched and the pending entry cleared.
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_address(env.clone(), username(&env, "octocat"))
+                    .unwrap()
+                    .stellar_address,
+                user,
+                "the address must not have moved to zero"
+            );
+            assert!(
+                TrustBridgeContract::get_pending_rotation(env.clone(), username(&env, "octocat"))
+                    .is_none(),
+                "the zero-address pending rotation must be cleared"
             );
         });
     }
