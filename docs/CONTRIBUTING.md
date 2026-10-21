@@ -52,6 +52,28 @@ build / wasm-size). Every pull request and push to `main` runs these jobs from
 `make ci` runs the same set with the strict hash gate enabled, so it fails while
 `wasm-hash.pin` still contains `PLACEHOLDER` or does not match the built WASM.
 
+### CI Caching
+
+Soroban WASM builds cache dependencies and compilation artifacts in GitHub Actions to speed up PR feedback cycles. Caching uses the [Swatinem/rust-cache](https://github.com/Swatinem/rust-cache) action, keyed on `Cargo.lock` and `rust-toolchain.toml` to ensure cache invalidation when:
+
+- Lockfile changes (dependency version bump or security update)
+- Rust toolchain version bumps
+- Stellar CLI version changes
+
+**Cache scopes:**
+- `check` job: General cargo check caching
+- `clippy` job: Cargo metadata and incremental builds (key: `cargo-check-...`)
+- `build` job: Full wasm32v1-none WASM compilation (key: `soroban-...-<STELLAR_CLI_VERSION>`)
+- `oracle-proof-tests` job: Cargo caching for oracle_proof tests
+- `cargo-deny` job: Cached binary for cargo-deny
+- `mutants` job: Cargo caching for mutation testing
+
+**Cache behavior:**
+- Second CI run on the same branch shows cache hit for dependencies and incremental builds, reducing total run time by 2–5 minutes.
+- Cache miss on lockfile or toolchain change rebuilds cleanly (no stale artifacts).
+- Fork PRs without cache write permissions remain functional; they simply run without cache.
+- Secrets are never stored in cache paths.
+
 ### Codespaces / devcontainer setup
 
 The repository devcontainer installs the same pinned CLI and WASM target used
