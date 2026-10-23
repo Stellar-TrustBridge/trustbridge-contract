@@ -385,12 +385,7 @@ fn test_v1_export_merkle_golden_vectors() {
     );
 
     assert_eq!(
-        TrustBridgeContract::merkle_leaf_hash(
-            env.clone(),
-            s(&env, "alice"),
-            alice.clone(),
-            true,
-        ),
+        TrustBridgeContract::merkle_leaf_hash(env.clone(), s(&env, "alice"), alice.clone(), true,),
         expected_alice
     );
     assert_eq!(
@@ -398,12 +393,7 @@ fn test_v1_export_merkle_golden_vectors() {
         expected_bob
     );
     assert_eq!(
-        TrustBridgeContract::merkle_leaf_hash(
-            env.clone(),
-            s(&env, "carol"),
-            carol.clone(),
-            true,
-        ),
+        TrustBridgeContract::merkle_leaf_hash(env.clone(), s(&env, "carol"), carol.clone(), true,),
         expected_carol
     );
 
@@ -465,7 +455,8 @@ fn test_merkle_root_stability_across_shuffled_page_limits_and_offsets() {
     // Verify some users; leave others unverified (their addresses get redacted to zero address).
     for verified_name in ["alice", "carol", "eve", "heidi", "judy"] {
         env.as_contract(&contract_id, || {
-            TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, verified_name)).unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, verified_name))
+                .unwrap();
         });
     }
 
@@ -477,7 +468,10 @@ fn test_merkle_root_stability_across_shuffled_page_limits_and_offsets() {
     assert_eq!(baseline_page.total, 11);
     assert!(!baseline_page.has_more);
     let canonical_snapshot_root = baseline_page.merkle_root.clone();
-    assert_ne!(canonical_snapshot_root, BytesN::from_array(&env, &[0u8; 32]));
+    assert_ne!(
+        canonical_snapshot_root,
+        BytesN::from_array(&env, &[0u8; 32])
+    );
 
     // Check independent root of baseline records matches contract merkle_root
     assert_eq!(
@@ -495,7 +489,8 @@ fn test_merkle_root_stability_across_shuffled_page_limits_and_offsets() {
 
         loop {
             let page = env.as_contract(&contract_id, || {
-                TrustBridgeContract::get_public_paginated(env.clone(), cursor.clone(), limit).unwrap()
+                TrustBridgeContract::get_public_paginated(env.clone(), cursor.clone(), limit)
+                    .unwrap()
             });
             page_count += 1;
 
@@ -612,7 +607,8 @@ fn test_page_merkle_root_identical_for_same_underlying_record_set() {
 
     // Both limit 2 and limit 10 from tail_cursor return records [dave, erin]
     let tail_lim2 = env.as_contract(&contract_id, || {
-        TrustBridgeContract::get_public_paginated(env.clone(), Some(tail_cursor.clone()), 2).unwrap()
+        TrustBridgeContract::get_public_paginated(env.clone(), Some(tail_cursor.clone()), 2)
+            .unwrap()
     });
     let tail_lim10 = env.as_contract(&contract_id, || {
         TrustBridgeContract::get_public_paginated(env.clone(), Some(tail_cursor), 10).unwrap()
@@ -640,10 +636,7 @@ fn test_empty_tail_page_and_single_record_edge_cases() {
     assert_eq!(empty_page.total, 0);
     assert!(!empty_page.has_more);
     assert_eq!(empty_page.next_cursor, None);
-    assert_eq!(
-        empty_page.merkle_root,
-        BytesN::from_array(&env, &[0u8; 32])
-    );
+    assert_eq!(empty_page.merkle_root, BytesN::from_array(&env, &[0u8; 32]));
     assert_eq!(
         empty_page.merkle_root,
         independent_root_of_records(&env, &empty_page.records)
@@ -653,13 +646,8 @@ fn test_empty_tail_page_and_single_record_edge_cases() {
     let addr = Address::generate(&env);
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(
-            env.clone(),
-            s(&env, "solo"),
-            addr.clone(),
-            SVec::new(&env),
-        )
-        .unwrap();
+        TrustBridgeContract::register(env.clone(), s(&env, "solo"), addr.clone(), SVec::new(&env))
+            .unwrap();
     });
 
     for limit in [1u32, 2, 5, 10] {
@@ -672,8 +660,10 @@ fn test_empty_tail_page_and_single_record_edge_cases() {
         assert_eq!(page.next_cursor, None);
 
         // For unverified user in get_public_paginated, address is redacted to zero address
-        let zero_addr =
-            Address::from_str(&env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF");
+        let zero_addr = Address::from_str(
+            &env,
+            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        );
         let expected_leaf = leaf_hash(&env, &s(&env, "solo"), &zero_addr, false);
         assert_eq!(
             page.merkle_root, expected_leaf,
@@ -687,7 +677,12 @@ fn test_empty_tail_page_and_single_record_edge_cases() {
         let mut page_leaves = SVec::new(&env);
         page_leaves.push_back(expected_leaf.clone());
         let proof = build_proof(&env, &page_leaves, 0);
-        assert!(verify_proof(&env, &expected_leaf, &proof, &page.merkle_root));
+        assert!(verify_proof(
+            &env,
+            &expected_leaf,
+            &proof,
+            &page.merkle_root
+        ));
     }
 
     // 3. Multi-page pagination reaching empty tail page:
@@ -806,13 +801,8 @@ fn test_bot_flag_changes_maintain_leaf_and_root_consistency() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::register(
-            env.clone(),
-            username.clone(),
-            addr.clone(),
-            SVec::new(&env),
-        )
-        .unwrap();
+        TrustBridgeContract::register(env.clone(), username.clone(), addr.clone(), SVec::new(&env))
+            .unwrap();
     });
 
     // Mark as bot

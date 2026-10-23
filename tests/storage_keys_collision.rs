@@ -49,7 +49,10 @@ fn s(env: &Env, text: &str) -> String {
 fn test_instance_keys_are_unique() {
     // This test serves as documentation of the compile-time guarantee.
     // All instance key symbols are unique by construction.
-    assert!(true, "Instance keys are unique (compile-time verified by linter)");
+    assert!(
+        true,
+        "Instance keys are unique (compile-time verified by linter)"
+    );
 }
 
 // ── Persistent key discriminator uniqueness ──────────────────────────────────
@@ -70,7 +73,10 @@ fn test_persistent_key_discriminators_are_unique() {
     // 3. No duplicate symbol strings exist across any namespace.
     //
     // This test documents the automated guarantee.
-    assert!(true, "Persistent key discriminators are unique (linter verified)");
+    assert!(
+        true,
+        "Persistent key discriminators are unique (linter verified)"
+    );
 }
 
 // ── Happy path: registration storage and retrieval ────────────────────────────
@@ -167,7 +173,8 @@ fn test_failure_path_register_while_paused_is_rejected() {
 
         // Attempt to register while paused — should fail.
         let username = s(&env, "bob");
-        let result = TrustBridgeContract::register(env.clone(), username, user1.clone(), Vec::new(&env));
+        let result =
+            TrustBridgeContract::register(env.clone(), username, user1.clone(), Vec::new(&env));
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), ContractError::Paused);
     });
@@ -189,15 +196,24 @@ fn test_collision_case_folding_is_intentional() {
     env.as_contract(&contract_id, || {
         // Register "Alice".
         let alice_upper = s(&env, "Alice");
-        TrustBridgeContract::register(env.clone(), alice_upper.clone(), user1.clone(), Vec::new(&env))
-            .unwrap();
+        TrustBridgeContract::register(
+            env.clone(),
+            alice_upper.clone(),
+            user1.clone(),
+            Vec::new(&env),
+        )
+        .unwrap();
 
         // Try to register "alice" (lowercase) — should collide (same canonical key).
         let alice_lower = s(&env, "alice");
-        let result = TrustBridgeContract::register(env.clone(), alice_lower, user2.clone(), Vec::new(&env));
+        let result =
+            TrustBridgeContract::register(env.clone(), alice_lower, user2.clone(), Vec::new(&env));
         assert!(result.is_err());
         // Verify the error indicates collision due to case-folding.
-        assert!(result.is_err(), "Case-folded username should collide with existing registration");
+        assert!(
+            result.is_err(),
+            "Case-folded username should collide with existing registration"
+        );
     });
 }
 
@@ -259,4 +275,3 @@ fn test_compound_multiple_operations_no_collision() {
         assert_eq!(stats.verified, 0, "No registrations are verified yet");
     });
 }
-
