@@ -2080,8 +2080,19 @@ pub fn verifier_slots_remaining(env: &Env, now: u64) -> u32 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[soroban_sdk::contracttype]
 pub struct VerificationConfig {
+    /// Attestation symbol recorded on subsequent `VerifiedEvent`s.
     pub attestation: Symbol,
+    /// Seconds a verification stays active before lazy expiry (Issue #218).
+    /// `0` disables expiry entirely.
     pub expires_in: u64,
+    /// Reserved for a future multi-confirmation verification policy
+    /// (Issue #589). Stored, round-tripped by `get_verification_config` and
+    /// mirrored in `VerificationConfiguredEvent`, but **not consulted** by
+    /// `verify`, `batch_verify` or `verify_with_oracle_proof`: a single
+    /// authorized verifier still verifies in one call regardless of this
+    /// value. Do not rely on it for any security property; leave it at `0`
+    /// until on-chain semantics are defined. See
+    /// `docs/SECURITY.md#verificationconfigthreshold-is-reserved-issue-589`.
     pub threshold: u32,
 }
 

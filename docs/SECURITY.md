@@ -31,6 +31,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Stolen or transferred GitHub account staying `verified` (and payout-eligible) indefinitely | `config_verification`'s `expires_in` now drives an actual expiry, checked via `is_verification_active` — see [Time-Bounded Verification](#time-bounded-verification-issue-218) |
 | Single compromised admin key wiping a large slice of the registry in one `batch_remove` call | Above a configurable size threshold, `batch_remove` requires a second, distinct admin-equivalent signature — see [Dual-Control batch_remove](#dual-control-batch_remove-issue-219) |
 | Auditor trusting an unbound, unsigned `export_registry.sh` JSON dump | `export_attestation` binds a page to a SHA-256 digest, version, and ledger for offline comparison — see [Signed Export Attestation](#signed-export-attestation-issue-223) |
+| Operators believing `config_verification`'s `threshold` gives M-of-N verifier confirmation | It is **reserved** and never read by any verify path — one authorized verifier still verifies in one call; see [`VerificationConfig.threshold` is reserved](#verificationconfigthreshold-is-reserved-issue-589) |
 
 ### Export record binding (Issue #672)
 
@@ -302,6 +303,36 @@ checked by `test_conformance_public_reads_available_while_paused` in
   re-registered to a different Stellar address, the record becomes unverified,
   the verified count decreases, and any later `verify()` applies to the new
   address only.
+
+### `VerificationConfig.threshold` is reserved (Issue #589)
+
+`config_verification`'s `threshold` parameter is stored, returned by
+`get_verification_config`, and mirrored in `VerificationConfiguredEvent`,
+but **no verify path reads it**. `verify`, `batch_verify` and
+`verify_with_oracle_proof` authorize the caller exactly as before, and a
+single authorized verifier flips a record to `verified` regardless of the
+configured value.
+
+This is deliberate, not an oversight. Enforcing an M-of-N confirmation
+policy would be a breaking change to the verify state machine — it needs
+per-user confirmation storage, distinct-verifier counting, cleanup on
+rename/remove/revoke, and an answer for how it interacts with the Issue
+#293 verifier allowlist, the Issue #292 rate cap, and oracle proofs — so it
+requires its own design before any code change. Documenting the field as
+reserved is strictly safer than half-enforcing it: an unenforced
+confirmation threshold would give operators the false belief that one
+compromised verifier can no longer verify an account they control.
+
+Operator guidance:
+
+- Leave `threshold` at `0` until on-chain semantics are defined; every
+  value behaves identically today.
+- Unset vs configured is distinguishable only through
+  `get_verification_config` (`None` vs `Some`). An unset config also means
+  no expiry window applies: the Issue #218 expiry check reads as "never
+  expires" until `config_verification` runs.
+- The verifier allowlist (Issue #293) — not `threshold` — is the effective
+  control over *who* may verify. `threshold` does not interact with it.
 
 ### Registration cooldown enforcement
 

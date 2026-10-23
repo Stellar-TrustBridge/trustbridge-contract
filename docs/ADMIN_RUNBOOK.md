@@ -315,11 +315,15 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 
 ```bash
 stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
-  -- config_verification --caller "$ADMIN" --attestation github_att --expires-in 3600 --threshold 2
+  -- config_verification --caller "$ADMIN" --attestation github_att --expires-in 3600 --threshold 0
 ```
 
 - **Auth:** admin only, and callable **once** — a second call fails
   `AlreadyInitialized`. `attestation` is a `Symbol` (≤ 9 chars, `[a-z0-9_]`).
+- **`threshold` is reserved** (Issue #589): stored and returned by
+  `get_verification_config`, but never consulted by any verify path — one
+  authorized verifier still verifies in one call. Leave it at `0`; see
+  [SECURITY.md](SECURITY.md#verificationconfigthreshold-is-reserved-issue-589).
 
 ---
 

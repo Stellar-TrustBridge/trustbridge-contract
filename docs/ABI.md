@@ -1393,6 +1393,12 @@ Boundary tests: `test_paginated_export_at_max_page_limit`,
 
 Stores the verification configuration parameters (attestation symbol, expiration window, and threshold). Can only be called once by the contract admin. Emits `VerificationConfiguredEvent` on success.
 
+**Parameter semantics:**
+
+- `attestation` — `Symbol` recorded on subsequent `VerifiedEvent`s.
+- `expires_in` — seconds a verification stays active before lazy expiry (Issue #218); `0` disables expiry entirely (a verification never lapses).
+- `threshold` — **reserved, not enforced on-chain** (Issue #589). It is stored, round-tripped by `get_verification_config`, and mirrored verbatim in `VerificationConfiguredEvent`, but it is **not consulted** by `verify`, `batch_verify`, or `verify_with_oracle_proof`: any single authorized verifier still verifies in one call regardless of the configured value. It exists so a future multi-confirmation policy can be activated without a storage migration. Operators should leave it at `0` and must not rely on it for any security property — an unenforced "M-of-N confirmations" knob would be worse than no knob at all, because it looks like a control that is not there.
+
 | | |
 |---|---|
 | **Auth** | Admin |
@@ -1402,14 +1408,14 @@ Stores the verification configuration parameters (attestation symbol, expiration
 
 ```bash
 stellar contract invoke --id $ID --source admin --network testnet --send=yes \
-  -- config_verification --caller G... --attestation github_att --expires-in 3600 --threshold 2
+  -- config_verification --caller G... --attestation github_att --expires-in 3600 --threshold 0
 ```
 
 ---
 
 ### `get_verification_config() -> Option<VerificationConfig>`
 
-Returns the stored verification configuration (`attestation`, `expires_in`, `threshold`), or `None` if `config_verification` has not been called yet. Read-only; no auth required.
+Returns the stored verification configuration (`attestation`, `expires_in`, `threshold`), or `None` if `config_verification` has not been called yet. Read-only; no auth required. `threshold` round-trips exactly as configured but is reserved — see [`config_verification`](#config_verificationcaller-address-attestation-symbol-expires_in-u64-threshold-u32---result-contracterror).
 
 ---
 
@@ -2054,7 +2060,9 @@ data:   { attestation, expires_in, threshold, timestamp }
 
 Emitted by `config_verification` on the (one-time) successful write of the
 verification parameters. The same values are readable afterwards via
-`get_verification_config`.
+`get_verification_config`. The `threshold` field mirrors the stored value
+verbatim but is **reserved** — it is not enforced by any verify path today
+(Issue #589, see [`config_verification`](#config_verificationcaller-address-attestation-symbol-expires_in-u64-threshold-u32---result-contracterror)).
 
 | Test | What it checks |
 |------|----------------|

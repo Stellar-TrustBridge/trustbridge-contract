@@ -2243,6 +2243,12 @@ impl TrustBridgeContract {
     /// Stores the attestation symbol, expiry window, and threshold. May only
     /// be called once — a second invocation returns [`ContractError::AlreadyInitialized`].
     ///
+    /// `threshold` is **reserved** (Issue #589): it is stored and mirrored in
+    /// [`VerificationConfiguredEvent`], but no verify path reads it — `verify`,
+    /// `batch_verify` and `verify_with_oracle_proof` behave identically for
+    /// every configured value. See
+    /// `docs/SECURITY.md#verificationconfigthreshold-is-reserved-issue-589`.
+    ///
     /// Emits [`VerificationConfiguredEvent`]. The stored configuration can be
     /// read back with [`get_verification_config`][Self::get_verification_config].
     ///
@@ -2303,6 +2309,9 @@ impl TrustBridgeContract {
     }
 
     /// Returns the stored verification configuration, or `None` if not configured.
+    ///
+    /// `threshold` round-trips exactly as configured but is reserved and not
+    /// enforced by any verify path (Issue #589).
     #[must_use]
     pub fn get_verification_config(env: Env) -> Option<VerificationConfig> {
         get_verification_config(&env)
