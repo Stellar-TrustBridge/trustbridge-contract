@@ -1057,6 +1057,15 @@ fields and a sibling-hash path, like any standard Merkle proof. See
 the contract's own tree code) that verifies for a member and fails for a
 non-member.
 
+#### Cross-page Merkle root stability (Issue #619)
+
+Merkle roots in `get_public_paginated` and exported record snapshots satisfy cross-page root stability:
+- **Snapshot Determinism**: For a fixed, unchanged registry snapshot, reconstructing the exported records via sequential pagination yields an identical record sequence and identical full-export Merkle root regardless of the `limit` parameter or page boundary splits (e.g. limit 1, 2, 5, 10, or 50).
+- **Page Offset and Window Stability**: When different page queries return the same underlying record set (such as tail pages where `limit >= remaining_records`), `ExportPage.merkle_root` is identical across calls.
+- **Empty Tail and Single-Record Edge Cases**: An empty registry or a cursor past the end of the registry returns an empty record set with the canonical all-zero sentinel root (`[0u8; 32]`). A single-record page root is strictly equal to that single leaf's hash.
+- **Mutation Sensitivity**: Removing a record invalidates prior roots and previous page cursors. Changing bot status via `set_bot_status` preserves leaf consistency under the v1 leaf schema.
+- **Initialization Gate**: Uninitialized contract calls fail with `ContractError::NotInitialized` rather than returning an empty root.
+
 #### ExportPage layout compatibility
 
 The checked-in golden layout at
