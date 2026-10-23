@@ -1006,8 +1006,13 @@ pub fn get_index_generation(env: &Env) -> u32 {
     env.storage().instance().get(&INDEX_GEN_KEY).unwrap_or(0)
 }
 
+/// Wraps rather than saturates (Issue #693): a saturating bump would pin the
+/// generation at `u32::MAX`, so every removal after that point would leave
+/// outstanding cursors valid against a shifted index. Wrapping keeps each
+/// bump distinct from the generation it replaces; a collision needs exactly
+/// 2^32 removals between issuing and resuming a cursor.
 fn bump_index_generation(env: &Env) {
-    let next = get_index_generation(env).saturating_add(1);
+    let next = get_index_generation(env).wrapping_add(1);
     env.storage().instance().set(&INDEX_GEN_KEY, &next);
 }
 
@@ -2966,5 +2971,289 @@ mod pending_reverify_tests {
             assert!(removed, "first false write must have removed the key");
             assert!(!env.storage().persistent().has(&key));
         });
+    }
+}
+
+// ── Storage footprint budget check (Issue #661) ─────────────────────────────
+//
+// Measures the XDR-serialized size of the keys that grow with the registry and
+// compares them against the machine-readable budget table in
+// `docs/STORAGE_FOOTPRINT.md`. A new field on `ContributorRecord`, a larger
+// `CHUNK_SIZE`, or a fatter instance map fails CI here instead of silently
+// raising rent. Run via `make storage-footprint-check`.
+#[cfg(test)]
+mod storage_footprint_budget_tests {
+    extern crate std;
+
+    use super::*;
+    use crate::TrustBridgeContract;
+    use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
+    use std::{
+        format,
+        string::{String as StdString, ToString},
+        vec::Vec as StdVec,
+    };
+
+    const FOOTPRINT_DOC: &str = include_str!("../docs/STORAGE_FOOTPRINT.md");
+    const BEGIN: &str = "<!-- footprint-budget:begin -->";
+    const END: &str = "<!-- footprint-budget:end -->";
+
+    /// GitHub's username cap — measuring at the cap gives a worst-case bound.
+    const MAX_USERNAME_LEN: usize = 39;
+
+    /// Parses `| \`key\` | <max_bytes> |` rows between the budget markers.
+    fn parse_budgets(doc: &str) -> Result<StdVec<(StdString, u32)>, StdString> {
+        let start = doc
+            .find(BEGIN)
+            .ok_or("missing footprint-budget:begin marker")?;
+        let end = doc.find(END).ok_or("missing footprint-budget:end marker")?;
+        if end < start {
+            return Err("footprint-budget markers out of order".into());
+        }
+        let mut out = StdVec::new();
+        for line in doc[start + BEGIN.len()..end].lines() {
+            let line = line.trim();
+            if !line.starts_with("| `") {
+                continue;
+            }
+            let cells: StdVec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+            if cells.len() < 2 {
+                return Err(format!("malformed budget row: {line}"));
+            }
+            let key = cells[0].trim_matches('`').to_string();
+            let max = cells[1]
+                .parse::<u32>()
+                .map_err(|_| format!("budget for `{key}` is not a byte count: {}", cells[1]))?;
+            out.push((key, max));
+        }
+        if out.is_empty() {
+            return Err("footprint budget table is empty".into());
+        }
+        Ok(out)
+    }
+
+    /// Every measured key must have a budget and fit under it; every budget
+    /// must correspond to a measured key so stale rows are caught too.
+    fn check_budgets(
+        measured: &[(&str, u32)],
+        budgets: &[(StdString, u32)],
+    ) -> Result<(), StdString> {
+        let mut errors = StdVec::new();
+        for (key, bytes) in measured {
+            match budgets.iter().find(|(k, _)| k == key) {
+                None => errors.push(format!("`{key}` measured at {bytes} B has no budget row")),
+                Some((_, max)) if bytes > max => errors.push(format!(
+                    "`{key}` measured at {bytes} B exceeds budget {max} B"
+                )),
+                Some(_) => {}
+            }
+        }
+        for (key, _) in budgets {
+            if !measured.iter().any(|(k, _)| k == key) {
+                errors.push(format!("budget row `{key}` is not measured by this test"));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("\n"))
+        }
+    }
+
+    fn max_len_username(env: &Env, i: u32) -> String {
+        let prefix = format!("u{i:05}");
+        let name = format!("{prefix}{}", "a".repeat(MAX_USERNAME_LEN - prefix.len()));
+        String::from_str(env, &name)
+    }
+
+    /// Registers one full chunk of max-length usernames and returns the
+    /// XDR size of each growing key. Each registration is its own invocation,
+    /// as on-chain, so no single call trips the per-transaction limits.
+    fn measure(env: &Env) -> StdVec<(&'static str, u32)> {
+        let admin = Address::generate(env);
+        let contract_id = env.register(TrustBridgeContract, ());
+        let client = crate::TrustBridgeContractClient::new(env, &contract_id);
+        env.mock_all_auths();
+        client.initialize(&admin);
+        for i in 0..CHUNK_SIZE {
+            client.register(
+                &max_len_username(env, i),
+                &Address::generate(env),
+                &Vec::new(env),
+            );
+        }
+        env.as_contract(&contract_id, || {
+            let record = get_record(env, &max_len_username(env, 0)).unwrap();
+            let chunk = get_chunk(env, 0);
+            let index = get_index(env);
+            assert_eq!(
+                chunk.len(),
+                CHUNK_SIZE,
+                "fixture must fill exactly one chunk"
+            );
+            std::vec![
+                ("reg", record.to_xdr(env).len()),
+                ("chunk", chunk.to_xdr(env).len()),
+                ("idx_per_user", index.to_xdr(env).len() / CHUNK_SIZE),
+            ]
+        })
+    }
+
+    #[test]
+    fn measured_keys_fit_documented_footprint_budget() {
+        let env = Env::default();
+        let measured = measure(&env);
+        let budgets = parse_budgets(FOOTPRINT_DOC).unwrap_or_else(|e| panic!("{e}"));
+        if let Err(e) = check_budgets(&measured, &budgets) {
+            panic!("storage footprint budget check FAILED — update docs/STORAGE_FOOTPRINT.md only for an intentional change:\n{e}\nmeasured: {measured:?}");
+        }
+    }
+
+    #[test]
+    fn over_budget_measurement_is_rejected() {
+        let budgets = std::vec![("reg".to_string(), 100)];
+        let err = check_budgets(&[("reg", 101)], &budgets).unwrap_err();
+        assert!(err.contains("exceeds budget 100 B"), "{err}");
+    }
+
+    #[test]
+    fn unbudgeted_and_stale_keys_are_rejected() {
+        let budgets = std::vec![("stale".to_string(), 10)];
+        let err = check_budgets(&[("newkey", 1)], &budgets).unwrap_err();
+        assert!(
+            err.contains("`newkey` measured at 1 B has no budget row"),
+            "{err}"
+        );
+        assert!(err.contains("budget row `stale` is not measured"), "{err}");
+    }
+
+    #[test]
+    fn malformed_budget_table_fails_with_stable_error() {
+        assert_eq!(
+            parse_budgets("no markers").unwrap_err(),
+            "missing footprint-budget:begin marker"
+        );
+        let empty = format!("{BEGIN}\n{END}");
+        assert_eq!(
+            parse_budgets(&empty).unwrap_err(),
+            "footprint budget table is empty"
+        );
+        let bad = format!("{BEGIN}\n| `reg` | lots |\n{END}");
+        assert!(parse_budgets(&bad)
+            .unwrap_err()
+            .contains("not a byte count"));
+    }
+}
+
+// ── Storage rent playbook consistency (Issue #660) ──────────────────────────
+//
+// `docs/STORAGE_RENT.md` carries the operator TTL-extension playbook. Its
+// constants table is checked here so an operator never schedules a keeper
+// against numbers the contract no longer uses. Run via
+// `make storage-rent-check`.
+#[cfg(test)]
+mod storage_rent_playbook_tests {
+    extern crate std;
+
+    use super::*;
+    use std::{
+        format,
+        string::{String as StdString, ToString},
+        vec::Vec as StdVec,
+    };
+
+    const RENT_DOC: &str = include_str!("../docs/STORAGE_RENT.md");
+    const BEGIN: &str = "<!-- rent-playbook:begin -->";
+    const END: &str = "<!-- rent-playbook:end -->";
+
+    /// Keeper cadence the playbook commits to: two-thirds of the threshold,
+    /// so a missed run still leaves ~10 days of margin before archival.
+    const KEEPER_INTERVAL: u32 = TTL_THRESHOLD / 3 * 2;
+
+    fn parse_playbook(doc: &str) -> Result<StdVec<(StdString, u32)>, StdString> {
+        let start = doc
+            .find(BEGIN)
+            .ok_or("missing rent-playbook:begin marker")?;
+        let end = doc.find(END).ok_or("missing rent-playbook:end marker")?;
+        if end < start {
+            return Err("rent-playbook markers out of order".into());
+        }
+        let mut out = StdVec::new();
+        for line in doc[start + BEGIN.len()..end].lines() {
+            let line = line.trim();
+            if !line.starts_with("| `") {
+                continue;
+            }
+            let cells: StdVec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+            if cells.len() < 2 {
+                return Err(format!("malformed playbook row: {line}"));
+            }
+            let name = cells[0].trim_matches('`').to_string();
+            let value = cells[1]
+                .parse::<u32>()
+                .map_err(|_| format!("`{name}` value is not a number: {}", cells[1]))?;
+            out.push((name, value));
+        }
+        if out.is_empty() {
+            return Err("rent playbook table is empty".into());
+        }
+        Ok(out)
+    }
+
+    fn expected() -> [(&'static str, u32); 5] {
+        [
+            ("LEDGERS_PER_DAY", LEDGERS_PER_DAY),
+            ("TTL_THRESHOLD", TTL_THRESHOLD),
+            ("TTL_BUMP", TTL_BUMP),
+            ("KEEPER_INTERVAL", KEEPER_INTERVAL),
+            (
+                "MAX_KEEPER_BATCH",
+                crate::batch::BatchConfig::default().max_batch_size,
+            ),
+        ]
+    }
+
+    #[test]
+    fn playbook_constants_match_contract() {
+        let documented = parse_playbook(RENT_DOC).unwrap_or_else(|e| panic!("{e}"));
+        let expected = expected();
+        assert_eq!(
+            documented.len(),
+            expected.len(),
+            "playbook table rows: {documented:?}"
+        );
+        for (name, value) in expected {
+            let doc_value = documented
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("docs/STORAGE_RENT.md playbook is missing `{name}`"))
+                .1;
+            assert_eq!(
+                doc_value, value,
+                "docs/STORAGE_RENT.md playbook `{name}` = {doc_value}, contract uses {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeper_interval_leaves_margin_before_threshold() {
+        assert!(KEEPER_INTERVAL < TTL_THRESHOLD);
+        assert!(TTL_THRESHOLD < TTL_BUMP);
+        assert_eq!(KEEPER_INTERVAL, LEDGERS_PER_DAY * 20);
+    }
+
+    #[test]
+    fn malformed_playbook_fails_with_stable_error() {
+        assert_eq!(
+            parse_playbook("nothing here").unwrap_err(),
+            "missing rent-playbook:begin marker"
+        );
+        let bad = format!("{BEGIN}\n| `TTL_BUMP` | ninety days |\n{END}");
+        assert!(parse_playbook(&bad).unwrap_err().contains("not a number"));
+        let empty = format!("{BEGIN}\n{END}");
+        assert_eq!(
+            parse_playbook(&empty).unwrap_err(),
+            "rent playbook table is empty"
+        );
     }
 }

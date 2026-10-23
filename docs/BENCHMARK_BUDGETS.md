@@ -179,3 +179,16 @@ model. A few things to keep in mind:
 
 Do **not** bump baselines to silence a regression without understanding its
 cause. A cost increase that cannot be explained is a bug.
+
+---
+
+## Storage footprint budget
+
+CPU/memory budgets above do not cover **bytes stored**, which drive rent.
+Those are gated separately by `make storage-footprint-check`
+(`storage_footprint_budget_tests` in `src/storage.rs`, CI job
+`storage-budgets`), against the `max_bytes` table in
+[STORAGE_FOOTPRINT.md](STORAGE_FOOTPRINT.md#measured-footprint-budget-ci-check).
+A new storage key that grows with the registry must add a row there, or the
+check fails.
+

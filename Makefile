@@ -36,7 +36,7 @@ FUTURENET_FRIENDBOT_URL ?= https://friendbot-futurenet.stellar.org
 FUTURENET_IDENTITY ?= $(SOURCE)
 FUTURENET_DRY_RUN ?= false
 
-.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser soak-cursor storage-keys-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-batch-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
+.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser soak-cursor storage-keys-check storage-footprint-check storage-rent-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-batch-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
         invoke-verify invoke-revoke-verification invoke-get-all-registered invoke-export-paginated \
@@ -95,6 +95,12 @@ soak-cursor: ## Run the deterministic export_cursor soak property test (CURSOR_S
 
 storage-keys-check: ## Fail if a storage.rs key is missing from docs/STORAGE_KEYS.md
 	./scripts/check_storage_keys.sh
+
+storage-footprint-check: ## Fail if measured storage key sizes exceed the budget table in docs/STORAGE_FOOTPRINT.md
+	cargo test --lib storage_footprint_budget_tests
+
+storage-rent-check: ## Fail if the TTL playbook constants in docs/STORAGE_RENT.md drift from src/storage.rs
+	cargo test --lib storage_rent_playbook_tests
 
 bindings-golden: ## Verify the get_address simulate golden fixture (UPDATE_GOLDEN=1 to regenerate)
 	cargo test --test bindings_golden -- --nocapture

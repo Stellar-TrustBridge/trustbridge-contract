@@ -89,6 +89,26 @@ jobs:
       - name: Run oracle_proof module tests
         run: cargo test --lib oracle_proof
 
+  storage-budgets:
+    name: Storage footprint and rent playbook checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Same targets as `make storage-footprint-check` / `make storage-rent-check`.
+      - name: Storage footprint budget (Issue #661)
+        run: cargo test --lib storage_footprint_budget_tests
+
+      - name: Storage rent playbook constants (Issue #660)
+        run: cargo test --lib storage_rent_playbook_tests
+
   cross-contract-deny:
     name: cross-contract register denial
     runs-on: ubuntu-latest

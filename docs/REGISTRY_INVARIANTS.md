@@ -39,6 +39,21 @@ Related docs: [ABI](ABI.md) · [ARCHITECTURE](ARCHITECTURE.md) · [SECURITY](SEC
 | I10 | After remove → compact → re-register of the same names, `count` and `vcount` stay in sync with the live record set and the chunked index stays hole-free | `test_issue306_remove_compact_reregister_counter_parity` |
 | I11 | After mixed `batch_verify` / `batch_remove` calls (duplicates, unregistered names), `get_stats().total` equals the enumerable index length and `verified` equals live verified records | `tests/counter_proofs.rs::proof_counters_match_index_under_mixed_batches` |
 | I12 | A rejected batch (`InvalidBatchSize`) moves no counter and leaves the index untouched | `tests/counter_proofs.rs::proof_rejected_batch_moves_no_counter` |
+| I13 | A pagination cursor decodes only against the `INDEX_GEN` it was issued under; a cursor from any other generation (older, newer, or across the `u32::MAX` wrap) returns `InvalidCursor` on both `get_public_paginated` and `get_registered_paginated` | `test_public_paginated_rejects_cursor_from_any_other_generation`, `test_generation_wraps_at_u32_max_and_still_invalidates_cursors` |
+
+### Cursors from other index generations (Issue #693)
+
+Every cursor embeds the `INDEX_GEN` (`idx_gen` instance key) current when it
+was issued; `remove` bumps the generation because it shifts every later
+position. `decode_cursor` (`src/storage.rs`) rejects any mismatch — not only
+older generations — so a stale or forged cursor can never resume at a drifted
+offset and leak or skip records. The bump **wraps** at `u32::MAX` instead of
+saturating: a saturating counter would freeze at `u32::MAX`, and every later
+removal would leave outstanding cursors valid against a shifted index.
+
+Recovery for clients is unchanged: on `InvalidCursor`, restart from
+`cursor = None` (see [DASHBOARD_SYNC.md](DASHBOARD_SYNC.md)). Covered by the
+I13 tests in `tests/cursor_pagination.rs`.
 
 ### `get_verified_count()` / `get_stats().verified` parity (Issue #90)
 

@@ -3,9 +3,9 @@
 Design-only estimate of the registry's on-chain storage footprint at
 representative sizes, so maintainers have a planning number for rent budgets
 and for when the contract needs an upgrade to change its storage strategy.
-No code changes; a follow-up can wire up automated measurement (e.g. a
-`cargo test` that reads `env.budget()` / ledger snapshot sizes at seeded
-registry sizes) against the estimates below.
+The estimates below are paired with a measured, CI-enforced budget for the
+keys that grow with the registry — see
+[Measured footprint budget (CI check)](#measured-footprint-budget-ci-check).
 
 Related: [ARCHITECTURE.md](ARCHITECTURE.md) (storage layout) ·
 [ABI.md](ABI.md) (function reference) · `src/storage.rs`, `src/events.rs`
@@ -34,7 +34,7 @@ The registry currently writes:
 | `admin`, `count`, `vcount`, `paused`, `cdown`, `lastupg`, `ver`, `chkcnt`, `prov`, `attest` | instance | No — fixed count | Scalars + the two WASM-provenance structs |
 | `idx` | instance | **Yes — linearly** | `Vec<String>` of *every* registered username, in one entry |
 | `(reg, username)` | persistent | Yes — one entry per registration | `ContributorRecord` |
-| `(chunk, chunk_idx)` | persistent | Yes — one entry per 100 usernames | `Vec<String>` slice (`CHUNK_SIZE = 100`, `src/storage.rs`) |
+| `(chunk, chunk_idx)` | persistent | Yes — one entry per 50 usernames | `Vec<String>` slice (`CHUNK_SIZE = 50`, `src/storage.rs`) |
 | `(role, address)` | persistent | No — scales with privileged addresses, not N | `Role` |
 | `(lastact, username)` | persistent | Only for usernames with a recorded cooldown action | `u64` timestamp |
 
@@ -151,13 +151,47 @@ for a "planning number":
 
 ---
 
+## Measured footprint budget (CI check)
+
+The estimates above are for planning. The table below is the **enforced**
+budget: `storage_footprint_budget_tests` in `src/storage.rs` registers one full
+chunk (`CHUNK_SIZE`) of worst-case 39-character usernames, reads each growing
+key back from storage, and compares its XDR-serialized size against these
+rows. CI runs it in the `storage-budgets` job; locally run
+`make storage-footprint-check`.
+
+The check fails when:
+
+- a measured key exceeds its `max_bytes` (e.g. a new `ContributorRecord`
+  field, or a larger `CHUNK_SIZE`);
+- a measured key has no row here (a new growing key must be budgeted);
+- a row here is no longer measured (stale budget);
+- the table is missing, empty, or has a non-numeric budget.
+
+Raise a budget only for an intentional layout change, in the same PR, and
+recompute the estimates above and in
+[BENCHMARK_BUDGETS.md](BENCHMARK_BUDGETS.md#storage-footprint-budget).
+
+Measured at the time of writing: `reg` 220 B, `chunk` 2,412 B,
+`idx_per_user` 48 B. Budgets carry ~15% headroom.
+
+<!-- footprint-budget:begin -->
+| Key | max_bytes | What is measured |
+|---|---:|---|
+| `reg` | 256 | One `ContributorRecord` value (39-char username) |
+| `chunk` | 2560 | One full `(chunk, idx)` entry — `CHUNK_SIZE` usernames |
+| `idx_per_user` | 56 | Flat `idx` instance entry bytes per registered username |
+<!-- footprint-budget:end -->
+
+---
+
 ## Recomputing these numbers
 
 Redo this estimate if any of the following change:
 
 - `ContributorRecord`, `WasmProvenance`, or `WasmAttestation` gain/remove
   fields.
-- `CHUNK_SIZE` (`src/storage.rs`) changes from 100.
+- `CHUNK_SIZE` (`src/storage.rs`) changes from 50.
 - The average/expected username length assumption changes materially from
   12 bytes.
 - The target network's maximum ledger entry size changes from the assumed
