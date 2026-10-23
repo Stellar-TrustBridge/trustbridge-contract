@@ -27,6 +27,7 @@ compatible corrections.
 ### Changed
 
 - Documented the `set_bot_status` auth policy consistently as admin-or-registrant across `tests/auth_matrix.csv`, `docs/ABI.md` and `docs/ADMIN_RUNBOOK.md` (the runbook previously said admin only). No contract behaviour change.
+- Locked the attestation gate against mid-flight weakening (Issue #592): `set_attestation_required(caller, false)` now returns `UpgradeProposalAlreadyPending` (code 40) while a multisig upgrade proposal is pending, because `execute_upgrade` reads the flag at execution time. Enabling (`true`) stays allowed and applies at execute; `clear_attestation` stays available but fails closed (flag untouched, execute → `AttestationRequired`). The lock releases automatically when the proposal executes or is cancelled. Spec in `docs/SECURITY.md` (M-of-N multisig upgrade section); integration tests in `tests/multisig_upgrade.rs`, which CI now runs via the new `multisig-upgrade-tests` job.
 - Fixed `calculate_verification_percentage` and `BatchSummary::new` rounding at boundary and fractional values (0%, 100%, 1/3, 2/3) to use standard round-half-up semantics.
 - Fixed `NetworkMismatch` error code by moving its discriminant from 21 to 30 to avoid overlap with `InvalidPauseReason` (see [ContractError](docs/ABI.md#contracterror-u32-discriminant)).
 - Added new error codes `VerifierAllowlistFull` (31), `VerifierNotAllowlisted` (32), `VerifierExpiryInPast` (33), `NoPendingRoleGrant` (34), `RoleGrantNotReady` (35), `ProvenanceMissing` (36), and `ProvenanceMismatch` (37).

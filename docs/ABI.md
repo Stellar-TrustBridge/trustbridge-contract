@@ -331,7 +331,7 @@ struct ChallengeRecord {
 | 36 | `ProvenanceMissing` | `assert_build` / `set_provenance_digests` before any provenance record exists (Issue #225) |
 | 37 | `ProvenanceMismatch` | `assert_build` given a hash that does not match stored provenance (Issue #225) |
 | 39 | `StagedWasmMismatch` | `upgrade` / `execute_upgrade` was given a WASM hash that does not match the staged-WASM slot (Issue #300) |
-| 40 | `UpgradeProposalAlreadyPending` | `propose_multisig_upgrade` was called while a proposal is already live (Issue #301) |
+| 40 | `UpgradeProposalAlreadyPending` | `propose_multisig_upgrade` was called while a proposal is already live (Issue #301); `set_attestation_required(false)` was called while a proposal is live (Issue #592) |
 | 41 | `NoUpgradeProposalPending` | `approve_upgrade` / `execute_upgrade` / `cancel_upgrade_proposal` was called with no live proposal (or a proposal id that does not match) (Issue #301) |
 | 42 | `UpgradeProposalAlreadyApproved` | `approve_upgrade` was called by an address that already approved this proposal (Issue #301) |
 | 43 | `UpgradeProposalDelayActive` | `execute_upgrade` was called before the proposal's delay elapsed (Issue #301) |
@@ -2315,7 +2315,7 @@ a fresh off-chain GitHub identity check after an address change. See
 
 ## Attestation-Required Config (Issue #198)
 
-### `set_attestation_required(required: bool) -> Result<(), ContractError>`
+### `set_attestation_required(caller: Address, required: bool) -> Result<(), ContractError>`
 
 Configures whether a published attestation is mandatory before `upgrade`.
 
@@ -2323,13 +2323,21 @@ When `required = true`, `upgrade` fails with `AttestationRequired` (code 20)
 if no valid attestation is published. When `required = false` (default),
 unattested upgrades are allowed and provenance notes them as such.
 
+While a multisig upgrade proposal is pending, `required = false` is refused
+with `UpgradeProposalAlreadyPending` (Issue #592): `execute_upgrade` reads
+this flag at execution time, so flipping it off mid-flight would silently
+drop the attestation check for the live proposal. Enabling (`required = true`)
+is always allowed and applies to the pending proposal at execute time; cancel
+or execute the proposal first to disable the gate afterwards.
+
 | | |
 |---|---|
 | **Auth** | Contract admin |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `NotAuthorized` |
+| **Errors** | `NotInitialized`, `NotAuthorized`, `UpgradeProposalAlreadyPending` |
 
 **Since:** added in Issue #198. Existing deployments default to `false`.
+Mid-flight lock added in Issue #592.
 
 ### `is_attestation_required() -> bool`
 

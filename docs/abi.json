@@ -371,7 +371,7 @@
     {
       "code": 40,
       "name": "UpgradeProposalAlreadyPending",
-      "description": "`propose_multisig_upgrade` was called while a proposal is already live (Issue #301)"
+      "description": "`propose_multisig_upgrade` was called while a proposal is already live (Issue #301); `set_attestation_required(false)` was called while a proposal is live (Issue #592)"
     },
     {
       "code": 41,

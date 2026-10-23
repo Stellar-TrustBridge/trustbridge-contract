@@ -1452,6 +1452,12 @@ impl TrustBridgeContract {
     /// admin would have to wait out the expiry before upgrading to any other
     /// hash.
     ///
+    /// While a multisig upgrade proposal is pending this cannot weaken the
+    /// gate (Issue #592): it removes only the attestation record and never
+    /// touches `attestation_required`, so with the flag set `execute_upgrade`
+    /// fails closed with [`ContractError::AttestationRequired`] instead of
+    /// proceeding unattested.
+    ///
     /// # Errors
     ///
     /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
@@ -1491,6 +1497,15 @@ impl TrustBridgeContract {
     /// [`ContractError::AttestationRequired`].  When `false` (the default),
     /// attestation is optional — the two-step flow is advisory only.
     ///
+    /// While a multisig upgrade proposal is pending, `required = false` is
+    /// refused with [`ContractError::UpgradeProposalAlreadyPending`] (Issue
+    /// #592): `execute_upgrade` reads this flag when the proposal executes, so
+    /// flipping it off mid-flight would silently drop the attestation check
+    /// for the live proposal.  Enabling (`required = true`) is always allowed
+    /// — it only tightens the gate, and applies to the pending proposal at
+    /// execute time.  Cancel or execute the proposal first to disable the gate
+    /// afterwards.
+    ///
     /// Note: `clear_attestation` removes the pending attestation record but does
     /// **not** change this flag.  To disable the gate, call
     /// `set_attestation_required(false)` explicitly.
@@ -1503,6 +1518,8 @@ impl TrustBridgeContract {
     ///
     /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
     /// - [`ContractError::NotAuthorized`] if `caller` is not the admin.
+    /// - [`ContractError::UpgradeProposalAlreadyPending`] if `required` is
+    ///   `false` and an upgrade proposal is live (Issue #592).
     pub fn set_attestation_required(
         env: Env,
         caller: Address,
@@ -1519,6 +1536,14 @@ impl TrustBridgeContract {
                 String::from_str(&env, "set_attestation_required"),
             );
             return Err(ContractError::NotAuthorized);
+        }
+
+        // Issue #592: `execute_upgrade` consults this flag when the proposal
+        // executes, so disabling it mid-flight would let a live proposal skip
+        // the attestation gate it was proposed under.  The lock releases when
+        // the proposal executes or is cancelled.
+        if !required && crate::multisig_upgrade::get_upgrade_proposal(&env).is_some() {
+            return Err(ContractError::UpgradeProposalAlreadyPending);
         }
 
         crate::storage::set_attestation_required(&env, required);

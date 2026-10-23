@@ -252,6 +252,29 @@ remain single-admin at the contract level.  For full multi-party admin
 governance, use a Stellar multisig account as the admin address (recommended
 in any case — see [Admin Key Management](#admin-key-management)).
 
+**Mid-flight attestation mutations (Issue #592):**
+
+`execute_upgrade` reads `attestation_required` and the attestation record at
+*execution* time, so the policy in effect must be tamper-proof between
+propose and execute.  While a proposal is live
+(`get_upgrade_proposal() != None`):
+
+| Mutation while a proposal is live | Result |
+|-----------------------------------|--------|
+| `set_attestation_required(false)` | **Rejected** — `UpgradeProposalAlreadyPending` (code 40).  The gate a proposal was proposed under cannot be switched off underneath it.  Cancel or execute the proposal first. |
+| `set_attestation_required(true)` | **Allowed** — tightening only strengthens the gate, and it applies to the live proposal at execute time (execute then fails `AttestationRequired` until an attestation is published). |
+| `clear_attestation` | **Allowed**, but has no effect on policy: it is the documented escape hatch for an attestation published in error and removes only the attestation record, never the `attestation_required` flag.  With the flag set, execute fails closed with `AttestationRequired` — clearing can never *open* the gate. |
+| Attestation optional (`attestation_required = false`) | Behaves differently by design: with no gate configured there is nothing to bypass, so execute proceeds without attestation. |
+
+The lock is derived from the live proposal itself, so it releases
+automatically when the proposal executes or is cancelled — no separate
+unlock step.  Verified by `tests/multisig_upgrade.rs`
+(`test_cannot_disable_attestation_gate_while_proposal_pending`,
+`test_clear_attestation_mid_flight_fails_closed_at_execute`,
+`test_cancel_releases_attestation_gate_lock`,
+`test_enabling_attestation_mid_flight_applies_at_execute`,
+`test_optional_mode_clear_mid_flight_does_not_block_execute`).
+
 See [ADMIN_RUNBOOK.md — Multisig Upgrade Flow](ADMIN_RUNBOOK.md#multisig-upgrade-flow-issue-301)
 for paste-ready CLI recipes and the complete error reference.
 

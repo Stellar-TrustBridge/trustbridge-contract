@@ -79,7 +79,7 @@ use soroban_sdk::contracterror;
 /// | 36 | `ProvenanceMissing` | `assert_build` |
 /// | 37 | `ProvenanceMismatch` | `assert_build` |
 /// | 39 | `StagedWasmMismatch` | `upgrade`, `execute_upgrade` |
-/// | 40 | `UpgradeProposalAlreadyPending` | `propose_multisig_upgrade` |
+/// | 40 | `UpgradeProposalAlreadyPending` | `propose_multisig_upgrade`, `set_attestation_required` |
 /// | 41 | `NoUpgradeProposalPending` | `approve_upgrade`, `execute_upgrade`, `cancel_upgrade_proposal` |
 /// | 42 | `UpgradeProposalAlreadyApproved` | `approve_upgrade` |
 /// | 43 | `UpgradeProposalDelayActive` | `execute_upgrade` |

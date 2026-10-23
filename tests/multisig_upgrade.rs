@@ -47,6 +47,37 @@ fn hash(env: &Env, byte: u8) -> BytesN<32> {
     BytesN::from_array(env, &[byte; 32])
 }
 
+/// Uploads a minimal valid contract WASM so a successful `execute_upgrade` has
+/// a real binary to swap in (same approach as `tests/auth_matrix.rs`).
+///
+/// The swap replaces this contract with a function-less module, so no further
+/// contract entry points can be called afterwards in the same test; use the
+/// `wasm-test` feature with the pre-built full WASM when post-execute calls
+/// are needed.
+#[allow(deprecated)] // `protocol_version` is the only way to match the host.
+fn uploaded_wasm(env: &Env) -> BytesN<32> {
+    use soroban_sdk::xdr::{Limits, ScEnvMetaEntry, ScEnvMetaEntryInterfaceVersion, WriteXdr};
+    let meta = ScEnvMetaEntry::ScEnvMetaKindInterfaceVersion(ScEnvMetaEntryInterfaceVersion {
+        protocol: env.ledger().protocol_version(),
+        pre_release: 0,
+    })
+    .to_xdr(Limits::none())
+    .unwrap();
+    let name = b"contractenvmetav0";
+    let mut section = std::vec![name.len() as u8];
+    section.extend_from_slice(name);
+    section.extend_from_slice(&meta);
+    let mut wasm = std::vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x00];
+    assert!(
+        section.len() < 0x80,
+        "custom section must fit a 1-byte LEB128 size"
+    );
+    wasm.push(section.len() as u8);
+    wasm.extend_from_slice(&section);
+    env.deployer()
+        .upload_contract_wasm(soroban_sdk::Bytes::from_slice(env, &wasm))
+}
+
 // ── Threshold configuration ───────────────────────────────────────────────────
 
 #[test]
@@ -252,13 +283,16 @@ fn test_approve_upgrade_with_no_or_wrong_proposal_id_fails() {
     let (env, admin, upgrader, _random, contract_id) = setup();
 
     env.mock_all_auths();
+    // One auth-bearing call per frame (recording-auth allows a single
+    // `require_auth` per address per `as_contract` block).
     env.as_contract(&contract_id, || {
         // Nothing pending yet.
         assert_eq!(
             TrustBridgeContract::approve_upgrade(env.clone(), upgrader.clone(), 0),
             Err(ContractError::NoUpgradeProposalPending)
         );
-
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_multisig_upgrade(
             env.clone(),
             admin.clone(),
@@ -266,6 +300,8 @@ fn test_approve_upgrade_with_no_or_wrong_proposal_id_fails() {
             0,
         )
         .unwrap();
+    });
+    env.as_contract(&contract_id, || {
         // Wrong id for the live proposal.
         assert_eq!(
             TrustBridgeContract::approve_upgrade(env.clone(), upgrader.clone(), 99),
@@ -307,6 +343,8 @@ fn test_execute_fails_with_insufficient_approvals() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::set_upgrade_threshold(env.clone(), admin.clone(), 2).unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_multisig_upgrade(
             env.clone(),
             admin.clone(),
@@ -317,7 +355,6 @@ fn test_execute_fails_with_insufficient_approvals() {
     });
 
     // Delay (0) has elapsed, but only the proposer has approved.
-    env.mock_all_auths();
     env.as_contract(&contract_id, || {
         assert_eq!(
             TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), 0),
@@ -336,7 +373,8 @@ fn test_execute_fails_with_no_live_proposal() {
             TrustBridgeContract::execute_upgrade(env.clone(), upgrader.clone(), 0),
             Err(ContractError::NoUpgradeProposalPending)
         );
-
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_multisig_upgrade(
             env.clone(),
             admin.clone(),
@@ -344,6 +382,8 @@ fn test_execute_fails_with_no_live_proposal() {
             0,
         )
         .unwrap();
+    });
+    env.as_contract(&contract_id, || {
         // Proposed but executed/cancelled under a different id than requested.
         assert_eq!(
             TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), 42),
@@ -529,13 +569,16 @@ fn test_cancel_with_no_or_wrong_proposal_id_fails() {
     let (env, admin, _upgrader, _random, contract_id) = setup();
 
     env.mock_all_auths();
+    // One auth-bearing call per frame (recording-auth allows a single
+    // `require_auth` per address per `as_contract` block).
     env.as_contract(&contract_id, || {
         // Nothing pending.
         assert_eq!(
             TrustBridgeContract::cancel_upgrade_proposal(env.clone(), admin.clone(), 0),
             Err(ContractError::NoUpgradeProposalPending)
         );
-
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_multisig_upgrade(
             env.clone(),
             admin.clone(),
@@ -543,6 +586,8 @@ fn test_cancel_with_no_or_wrong_proposal_id_fails() {
             0,
         )
         .unwrap();
+    });
+    env.as_contract(&contract_id, || {
         // Wrong id for the live proposal.
         assert_eq!(
             TrustBridgeContract::cancel_upgrade_proposal(env.clone(), admin.clone(), 99),
@@ -595,6 +640,8 @@ fn test_proposal_error_paths_after_cancellation() {
     env.ledger().set_timestamp(1_000);
 
     env.mock_all_auths();
+    // One auth-bearing call per frame (recording-auth allows a single
+    // `require_auth` per address per `as_contract` block).
     env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_multisig_upgrade(
             env.clone(),
@@ -603,22 +650,30 @@ fn test_proposal_error_paths_after_cancellation() {
             0,
         )
         .unwrap();
+    });
 
-        // Admin cancels proposal 0.
+    // Admin cancels proposal 0.
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::cancel_upgrade_proposal(env.clone(), admin.clone(), 0).unwrap();
+    });
 
+    env.as_contract(&contract_id, || {
         // Approval on cancelled proposal fails with NoUpgradeProposalPending.
         assert_eq!(
             TrustBridgeContract::approve_upgrade(env.clone(), upgrader.clone(), 0),
             Err(ContractError::NoUpgradeProposalPending)
         );
+    });
 
+    env.as_contract(&contract_id, || {
         // Execution on cancelled proposal fails with NoUpgradeProposalPending.
         assert_eq!(
             TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), 0),
             Err(ContractError::NoUpgradeProposalPending)
         );
+    });
 
+    env.as_contract(&contract_id, || {
         // Repeat cancel on already-cancelled proposal fails with NoUpgradeProposalPending.
         assert_eq!(
             TrustBridgeContract::cancel_upgrade_proposal(env.clone(), admin.clone(), 0),
@@ -731,5 +786,232 @@ fn test_clear_attestation_does_not_disable_required_flag() {
             TrustBridgeContract::get_attestation_required(env.clone()),
             "clear_attestation must not disable the attestation_required flag"
         );
+    });
+}
+
+// ── Mid-flight attestation mutations (Issue #592) ────────────────────────────
+//
+// `execute_upgrade` reads `attestation_required` and the attestation record at
+// *execution* time, so between propose and execute the policy must be
+// tamper-proof: the gate cannot be switched off mid-flight, and clearing the
+// attestation record fails closed instead of opening the gate.  The lock
+// releases when the proposal executes or is cancelled.  Semantics are
+// documented in `docs/SECURITY.md` under the M-of-N multisig upgrade section.
+
+/// The core of Issue #592: a live proposal cannot have its attestation gate
+/// disabled underneath it, execute still honours the gate it was proposed
+/// under, and the lock releases with execution.
+#[test]
+fn test_cannot_disable_attestation_gate_while_proposal_pending() {
+    let (env, admin, upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+
+    // A real uploadable WASM, so execute can complete the swap.
+    let wasm_hash = uploaded_wasm(&env);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        // The attestation the execute gate will require.
+        TrustBridgeContract::attest_upgrade(env.clone(), wasm_hash.clone(), 10_000).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_upgrade_threshold(env.clone(), admin.clone(), 2).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        // The proposer counts as approval #1.
+        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), wasm_hash, 0)
+            .unwrap();
+    });
+
+    // The core assertion: the gate cannot be switched off mid-flight.
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), false),
+            Err(ContractError::UpgradeProposalAlreadyPending),
+            "disabling the attestation gate must be refused while an upgrade proposal is live"
+        );
+    });
+    env.as_contract(&contract_id, || {
+        assert!(
+            TrustBridgeContract::get_attestation_required(env.clone()),
+            "the refused call must leave the flag on"
+        );
+    });
+
+    // A second distinct approver meets threshold 2; execute proceeds *under*
+    // the gate — attestation present, flag still required.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::approve_upgrade(env.clone(), upgrader.clone(), 0).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::execute_upgrade(env.clone(), upgrader.clone(), 0)
+            .expect("execute must succeed under the gate it was proposed with");
+    });
+
+    // The executed upgrade consumed the proposal, so the lock is gone.
+    env.as_contract(&contract_id, || {
+        assert!(
+            TrustBridgeContract::get_upgrade_proposal(env.clone()).is_none(),
+            "an executed upgrade must clear the pending proposal"
+        );
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), false).unwrap();
+        assert!(
+            !TrustBridgeContract::get_attestation_required(env.clone()),
+            "the lock must not outlive the proposal"
+        );
+    });
+}
+
+/// `clear_attestation` stays available mid-flight (it is the documented
+/// escape hatch) but can never open the gate: the flag is untouched, so
+/// execute fails closed with `AttestationRequired`.
+#[test]
+fn test_clear_attestation_mid_flight_fails_closed_at_execute() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::attest_upgrade(env.clone(), hash(&env, 0x02), 10_000).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0x02),
+            0,
+        )
+        .unwrap();
+    });
+
+    // Allowed mid-flight — the escape hatch for an attestation published in error.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::clear_attestation(env.clone()).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        assert!(
+            TrustBridgeContract::get_attestation_required(env.clone()),
+            "clearing the record must not disable the gate"
+        );
+    });
+
+    // Execute must fail closed rather than proceed unattested.
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), 0),
+            Err(ContractError::AttestationRequired),
+            "a cleared attestation must not let execute bypass the required gate"
+        );
+    });
+}
+
+/// Cancelling the proposal releases the gate lock.
+#[test]
+fn test_cancel_releases_attestation_gate_lock() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0x03),
+            0,
+        )
+        .unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), false),
+            Err(ContractError::UpgradeProposalAlreadyPending),
+            "the gate must stay locked while the proposal is live"
+        );
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::cancel_upgrade_proposal(env.clone(), admin.clone(), 0).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), false).unwrap();
+        assert!(
+            !TrustBridgeContract::get_attestation_required(env.clone()),
+            "cancelling must release the lock"
+        );
+    });
+}
+
+/// Tightening mid-flight is deliberately allowed (it only strengthens) and
+/// applies to the pending proposal at execute time.
+#[test]
+fn test_enabling_attestation_mid_flight_applies_at_execute() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0x04),
+            0,
+        )
+        .unwrap();
+    });
+
+    // Strengthening is allowed while the proposal is live.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+    });
+
+    // And the tightened gate applies to the live proposal: no attestation
+    // exists, so execute fails closed.
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), 0),
+            Err(ContractError::AttestationRequired),
+            "an enabled gate must apply to the proposal already in flight"
+        );
+    });
+}
+
+/// Optional mode (flag off, the default) behaves differently by design:
+/// there is no gate to bypass, so clearing (or never attesting) does not
+/// block execute.
+#[test]
+fn test_optional_mode_clear_mid_flight_does_not_block_execute() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+
+    // A real uploadable WASM, so execute can complete the swap.
+    let wasm_hash = uploaded_wasm(&env);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert!(
+            !TrustBridgeContract::get_attestation_required(env.clone()),
+            "optional mode is the default"
+        );
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), wasm_hash, 0)
+            .unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        // Nothing to clear, and the gate is off either way.
+        TrustBridgeContract::clear_attestation(env.clone()).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), 0)
+            .expect("optional mode must not require an attestation at execute");
     });
 }
