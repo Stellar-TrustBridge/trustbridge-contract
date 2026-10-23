@@ -20,6 +20,8 @@ compatible corrections.
 - Added `AuditConfigChangedEvent` with topic `admin` and body fields `enabled`, `max_events`, `log_unauthorized`, `timestamp` (Issue #412).
 - Added `UnauthorizedAttempt` (code 6) audit log entries: every public entry point that returns `NotAuthorized` now calls `record_unauthorized_attempt` before returning, gated on `AuditConfig.log_unauthorized`. Actors and operation names are recorded for forensics (Issue #412).
 - `AuditStats.unauthorized_attempts` counter now increments on every failed auth regardless of `log_unauthorized` flag.
+- Added the timelocked admin transfer lifecycle for Issue #195: `propose_admin_transfer(new_admin, delay_seconds)`, `cancel_admin_transfer()`, `execute_admin_transfer(caller)` and the `get_admin_transfer()` monitor. Execution is gated on the delay, only the proposed successor may accept, and the `ADMIN_KEY` rotation is atomic (old admin's `Role::Admin` removed, new admin's granted). Errors `AdminTransferPending` (26), `AdminTransferDelayActive` (27) and `NoPendingAdminTransfer` (28) are raised by `execute_admin_transfer` (see [Admin transfer](docs/ABI.md#admin-transfer-issue-195)).
+- Added `AdminTransferProposedEvent`, `AdminTransferCancelledEvent` and `AdminTransferExecutedEvent` (topics `admin_transfer_proposed`, `admin_transfer_cancelled`, `admin_transfer_executed`) with `scripts/event_indexer.sh` classification rows and explicit subgraph waivers.
 
 ### Changed
 

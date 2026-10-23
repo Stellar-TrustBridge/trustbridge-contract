@@ -7,7 +7,15 @@
       "arity": 2
     },
     {
+      "name": "cancel_admin_transfer",
+      "arity": 0
+    },
+    {
       "name": "clear_staged",
+      "arity": 1
+    },
+    {
+      "name": "execute_admin_transfer",
       "arity": 1
     },
     {
@@ -17,6 +25,10 @@
     {
       "name": "get_address_if_verified",
       "arity": 1
+    },
+    {
+      "name": "get_admin_transfer",
+      "arity": 0
     },
     {
       "name": "get_all_registered",
@@ -57,6 +69,10 @@
     {
       "name": "max_username_len",
       "arity": 0
+    },
+    {
+      "name": "propose_admin_transfer",
+      "arity": 2
     },
     {
       "name": "register",

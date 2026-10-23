@@ -176,6 +176,9 @@ The full table lives in `scripts/event_indexer.sh` (`TOPIC_TABLE`).
 | `rotation_requested_event` | `rotation_requested` | `admin` |
 | `rotation_executed_event` | `rotation_executed` | `admin` |
 | `rotation_cancelled_event` | `rotation_cancelled` | `admin` |
+| `admin_transfer_proposed_event` | `admin_transfer_proposed` | `admin` |
+| `admin_transfer_cancelled_event` | `admin_transfer_cancelled` | `admin` |
+| `admin_transfer_executed_event` | `admin_transfer_executed` | `admin` |
 | `upgraded_event` | `upgraded` | `upgrade` |
 | `upgrade_attested_event` | `upgrade_attested` | `upgrade` |
 | `attestation_cleared_event` | `attestation_cleared` | `upgrade` |

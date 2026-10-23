@@ -85,6 +85,14 @@ execute_batch_remove,random,NotAuthorized
 cancel_batch_remove,admin,
 cancel_batch_remove,random,NotAuthorized
 get_pending_batch_remove,random,
+propose_admin_transfer,admin,
+propose_admin_transfer,random,NotAuthorized
+execute_admin_transfer,random,
+execute_admin_transfer,admin,AdminTransferPending
+execute_admin_transfer,second_admin,NotAuthorized
+cancel_admin_transfer,admin,
+cancel_admin_transfer,random,NotAuthorized
+get_admin_transfer,random,
 set_batch_remove_threshold,admin,
 set_batch_remove_threshold,random,NotAuthorized
 get_batch_remove_threshold,random,
@@ -116,3 +124,7 @@ set_oracle_allowlist,admin,
 set_oracle_allowlist,random,NotAuthorized
 verify_with_oracle_proof,user,
 verify_with_oracle_proof,random,NotAuthorized
+set_attestation_required,admin,
+set_attestation_required,random,NotAuthorized
+set_audit_config,admin,
+set_audit_config,random,NotAuthorized

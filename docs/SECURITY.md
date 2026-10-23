@@ -142,8 +142,11 @@ with two live admins:
 2. **Observe / cancel** — watchers have `delay_seconds` to detect and respond.
    The current admin may call `cancel_admin_transfer()` at any point before
    execution to abort the proposal (emits `AdminTransferCancelledEvent`).
-   A second `propose_admin_transfer` call overwrites the first — useful for
-   correcting a typo during the window.
+   Cancelling is deliberately available **while paused**: an abort path must
+   not be blocked by the same emergency that might motivate using it (the
+   `cancel_batch_remove` convention). Calling it with nothing pending is a
+   no-op — no event, no state change. A second `propose_admin_transfer` call
+   overwrites the first — useful for correcting a typo during the window.
 3. **Accept** — after the delay elapses, the **proposed new admin** calls
    `execute_admin_transfer(caller)` and signs. `ADMIN_KEY` is atomically
    rotated: the old admin's `Role::Admin` entry is removed and the new admin
@@ -152,8 +155,13 @@ with two live admins:
 Threat-model properties:
 - A compromised admin key can only propose a transfer, not execute it — the
   candidate address must also sign `execute_admin_transfer`.
+- The outgoing admin trying to execute its own proposal gets
+  `AdminTransferPending` (code 26) — an actionable "a transfer is pending;
+  only the successor can accept it" rather than a generic denial — and every
+  other non-successor gets `NotAuthorized`.
 - Self-transfer is not explicitly blocked (the admin may rotate to themselves
-  with a delay), but produces no effective change.
+  with a delay), but produces no effective change; the role shuffling is
+  skipped in that case.
 - The zero/burn address is rejected at proposal time (`ZeroAddress`).
 - Pause during a pending proposal does not affect the proposal storage — the
   delay timer continues. However, `execute_admin_transfer` checks

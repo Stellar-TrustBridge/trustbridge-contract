@@ -318,7 +318,7 @@ struct ChallengeRecord {
 | 23 | `NotReserved` | `remove_reserved` for a username not on the reserved list |
 | 24 | `UsernameReserved` | `register` for a username on the reserved list |
 | 25 | `ReservedListFull` | Reserved list has reached its maximum size |
-| 26 | `AdminTransferPending` | `propose_admin_transfer` while a transfer is already pending |
+| 26 | `AdminTransferPending` | `execute_admin_transfer` called by the outgoing (current) admin while its own transfer proposal is pending |
 | 27 | `AdminTransferDelayActive` | `execute_admin_transfer` before the delay has elapsed |
 | 28 | `NoPendingAdminTransfer` | `execute_admin_transfer` with no pending proposal |
 | 29 | `AttestationRequired` | `upgrade` without an attestation while attestation-required mode is on |
@@ -1145,6 +1145,69 @@ Pre-Wave operator probes: pause flag, admin presence, index generation
 | **Auth** | None (read-only; works while paused) |
 | **Mutates** | No |
 | **Errors** | None — uninitialized reports `admin_set: false` |
+
+---
+
+### Admin transfer (Issue #195)
+
+### `propose_admin_transfer(new_admin: Address, delay_seconds: u64) -> Result<(), ContractError>`
+
+Proposes a transfer of admin rights to `new_admin` with a mandatory delay.
+
+| | |
+|---|---|
+| **Auth** | Contract admin (fixed identity — a non-admin signer is rejected by the host auth layer) |
+| **Mutates** | Yes |
+| **Errors** | `NotInitialized`, `Paused`, `ZeroAddress` |
+| **Events** | `AdminTransferProposedEvent` |
+
+A second call while a proposal is pending **overwrites** it (correcting address or delay is allowed during the window). The current admin remains the only admin throughout.
+
+### `cancel_admin_transfer() -> Result<(), ContractError>`
+
+Cancels a pending admin transfer proposal. No-op if no proposal is pending. Available while paused — an abort path must not be blocked by the same emergency that might motivate using it.
+
+| | |
+|---|---|
+| **Auth** | Contract admin (fixed identity — a non-admin signer is rejected by the host auth layer) |
+| **Mutates** | Yes |
+| **Errors** | `NotInitialized` |
+| **Events** | `AdminTransferCancelledEvent` (only when a proposal was actually cancelled) |
+
+### `execute_admin_transfer(caller: Address) -> Result<(), ContractError>`
+
+Accepts the pending transfer. Must be called by the proposed new admin after the delay elapses.
+
+| | |
+|---|---|
+| **Auth** | `caller` must be the proposed new admin |
+| **Mutates** | Yes — atomically rotates `ADMIN_KEY`, removes old admin's `Role::Admin`, grants `Role::Admin` to the new admin |
+| **Errors** | `NotInitialized`, `Paused`, `NoPendingAdminTransfer`, `NotAuthorized`, `AdminTransferDelayActive`, `AdminTransferPending` (the outgoing admin attempting to execute its own proposal) |
+| **Events** | `AdminTransferExecutedEvent` |
+
+### `get_admin_transfer() -> Option<AdminTransferProposal>`
+
+Returns the pending admin transfer proposal, or `None` if no transfer is pending.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+```rust
+struct AdminTransferProposal {
+    new_admin: Address,
+    proposed_by: Address,
+    proposed_at: u64,
+    executable_at: u64,
+}
+```
+
+---
+
+
+---
+
 
 ---
 
@@ -2204,63 +2267,6 @@ Rules:
 ```bash
 stellar contract invoke --id $ID --source deployer --network testnet \
   -- is_compatible --major 1 --minor 0 --patch 0
-```
-
----
-
-## Admin Transfer Functions (Issue #195)
-
-### `propose_admin_transfer(new_admin: Address, delay_seconds: u64) -> Result<(), ContractError>`
-
-Proposes a transfer of admin rights to `new_admin` with a mandatory delay.
-
-| | |
-|---|---|
-| **Auth** | Contract admin |
-| **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `Paused`, `NotAuthorized`, `ZeroAddress` |
-| **Events** | `AdminTransferProposedEvent` |
-
-A second call while a proposal is pending **overwrites** it (correcting address or delay is allowed during the window). The current admin remains the only admin throughout.
-
-### `cancel_admin_transfer() -> Result<(), ContractError>`
-
-Cancels a pending admin transfer proposal. No-op if no proposal is pending.
-
-| | |
-|---|---|
-| **Auth** | Contract admin |
-| **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `NotAuthorized` |
-| **Events** | `AdminTransferCancelledEvent` |
-
-### `execute_admin_transfer(caller: Address) -> Result<(), ContractError>`
-
-Accepts the pending transfer. Must be called by the proposed new admin after the delay elapses.
-
-| | |
-|---|---|
-| **Auth** | `caller` must be the proposed new admin |
-| **Mutates** | Yes — atomically rotates `ADMIN_KEY`, removes old admin's `Role::Admin`, grants `Role::Admin` to the new admin |
-| **Errors** | `NotInitialized`, `Paused`, `NoPendingAdminTransfer`, `NotAuthorized`, `AdminTransferDelayActive` |
-| **Events** | `AdminTransferExecutedEvent` |
-
-### `get_admin_transfer() -> Option<AdminTransferProposal>`
-
-Returns the pending admin transfer proposal, or `None` if no transfer is pending.
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Mutates** | No |
-
-```rust
-struct AdminTransferProposal {
-    new_admin: Address,
-    proposed_by: Address,
-    proposed_at: u64,
-    executable_at: u64,
-}
 ```
 
 ---

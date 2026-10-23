@@ -323,6 +323,49 @@ pub struct BatchRemoveCancelledEvent {
     pub domain: EventDomain,
 }
 
+/// Emitted when the current admin proposes a timelocked transfer of the
+/// admin key (Issue #195).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminTransferProposedEvent {
+    #[topic]
+    pub new_admin: Address,
+    pub proposed_by: Address,
+    /// Earliest ledger timestamp at which `execute_admin_transfer` may run.
+    pub executable_at: u64,
+    pub timestamp: u64,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
+}
+
+/// Emitted when the current admin cancels a pending admin transfer proposal
+/// (Issue #195). Not emitted when there was nothing to cancel.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminTransferCancelledEvent {
+    #[topic]
+    pub cancelled_by: Address,
+    pub timestamp: u64,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
+}
+
+/// Emitted when the proposed new admin accepts the transfer and the admin
+/// key rotates (Issue #195).
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminTransferExecutedEvent {
+    #[topic]
+    pub new_admin: Address,
+    pub old_admin: Address,
+    pub timestamp: u64,
+    /// Deployment that emitted this event — contract id, network, and
+    /// contract version. See [`EventDomain`] for why indexers need it.
+    pub domain: EventDomain,
+}
+
 /// Emitted when an admin starts a challenge on a squatted username (Issue #214).
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

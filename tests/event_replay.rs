@@ -72,6 +72,9 @@ const EVENT_TYPES: &[&str] = &[
     "upgrade_proposal_cancelled_event",
     "verification_configured_event",
     "audit_config_changed_event",
+    "admin_transfer_proposed_event",
+    "admin_transfer_cancelled_event",
+    "admin_transfer_executed_event",
 ];
 
 const NETWORK_ID: &str = "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472";
@@ -143,6 +146,9 @@ fn deliveries() -> Vec<Delivery> {
         Delivery { event_type: "upgrade_proposal_cancelled_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 33 },
         Delivery { event_type: "verification_configured_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 34 },
         Delivery { event_type: "audit_config_changed_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 35 },
+        Delivery { event_type: "admin_transfer_proposed_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 36 },
+        Delivery { event_type: "admin_transfer_cancelled_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 37 },
+        Delivery { event_type: "admin_transfer_executed_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 38 },
         // Exact reconnect deliveries for every event type.
         Delivery { event_type: "registered_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 1 },
         Delivery { event_type: "bot_status_changed_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 2 },
@@ -179,6 +185,9 @@ fn deliveries() -> Vec<Delivery> {
         Delivery { event_type: "upgrade_proposal_cancelled_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 33 },
         Delivery { event_type: "verification_configured_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 34 },
         Delivery { event_type: "audit_config_changed_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 35 },
+        Delivery { event_type: "admin_transfer_proposed_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 36 },
+        Delivery { event_type: "admin_transfer_cancelled_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 37 },
+        Delivery { event_type: "admin_transfer_executed_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 38 },
     ]
 }
 

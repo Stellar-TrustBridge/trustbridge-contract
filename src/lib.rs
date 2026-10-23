@@ -18,6 +18,9 @@ pub use batch::{BatchConfig, BatchOperationResult, BatchSummary, MAX_WRITE_BATCH
 pub use domain::{EventDomain, EVENT_DOMAIN_VERSION};
 pub use error::{ContractError, ErrorCategory};
 pub use events::{
+    AdminTransferCancelledEvent,
+    AdminTransferExecutedEvent,
+    AdminTransferProposedEvent,
     AttestationClearedEvent,
     // Audit config (Issue #412)
     AuditConfigChangedEvent,
@@ -63,10 +66,10 @@ pub use oracle_proof::{
 };
 pub use staged_wasm::StagedWasm;
 pub use storage::{
-    ChallengeRecord, ContributorRecord, ExportAttestation, ExportPage, HealthProbes,
-    HealthSnapshot, PauseReason, PendingBatchRemove, PendingRoleGrant, PendingRotation,
-    RecordProof, RepairReport, Role, RoleHolder, Stats, VerificationConfig, VerifierAllowEntry,
-    WasmAttestation, WasmProvenance, MAX_FALLBACK_ADDRESSES, MAX_VERIFIERS,
+    AdminTransferProposal, ChallengeRecord, ContributorRecord, ExportAttestation, ExportPage,
+    HealthProbes, HealthSnapshot, PauseReason, PendingBatchRemove, PendingRoleGrant,
+    PendingRotation, RecordProof, RepairReport, Role, RoleHolder, Stats, VerificationConfig,
+    VerifierAllowEntry, WasmAttestation, WasmProvenance, MAX_FALLBACK_ADDRESSES, MAX_VERIFIERS,
 };
 pub use version::Version;
 
@@ -76,7 +79,8 @@ use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, 
 
 use crate::storage::{
     add_to_index, add_verifier as storage_add_verifier, build_record_proof,
-    bump_ever_verified_count, charge_verify_rate, clear_pending_reverify, get_admin,
+    bump_ever_verified_count, charge_verify_rate, clear_admin_transfer, clear_pending_reverify,
+    get_admin, get_admin_transfer as storage_get_admin_transfer,
     get_audit_config as storage_get_audit_config, get_audit_logs, get_audit_stats, get_challenge,
     get_cooldown as storage_get_cooldown, get_count, get_emergency_pause, get_emergency_pause_ts,
     get_ever_verified_count as storage_get_ever_verified_count,
@@ -98,15 +102,16 @@ use crate::storage::{
     remove_guardian as storage_remove_guardian, remove_pending_role, remove_pending_rotation,
     remove_record, remove_role as storage_remove_role, remove_verifier as storage_remove_verifier,
     remove_wasm_attestation, require_initialized, require_not_paused, require_role_not_expired,
-    run_migration_steps, set_audit_config as storage_set_audit_config, set_challenge,
-    set_cooldown as storage_set_cooldown, set_count, set_emergency_pause, set_emergency_pause_ts,
-    set_ever_verified_count, set_guardian_address, set_last_action, set_last_event_ledger,
-    set_last_upgrade, set_network_id, set_paused as set_paused_state, set_pending_reverify,
-    set_pending_role, set_pending_rotation, set_record, set_role as storage_set_role,
-    set_role_delay as storage_set_role_delay, set_rotation_delay as storage_set_rotation_delay,
-    set_verified_count, set_verify_limit, set_version, set_wasm_attestation, set_wasm_provenance,
-    verifier_allowlist_active, verifier_slots_remaining,
-    PendingRoleGrant as PendingRoleGrantRecord, ADMIN_KEY, DEFAULT_CHALLENGE_DELAY_SECS,
+    run_migration_steps, set_admin_transfer, set_audit_config as storage_set_audit_config,
+    set_challenge, set_cooldown as storage_set_cooldown, set_count, set_emergency_pause,
+    set_emergency_pause_ts, set_ever_verified_count, set_guardian_address, set_last_action,
+    set_last_event_ledger, set_last_upgrade, set_network_id, set_paused as set_paused_state,
+    set_pending_reverify, set_pending_role, set_pending_rotation, set_record,
+    set_role as storage_set_role, set_role_delay as storage_set_role_delay,
+    set_rotation_delay as storage_set_rotation_delay, set_verified_count, set_verify_limit,
+    set_version, set_wasm_attestation, set_wasm_provenance, verifier_allowlist_active,
+    verifier_slots_remaining, PendingRoleGrant as PendingRoleGrantRecord, ADMIN_KEY,
+    DEFAULT_CHALLENGE_DELAY_SECS,
 };
 
 use crate::utils::{
@@ -832,6 +837,204 @@ impl TrustBridgeContract {
     #[must_use]
     pub fn get_role_expiry(env: Env, address: Address) -> Option<u64> {
         crate::storage::get_role_expiry(&env, &address)
+    }
+
+    // ── Timelocked admin transfer (Issue #195) ─────────────────────────────
+
+    /// Proposes a timelocked transfer of the admin key to `new_admin`
+    /// (Issue #195). Admin-only.
+    ///
+    /// The mandatory delay is the `delay_seconds` argument; `executable_at`
+    /// (visible via [`get_admin_transfer`][Self::get_admin_transfer]) is
+    /// `now + delay_seconds`. During the delay the current admin remains the
+    /// only admin. Re-calling **overwrites** the pending proposal — the admin
+    /// may correct a typo'd address or a bad delay during the window; this is
+    /// intentional and documented in `docs/SECURITY.md`.
+    ///
+    /// Emits [`AdminTransferProposedEvent`].
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin (fixed identity — no `caller`
+    /// argument, matching the documented ABI in `docs/ABI.md`).
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::ZeroAddress`] if `new_admin` is the zero/burn address.
+    pub fn propose_admin_transfer(
+        env: Env,
+        new_admin: Address,
+        delay_seconds: u64,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        if is_zero_address(&env, &new_admin) {
+            return Err(ContractError::ZeroAddress);
+        }
+
+        let timestamp = env.ledger().timestamp();
+        let executable_at = timestamp.saturating_add(delay_seconds);
+        set_admin_transfer(
+            &env,
+            &AdminTransferProposal {
+                new_admin: new_admin.clone(),
+                proposed_by: admin.clone(),
+                proposed_at: timestamp,
+                executable_at,
+            },
+        );
+
+        AdminTransferProposedEvent {
+            new_admin,
+            proposed_by: admin,
+            executable_at,
+            timestamp,
+            domain: event_domain(&env),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Cancels the pending admin transfer proposal without executing it
+    /// (Issue #195). Admin-only.
+    ///
+    /// No-op (returns `Ok` without emitting an event) if no proposal is
+    /// pending. Available **while paused**: an abort path should not itself
+    /// be blocked by the same emergency that might motivate using it, the
+    /// same convention `cancel_batch_remove` follows.
+    ///
+    /// Emits [`AdminTransferCancelledEvent`] when a proposal was cancelled.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin (fixed identity — no `caller`
+    /// argument, matching the documented ABI in `docs/ABI.md`).
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    pub fn cancel_admin_transfer(env: Env) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+
+        if storage_get_admin_transfer(&env).is_none() {
+            // Cancelling nothing is a successful no-op — same idempotence
+            // convention as `clear_staged`.
+            return Ok(());
+        }
+        clear_admin_transfer(&env);
+
+        AdminTransferCancelledEvent {
+            cancelled_by: admin,
+            timestamp: env.ledger().timestamp(),
+            domain: event_domain(&env),
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    /// Executes the pending admin transfer once the timelock has elapsed
+    /// (Issue #195). Second and final step of the two-step rotation.
+    ///
+    /// `caller` must be the **proposed new admin** and must sign. On success
+    /// `ADMIN_KEY` is atomically rotated: the outgoing admin's `Role::Admin`
+    /// entry is removed and the new admin receives it, so there is never a
+    /// window with two live admins. Emits [`AdminTransferExecutedEvent`].
+    ///
+    /// Blocked while the contract is paused (`require_not_paused`): a pause
+    /// is an emergency brake, and the delay timer keeps running — see
+    /// `docs/SECURITY.md#two-step-admin-rotation-issue-195`.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from `caller`, which must be the proposed new admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::Paused`] if the contract is paused.
+    /// - [`ContractError::NoPendingAdminTransfer`] if no proposal is pending.
+    /// - [`ContractError::AdminTransferDelayActive`] if the timelock has not
+    ///   elapsed yet.
+    /// - [`ContractError::AdminTransferPending`] if the **outgoing** (current)
+    ///   admin tries to execute their own proposal — only the successor can.
+    /// - [`ContractError::NotAuthorized`] if any other address tries to
+    ///   execute.
+    pub fn execute_admin_transfer(env: Env, caller: Address) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        require_not_paused(&env)?;
+
+        caller.require_auth();
+
+        let proposal =
+            storage_get_admin_transfer(&env).ok_or(ContractError::NoPendingAdminTransfer)?;
+
+        let timestamp = env.ledger().timestamp();
+        if timestamp < proposal.executable_at {
+            return Err(ContractError::AdminTransferDelayActive);
+        }
+
+        let old_admin = get_admin(&env)?;
+        if caller != proposal.new_admin {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "execute_admin_transfer"),
+            );
+            // The outgoing admin gets the actionable state ("a transfer is
+            // pending; only the successor can accept it") rather than a
+            // generic denial; everyone else is simply not authorized.
+            return Err(if caller == old_admin {
+                ContractError::AdminTransferPending
+            } else {
+                ContractError::NotAuthorized
+            });
+        }
+
+        // Rotate the key and its role bookkeeping atomically. A self-transfer
+        // (`old_admin == new_admin`) is allowed but changes nothing, so the
+        // role shuffling is skipped in that case.
+        crate::storage::set_admin(&env, &proposal.new_admin);
+        if old_admin != proposal.new_admin {
+            storage_remove_role(&env, &old_admin);
+            storage_set_role(&env, &proposal.new_admin, &Role::Admin);
+        }
+        clear_admin_transfer(&env);
+
+        AdminTransferExecutedEvent {
+            new_admin: proposal.new_admin,
+            old_admin,
+            timestamp,
+            domain: event_domain(&env),
+        }
+        .publish(&env);
+
+        push_audit_entry(
+            &env,
+            AuditLogEntry::new(AuditEventType::AdminAction, timestamp, Some(caller)),
+        );
+
+        Ok(())
+    }
+
+    /// Returns the pending admin transfer proposal, or `None` if no transfer
+    /// is pending (Issue #195).
+    ///
+    /// Read-only; no auth required; works while paused — monitoring must not
+    /// depend on the contract being unpaused.
+    #[must_use]
+    pub fn get_admin_transfer(env: Env) -> Option<AdminTransferProposal> {
+        storage_get_admin_transfer(&env)
     }
 
     /// Assigns a role to `target` with an optional expiry timestamp

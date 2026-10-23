@@ -270,6 +270,9 @@ missing, duplicate, stale or ambiguous entries.
 | `upgrade_proposal_cancelled_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
 | `verification_configured_event` | Operational administration or RBAC telemetry; available via raw event indexer |
 | `audit_config_changed_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+| `admin_transfer_proposed_event` | Operational administration telemetry; available via raw event indexer |
+| `admin_transfer_cancelled_event` | Operational administration telemetry; available via raw event indexer |
+| `admin_transfer_executed_event` | Operational administration telemetry; available via raw event indexer |
 
 Run `make subgraph-parity` to verify the event inventory, mapping table,
 Graph schema, and waivers locally. Changes to an event name (including topic

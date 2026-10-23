@@ -89,6 +89,22 @@
     {
       "name": "get_health_probes",
       "signature": "get_health_probes() -> HealthProbes"
+    },
+    {
+      "name": "propose_admin_transfer",
+      "signature": "propose_admin_transfer(new_admin: Address, delay_seconds: u64) -> Result<(), ContractError>"
+    },
+    {
+      "name": "cancel_admin_transfer",
+      "signature": "cancel_admin_transfer() -> Result<(), ContractError>"
+    },
+    {
+      "name": "execute_admin_transfer",
+      "signature": "execute_admin_transfer(caller: Address) -> Result<(), ContractError>"
+    },
+    {
+      "name": "get_admin_transfer",
+      "signature": "get_admin_transfer() -> Option<AdminTransferProposal>"
     }
   ],
   "errors": [
@@ -290,7 +306,7 @@
     {
       "code": 26,
       "name": "AdminTransferPending",
-      "description": "`propose_admin_transfer` while a transfer is already pending"
+      "description": "`execute_admin_transfer` called by the outgoing (current) admin while its own transfer proposal is pending"
     },
     {
       "code": 27,

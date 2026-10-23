@@ -66,9 +66,9 @@ use soroban_sdk::contracterror;
 /// | 23 | `NotReserved` | `remove_reserved` |
 /// | 24 | `UsernameReserved` | `register` |
 /// | 25 | `ReservedListFull` | `add_reserved` |
-/// | 26 | `AdminTransferPending` | `transfer_admin` |
-/// | 27 | `AdminTransferDelayActive` | `accept_admin` |
-/// | 28 | `NoPendingAdminTransfer` | `accept_admin`, `cancel_admin_transfer` |
+/// | 26 | `AdminTransferPending` | `execute_admin_transfer` called by the outgoing admin |
+/// | 27 | `AdminTransferDelayActive` | `execute_admin_transfer` before the delay elapses |
+/// | 28 | `NoPendingAdminTransfer` | `execute_admin_transfer` with no pending proposal |
 /// | 29 | `AttestationRequired` | `upgrade` |
 /// | 30 | `NetworkMismatch` | `initialize`, `require_initialized` (Issue #231 / #401) |
 /// | 31 | `VerifierAllowlistFull` | `add_verifier` |

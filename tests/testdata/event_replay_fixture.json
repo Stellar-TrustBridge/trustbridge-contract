@@ -501,6 +501,40 @@
     },
     {
       "delivery": 42,
+      "event_type": "admin_transfer_proposed_event",
+      "subject": "new_admin",
+      "github_username": "",
+      "stellar_address": "",
+      "timestamp": 1733000035,
+      "ledger_sequence": 1003000,
+      "tx_hash": "e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5",
+      "event_index": 36,
+      "event_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472:CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA:1003000:e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5:36"
+    },    {
+      "delivery": 43,
+      "event_type": "admin_transfer_cancelled_event",
+      "subject": "cancelled_by",
+      "github_username": "",
+      "stellar_address": "",
+      "timestamp": 1733000036,
+      "ledger_sequence": 1003000,
+      "tx_hash": "e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5",
+      "event_index": 37,
+      "event_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472:CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA:1003000:e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5:37"
+    },    {
+      "delivery": 44,
+      "event_type": "admin_transfer_executed_event",
+      "subject": "new_admin",
+      "github_username": "",
+      "stellar_address": "",
+      "timestamp": 1733000037,
+      "ledger_sequence": 1003000,
+      "tx_hash": "e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5",
+      "event_index": 38,
+      "event_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472:CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA:1003000:e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5:38"
+    },
+    {
+      "delivery": 45,
       "event_type": "registered_event",
       "subject": "github_username",
       "github_username": "",
@@ -513,7 +547,7 @@
       "_note": "exact replay of delivery 7"
     },
     {
-      "delivery": 43,
+      "delivery": 46,
       "event_type": "bot_status_changed_event",
       "subject": "github_username",
       "github_username": "",
@@ -526,7 +560,7 @@
       "_note": "exact replay of delivery 8"
     },
     {
-      "delivery": 44,
+      "delivery": 47,
       "event_type": "removed_event",
       "subject": "github_username",
       "github_username": "",
@@ -539,7 +573,7 @@
       "_note": "exact replay of delivery 9"
     },
     {
-      "delivery": 45,
+      "delivery": 48,
       "event_type": "verified_event",
       "subject": "github_username",
       "github_username": "",
@@ -552,7 +586,7 @@
       "_note": "exact replay of delivery 10"
     },
     {
-      "delivery": 46,
+      "delivery": 49,
       "event_type": "verification_revoked_event",
       "subject": "github_username",
       "github_username": "",
@@ -565,7 +599,7 @@
       "_note": "exact replay of delivery 11"
     },
     {
-      "delivery": 47,
+      "delivery": 50,
       "event_type": "upgraded_event",
       "subject": "wasm_hash",
       "github_username": "",
@@ -578,7 +612,7 @@
       "_note": "exact replay of delivery 12"
     },
     {
-      "delivery": 48,
+      "delivery": 51,
       "event_type": "paused_event",
       "subject": "github_username",
       "github_username": "",
@@ -591,7 +625,7 @@
       "_note": "exact replay of delivery 13"
     },
     {
-      "delivery": 49,
+      "delivery": 52,
       "event_type": "unpaused_event",
       "subject": "github_username",
       "github_username": "",
@@ -604,7 +638,7 @@
       "_note": "exact replay of delivery 14"
     },
     {
-      "delivery": 50,
+      "delivery": 53,
       "event_type": "emergency_paused_event",
       "subject": "github_username",
       "github_username": "",
@@ -617,7 +651,7 @@
       "_note": "exact replay of delivery 15"
     },
     {
-      "delivery": 51,
+      "delivery": 54,
       "event_type": "emergency_cleared_event",
       "subject": "github_username",
       "github_username": "",
@@ -630,7 +664,7 @@
       "_note": "exact replay of delivery 16"
     },
     {
-      "delivery": 52,
+      "delivery": 55,
       "event_type": "guardian_changed_event",
       "subject": "address",
       "github_username": "",
@@ -643,7 +677,7 @@
       "_note": "exact replay of delivery 17"
     },
     {
-      "delivery": 53,
+      "delivery": 56,
       "event_type": "role_grant_pending_event",
       "subject": "address",
       "github_username": "",
@@ -656,7 +690,7 @@
       "_note": "exact replay of delivery 18"
     },
     {
-      "delivery": 54,
+      "delivery": 57,
       "event_type": "role_grant_cancelled_event",
       "subject": "address",
       "github_username": "",
@@ -669,7 +703,7 @@
       "_note": "exact replay of delivery 19"
     },
     {
-      "delivery": 55,
+      "delivery": 58,
       "event_type": "renamed_event",
       "subject": "github_username",
       "github_username": "",
@@ -682,7 +716,7 @@
       "_note": "exact replay of delivery 20"
     },
     {
-      "delivery": 56,
+      "delivery": 59,
       "event_type": "rotation_requested_event",
       "subject": "github_username",
       "github_username": "",
@@ -695,7 +729,7 @@
       "_note": "exact replay of delivery 21"
     },
     {
-      "delivery": 57,
+      "delivery": 60,
       "event_type": "rotation_executed_event",
       "subject": "github_username",
       "github_username": "",
@@ -708,7 +742,7 @@
       "_note": "exact replay of delivery 22"
     },
     {
-      "delivery": 58,
+      "delivery": 61,
       "event_type": "rotation_cancelled_event",
       "subject": "github_username",
       "github_username": "",
@@ -721,7 +755,7 @@
       "_note": "exact replay of delivery 23"
     },
     {
-      "delivery": 59,
+      "delivery": 62,
       "event_type": "wasm_staged_event",
       "subject": "wasm_hash",
       "github_username": "",
@@ -734,7 +768,7 @@
       "_note": "exact replay of delivery 24"
     },
     {
-      "delivery": 60,
+      "delivery": 63,
       "event_type": "upgrade_attested_event",
       "subject": "wasm_hash",
       "github_username": "",
@@ -747,7 +781,7 @@
       "_note": "exact replay of delivery 25"
     },
     {
-      "delivery": 61,
+      "delivery": 64,
       "event_type": "attestation_cleared_event",
       "subject": "wasm_hash",
       "github_username": "",
@@ -760,7 +794,7 @@
       "_note": "exact replay of delivery 26"
     },
     {
-      "delivery": 62,
+      "delivery": 65,
       "event_type": "role_granted_event",
       "subject": "address",
       "github_username": "",
@@ -773,7 +807,7 @@
       "_note": "exact replay of delivery 27"
     },
     {
-      "delivery": 63,
+      "delivery": 66,
       "event_type": "role_revoked_event",
       "subject": "address",
       "github_username": "",
@@ -786,7 +820,7 @@
       "_note": "exact replay of delivery 28"
     },
     {
-      "delivery": 64,
+      "delivery": 67,
       "event_type": "batch_remove_proposed_event",
       "subject": "proposal_id",
       "github_username": "",
@@ -799,7 +833,7 @@
       "_note": "exact replay of delivery 29"
     },
     {
-      "delivery": 65,
+      "delivery": 68,
       "event_type": "batch_remove_executed_event",
       "subject": "proposal_id",
       "github_username": "",
@@ -812,7 +846,7 @@
       "_note": "exact replay of delivery 30"
     },
     {
-      "delivery": 66,
+      "delivery": 69,
       "event_type": "batch_remove_cancelled_event",
       "subject": "proposal_id",
       "github_username": "",
@@ -825,7 +859,7 @@
       "_note": "exact replay of delivery 31"
     },
     {
-      "delivery": 67,
+      "delivery": 70,
       "event_type": "challenge_started_event",
       "subject": "github_username",
       "github_username": "",
@@ -838,7 +872,7 @@
       "_note": "exact replay of delivery 32"
     },
     {
-      "delivery": 68,
+      "delivery": 71,
       "event_type": "challenge_cancelled_event",
       "subject": "github_username",
       "github_username": "",
@@ -851,7 +885,7 @@
       "_note": "exact replay of delivery 33"
     },
     {
-      "delivery": 69,
+      "delivery": 72,
       "event_type": "challenge_completed_event",
       "subject": "github_username",
       "github_username": "",
@@ -864,7 +898,7 @@
       "_note": "exact replay of delivery 34"
     },
     {
-      "delivery": 70,
+      "delivery": 73,
       "event_type": "staged_wasm_cleared_event",
       "subject": "wasm_hash",
       "github_username": "",
@@ -877,7 +911,7 @@
       "_note": "exact replay of delivery 35"
     },
     {
-      "delivery": 71,
+      "delivery": 74,
       "event_type": "upgrade_proposed_event",
       "subject": "wasm_hash",
       "github_username": "",
@@ -890,7 +924,7 @@
       "_note": "exact replay of delivery 36"
     },
     {
-      "delivery": 72,
+      "delivery": 75,
       "event_type": "upgrade_approved_event",
       "subject": "wasm_hash",
       "github_username": "",
@@ -903,7 +937,7 @@
       "_note": "exact replay of delivery 37"
     },
     {
-      "delivery": 73,
+      "delivery": 76,
       "event_type": "upgrade_proposal_executed_event",
       "subject": "wasm_hash",
       "github_username": "",
@@ -916,7 +950,7 @@
       "_note": "exact replay of delivery 38"
     },
     {
-      "delivery": 74,
+      "delivery": 77,
       "event_type": "upgrade_proposal_cancelled_event",
       "subject": "wasm_hash",
       "github_username": "",
@@ -929,7 +963,7 @@
       "_note": "exact replay of delivery 39"
     },
     {
-      "delivery": 75,
+      "delivery": 78,
       "event_type": "verification_configured_event",
       "subject": "github_username",
       "github_username": "",
@@ -942,7 +976,7 @@
       "_note": "exact replay of delivery 40"
     },
     {
-      "delivery": 76,
+      "delivery": 79,
       "event_type": "audit_config_changed_event",
       "subject": "config",
       "github_username": "",
@@ -953,14 +987,53 @@
       "event_index": 35,
       "event_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472:CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA:1003000:e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5:35",
       "_note": "exact replay of delivery 41"
+    },
+    {
+      "delivery": 80,
+      "event_type": "admin_transfer_proposed_event",
+      "subject": "new_admin",
+      "github_username": "",
+      "stellar_address": "",
+      "timestamp": 1733000035,
+      "ledger_sequence": 1003000,
+      "tx_hash": "e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5",
+      "event_index": 36,
+      "event_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472:CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA:1003000:e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5:36",
+      "_note": "exact replay of delivery 42"
+    },
+    {
+      "delivery": 81,
+      "event_type": "admin_transfer_cancelled_event",
+      "subject": "cancelled_by",
+      "github_username": "",
+      "stellar_address": "",
+      "timestamp": 1733000036,
+      "ledger_sequence": 1003000,
+      "tx_hash": "e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5",
+      "event_index": 37,
+      "event_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472:CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA:1003000:e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5:37",
+      "_note": "exact replay of delivery 43"
+    },
+    {
+      "delivery": 82,
+      "event_type": "admin_transfer_executed_event",
+      "subject": "new_admin",
+      "github_username": "",
+      "stellar_address": "",
+      "timestamp": 1733000037,
+      "ledger_sequence": 1003000,
+      "tx_hash": "e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5",
+      "event_index": 38,
+      "event_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472:CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA:1003000:e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5:38",
+      "_note": "exact replay of delivery 44"
     }
   ],
   "expected_final_state": {
     "octocat": {
       "stellar_address": "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H",
       "verified": false,
-      "applied_event_ids": 39,
-      "ignored_replays": 37
+      "applied_event_ids": 42,
+      "ignored_replays": 40
     }
   }
 }

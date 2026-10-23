@@ -404,6 +404,21 @@ fn plan(fx: &Fixture, op: &str, caller: &Address) -> Call {
             });
             call("clear_staged", vec![env, c.into_val(env)])
         }
+        "get_staged" => call("get_staged", vec![env]),
+        "set_attestation_required" => call(
+            "set_attestation_required",
+            vec![env, c.into_val(env), false.into_val(env)],
+        ),
+        "set_audit_config" => call(
+            "set_audit_config",
+            vec![
+                env,
+                c.into_val(env),
+                false.into_val(env),
+                0u32.into_val(env),
+                false.into_val(env),
+            ],
+        ),
         "config_verification" => call(
             "config_verification",
             vec![
@@ -563,6 +578,32 @@ fn plan(fx: &Fixture, op: &str, caller: &Address) -> Call {
                 call(op, vec![env, c.into_val(env)])
             }
         }
+        "propose_admin_transfer" => {
+            // New admin must never be the zero/burn address; the delay is
+            // arbitrary here because no row executes this proposal.
+            call(
+                "propose_admin_transfer",
+                vec![env, fx.verifier.clone().into_val(env), 60u64.into_val(env)],
+            )
+        }
+        "execute_admin_transfer" => {
+            // `random` is proposed as the successor with a zero delay, so the
+            // proposal is immediately executable; every other actor therefore
+            // fails on identity, not on the timelock.
+            fx.setup(|e| {
+                TrustBridgeContract::propose_admin_transfer(e.clone(), fx.random.clone(), 0)
+                    .unwrap()
+            });
+            call("execute_admin_transfer", vec![env, c.into_val(env)])
+        }
+        "cancel_admin_transfer" => {
+            fx.setup(|e| {
+                TrustBridgeContract::propose_admin_transfer(e.clone(), fx.random.clone(), 60)
+                    .unwrap()
+            });
+            call("cancel_admin_transfer", vec![env])
+        }
+        "get_admin_transfer" => call("get_admin_transfer", vec![env]),
         "set_oracle_allowlist" => {
             let mut keys = Vec::new(env);
             keys.push_back(BytesN::from_array(env, &ORACLE_PUBKEY));
