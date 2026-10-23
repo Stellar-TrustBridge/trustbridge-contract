@@ -1092,6 +1092,29 @@ impl TrustBridgeContract {
         get_registered_paginated_internal(&env, cursor, limit)
     }
 
+    /// Returns a page of GitHub usernames flagged for re-verification after an
+    /// address change (Issue #587).
+    ///
+    /// Scans registry index entries `[offset, offset + limit)` and returns the
+    /// canonical usernames whose `PENDING_REVERIFY_KEY` flag is set. Gas is
+    /// bounded by `limit`, so a page can hold fewer than `limit` names; keep
+    /// advancing `offset` by `limit` until it reaches `get_stats().total`.
+    /// `limit == 0` uses `DEFAULT_PAGE_LIMIT`. An empty registry returns an
+    /// empty page. Read-only, no auth required.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::InvalidBatchSize`] if `limit > MAX_PAGE_LIMIT` (100).
+    pub fn get_pending_reverify(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<String>, ContractError> {
+        require_initialized(&env)?;
+        crate::storage::get_pending_reverify_page(&env, offset, limit)
+    }
+
     /// Returns a signed export attestation for one page of the registry.
     /// Admin-only (Issue #223).
     ///

@@ -134,6 +134,32 @@ immediately rather than silently skipping the smoke.
 
 ---
 
+## Futurenet vs Testnet Parameters (Issue #671)
+
+Futurenet and Testnet are separate networks: a contract ID, identity funding,
+or deployment JSON from one is **not valid** on the other. Do not copy
+parameters across. `make network-params NETWORK=<net>` prints the values below
+and exits non-zero for an unknown `NETWORK`.
+
+| Parameter | Testnet | Futurenet |
+|-----------|---------|-----------|
+| `NETWORK` | `testnet` (default) | `futurenet` |
+| RPC URL | `https://soroban-testnet.stellar.org` | `https://rpc-futurenet.stellar.org` (`FUTURENET_RPC_URL`) |
+| Network passphrase | `Test SDF Network ; September 2015` | `Test SDF Future Network ; October 2022` |
+| Friendbot | `https://friendbot.stellar.org` (via `--fund`) | `https://friendbot-futurenet.stellar.org` (`FUTURENET_FRIENDBOT_URL`) |
+| Deploy target | `make deploy-testnet` | `make futurenet-smoke` |
+| Deployment record | `deployments/testnet.json` | `deployments/futurenet.json` |
+| Contract / admin addresses | Per-network; re-deploy and re-record | Per-network; re-deploy and re-record |
+| WASM pin (`wasm-hash.pin`) | Must match before release sign-off | Informational — Futurenet may run a newer protocol; rebuild with the pinned toolchain before comparing |
+| Reset cadence | Periodic resets wipe contracts | More frequent resets; expect redeploys |
+
+A `network passphrase` mismatch error almost always means `NETWORK` or the
+CLI identity points at the other network — see
+[TESTNET_CHECKLIST.md](TESTNET_CHECKLIST.md#testnet-vs-futurenet-failure-modes)
+and [FUTURENET_ONBOARDING.md](FUTURENET_ONBOARDING.md).
+
+---
+
 ## Mainnet Deployment
 
 ### Dual-confirm checklist

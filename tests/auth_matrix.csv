@@ -39,6 +39,8 @@ stage_wasm,random,NotAuthorized
 clear_staged,admin,
 clear_staged,upgrader,NotAuthorized
 clear_staged,random,NotAuthorized
+get_staged,admin,
+get_staged,random,
 set_role_delay,admin,
 set_role_delay,upgrader,NotAuthorized
 set_role_delay,random,NotAuthorized

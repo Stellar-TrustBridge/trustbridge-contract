@@ -26,4 +26,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "github_username"
+path = "fuzz_targets/github_username.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

@@ -215,7 +215,7 @@ fn test_registering_more_after_a_cursor_is_issued_does_not_invalidate_it() {
         register_range(&env, 3, 2);
 
         let page2 = TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 10).unwrap();
-        assert!(page2.records.len() >= 1);
+        assert!(!page2.records.is_empty());
     });
 }
 
@@ -351,7 +351,7 @@ fn test_soak_valid_cursor_prologue() {
                     limit.min(max_limit)
                 };
                 assert_eq!(
-                    page.records.len() as u32,
+                    page.records.len(),
                     (total - offset).min(effective),
                     "offset {offset} limit {limit}"
                 );
@@ -433,7 +433,7 @@ fn test_soak_export_cursor_decode_never_panics() {
                             limit.min(max_limit)
                         };
                         assert_eq!(
-                            page.records.len() as u32,
+                            page.records.len(),
                             (total - offset).min(effective),
                             "seed {si} iter {i}: bounded page contents"
                         );
@@ -484,6 +484,187 @@ fn test_soak_generation_bump_invalidates_old_cursors() {
         assert_eq!(
             TrustBridgeContract::get_public_paginated(env.clone(), Some(forged), 2),
             Err(ContractError::InvalidCursor)
+        );
+    });
+}
+
+// ── Cursors from other INDEX_GEN values (Issue #693) ────────────────────────
+
+/// Instance key holding the index generation (`INDEX_GEN_KEY` in
+/// `src/storage.rs`, documented in `docs/STORAGE_KEYS.md`).
+fn set_index_generation(env: &Env, generation: u32) {
+    env.storage()
+        .instance()
+        .set(&soroban_sdk::symbol_short!("idx_gen"), &generation);
+}
+
+/// Happy path: a cursor stamped with the current generation resumes exactly
+/// where the issuing page stopped, on the public read path.
+#[test]
+fn test_public_paginated_accepts_cursor_from_current_generation() {
+    let (env, _admin, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 4);
+        set_index_generation(&env, 7);
+
+        let page1 = TrustBridgeContract::get_public_paginated(env.clone(), None, 2).unwrap();
+        let issued = page1.next_cursor.clone().unwrap();
+        assert_eq!(issued, forge_cursor(&env, 2, 7));
+
+        let page2 =
+            TrustBridgeContract::get_public_paginated(env.clone(), Some(issued), 2).unwrap();
+        assert_eq!(page2.records.len(), 2);
+        assert_eq!(page2.records.get(0).unwrap().0, s(&env, "user002"));
+    });
+}
+
+/// A cursor from any generation other than the current one — older or
+/// newer, adjacent or far — is rejected even when its offset is in range.
+#[test]
+fn test_public_paginated_rejects_cursor_from_any_other_generation() {
+    let (env, _admin, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 4);
+        set_index_generation(&env, 5);
+
+        for generation in [0, 4, 6, 1_000, u32::MAX] {
+            assert_eq!(
+                TrustBridgeContract::get_public_paginated(
+                    env.clone(),
+                    Some(forge_cursor(&env, 1, generation)),
+                    2,
+                ),
+                Err(ContractError::InvalidCursor),
+                "generation {generation} must not decode against generation 5"
+            );
+        }
+        // The rejection is the only effect: the current generation still works.
+        assert!(TrustBridgeContract::get_public_paginated(
+            env.clone(),
+            Some(forge_cursor(&env, 1, 5)),
+            2
+        )
+        .is_ok());
+    });
+}
+
+/// The generation must keep changing at `u32::MAX`. A saturating bump would
+/// leave a cursor issued at `u32::MAX` valid after a removal shifted the
+/// index, silently skipping a record.
+#[test]
+fn test_generation_wraps_at_u32_max_and_still_invalidates_cursors() {
+    let (env, admin, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 4);
+        set_index_generation(&env, u32::MAX);
+
+        let page1 = TrustBridgeContract::get_public_paginated(env.clone(), None, 2).unwrap();
+        let issued = page1.next_cursor.clone().unwrap();
+        assert_eq!(issued, forge_cursor(&env, 2, u32::MAX));
+
+        TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "user000")).unwrap();
+
+        assert_eq!(
+            TrustBridgeContract::get_public_paginated(env.clone(), Some(issued), 2),
+            Err(ContractError::InvalidCursor)
+        );
+        let restarted = TrustBridgeContract::get_public_paginated(env.clone(), None, 2).unwrap();
+        assert_eq!(restarted.next_cursor.unwrap(), forge_cursor(&env, 2, 0));
+    });
+}
+
+// ── get_pending_reverify (Issue #587) ────────────────────────────────────────
+
+/// Registers and verifies `name`, then re-registers it to a new address so the
+/// contract flags it for re-verification. Each call runs in its own frame so
+/// the admin auth is not reused.
+fn flag_reverify(env: &Env, contract_id: &Address, admin: &Address, name: &str) {
+    let register = || {
+        env.as_contract(contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                s(env, name),
+                Address::generate(env),
+                Vec::new(env),
+            )
+            .unwrap();
+        })
+    };
+    register();
+    env.as_contract(contract_id, || {
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(env, name)).unwrap();
+    });
+    register();
+}
+
+#[test]
+fn test_get_pending_reverify_empty_registry_returns_empty_page() {
+    let (env, _admin, contract_id) = setup();
+    env.as_contract(&contract_id, || {
+        let page = TrustBridgeContract::get_pending_reverify(env.clone(), 0, 10).unwrap();
+        assert_eq!(page.len(), 0);
+    });
+}
+
+#[test]
+fn test_get_pending_reverify_two_page_walk_and_clear_on_verify() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    flag_reverify(&env, &contract_id, &admin, "carol");
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "bob"),
+            Address::generate(&env),
+            Vec::new(&env),
+        )
+        .unwrap();
+    });
+    flag_reverify(&env, &contract_id, &admin, "dave");
+    env.as_contract(&contract_id, || {
+        let first = TrustBridgeContract::get_pending_reverify(env.clone(), 0, 2).unwrap();
+        assert_eq!(first, Vec::from_array(&env, [s(&env, "carol")]));
+        let second = TrustBridgeContract::get_pending_reverify(env.clone(), 2, 2).unwrap();
+        assert_eq!(second, Vec::from_array(&env, [s(&env, "dave")]));
+        let past_end = TrustBridgeContract::get_pending_reverify(env.clone(), 4, 2).unwrap();
+        assert_eq!(past_end.len(), 0);
+    });
+
+    // Re-verifying clears the flag, so the name drops out of the page.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "carol")).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        let after = TrustBridgeContract::get_pending_reverify(env.clone(), 0, 100).unwrap();
+        assert_eq!(after, Vec::from_array(&env, [s(&env, "dave")]));
+    });
+}
+
+#[test]
+fn test_get_pending_reverify_limit_above_max_is_rejected() {
+    let (env, _admin, contract_id) = setup();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::get_pending_reverify(env.clone(), 0, 101),
+            Err(ContractError::InvalidBatchSize)
+        );
+    });
+}
+
+#[test]
+fn test_get_pending_reverify_requires_initialized() {
+    let env = Env::default();
+    let contract_id = env.register(TrustBridgeContract, ());
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::get_pending_reverify(env.clone(), 0, 10),
+            Err(ContractError::NotInitialized)
         );
     });
 }

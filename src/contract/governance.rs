@@ -173,6 +173,57 @@ impl TrustBridgeContract {
         get_wasm_attestation(&env)
     }
 
+    /// Enables or disables mandatory attestation before WASM upgrades (Issue #198).
+    ///
+    /// When `required` is `true`, every `upgrade` call must be preceded by a
+    /// valid, unexpired `attest_upgrade`; without it the upgrade fails with
+    /// [`ContractError::AttestationRequired`].  When `false` (the default),
+    /// attestation is optional — the two-step flow is advisory only.
+    ///
+    /// Note: `clear_attestation` removes the pending attestation record but does
+    /// **not** change this flag.  To disable the gate, call
+    /// `set_attestation_required(false)` explicitly.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotAuthorized`] if `caller` is not the admin.
+    pub fn set_attestation_required(
+        env: Env,
+        caller: Address,
+        required: bool,
+    ) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        caller.require_auth();
+
+        let admin = get_admin(&env)?;
+        if caller != admin {
+            Self::record_unauthorized_attempt(
+                &env,
+                &caller,
+                String::from_str(&env, "set_attestation_required"),
+            );
+            return Err(ContractError::NotAuthorized);
+        }
+
+        crate::storage::set_attestation_required(&env, required);
+        Ok(())
+    }
+
+    /// Returns whether WASM upgrade attestation is currently required.
+    ///
+    /// Defaults to `false` on instances that have never explicitly set the flag.
+    /// Dashboards and operator tooling can read this to show the current gate
+    /// configuration without needing admin credentials.
+    #[must_use]
+    pub fn get_attestation_required(env: Env) -> bool {
+        crate::storage::is_attestation_required(&env)
+    }
+
     /// Returns the provenance of the currently deployed WASM.
     ///
     /// `None` on an instance that has never been upgraded. `previous_wasm_hash`

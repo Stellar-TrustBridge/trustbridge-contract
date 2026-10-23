@@ -15,8 +15,8 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Vec};
-use trustbridge_contract::{ContractError, TrustBridgeContract};
+use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
+use trustbridge_contract::TrustBridgeContract;
 
 fn setup() -> (Env, Address, Address) {
     let env = Env::default();
@@ -56,7 +56,7 @@ fn remove_user(env: &Env, contract_id: &Address, admin: &Address, username: &str
 /// get_registered_page on empty registry returns empty list.
 #[test]
 fn test_parity_empty_registry_get_registered_page() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
@@ -68,7 +68,7 @@ fn test_parity_empty_registry_get_registered_page() {
 /// get_registered_paginated on empty registry returns empty ExportPage.
 #[test]
 fn test_parity_empty_registry_get_registered_paginated() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
@@ -89,7 +89,7 @@ fn test_parity_empty_registry_get_registered_paginated() {
 /// get_public_paginated on empty registry returns empty ExportPage.
 #[test]
 fn test_parity_empty_registry_get_public_paginated() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
 
     env.as_contract(&contract_id, || {
         let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
@@ -113,7 +113,7 @@ fn test_parity_empty_registry_get_public_paginated() {
 /// get_registered_page with one record returns that record.
 #[test]
 fn test_parity_single_record_get_registered_page() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
     let user = Address::generate(&env);
 
     register_user(&env, &contract_id, "alice", &user);
@@ -132,7 +132,7 @@ fn test_parity_single_record_get_registered_page() {
 /// get_registered_paginated with one record returns that record.
 #[test]
 fn test_parity_single_record_get_registered_paginated() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
     let user = Address::generate(&env);
 
     register_user(&env, &contract_id, "alice", &user);
@@ -153,7 +153,7 @@ fn test_parity_single_record_get_registered_paginated() {
 /// get_public_paginated with one record returns that record.
 #[test]
 fn test_parity_single_record_get_public_paginated() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
     let user = Address::generate(&env);
 
     register_user(&env, &contract_id, "alice", &user);
@@ -282,7 +282,7 @@ fn test_parity_middle_removal_get_public_paginated() {
 /// get_registered_page with offset past end returns empty list.
 #[test]
 fn test_parity_last_page_get_registered_page() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
     let user1 = Address::generate(&env);
     let user2 = Address::generate(&env);
 
@@ -300,7 +300,7 @@ fn test_parity_last_page_get_registered_page() {
 /// get_registered_paginated with exhausted cursor returns empty page.
 #[test]
 fn test_parity_last_page_get_registered_paginated() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
     let user1 = Address::generate(&env);
     let user2 = Address::generate(&env);
 
@@ -326,7 +326,7 @@ fn test_parity_last_page_get_registered_paginated() {
 /// get_public_paginated with exhausted cursor returns empty page.
 #[test]
 fn test_parity_last_page_get_public_paginated() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
     let user1 = Address::generate(&env);
     let user2 = Address::generate(&env);
 
@@ -355,7 +355,7 @@ fn test_parity_last_page_get_public_paginated() {
 /// get_registered_page with small pages returns all records across multiple calls.
 #[test]
 fn test_parity_multi_page_get_registered_page() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
 
     // Register 5 users
     for i in 0..5 {
@@ -400,7 +400,7 @@ fn test_parity_multi_page_get_registered_page() {
 /// get_registered_paginated with small pages returns all records across cursor walk.
 #[test]
 fn test_parity_multi_page_get_registered_paginated() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
 
     // Register 5 users
     for i in 0..5 {
@@ -439,7 +439,7 @@ fn test_parity_multi_page_get_registered_paginated() {
 /// get_public_paginated with small pages returns all records across cursor walk.
 #[test]
 fn test_parity_multi_page_get_public_paginated() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
 
     // Register 5 users
     for i in 0..5 {
@@ -480,8 +480,8 @@ fn test_parity_multi_page_get_public_paginated() {
 /// get_registered_page requires admin auth.
 #[test]
 fn test_parity_auth_get_registered_page_requires_admin() {
-    let (env, admin, contract_id) = setup();
-    let random_caller = Address::generate(&env);
+    let (env, _admin, contract_id) = setup();
+    let _random_caller = Address::generate(&env);
 
     env.mock_all_auths_allowing_non_root_auth();
     env.as_contract(&contract_id, || {
@@ -497,7 +497,7 @@ fn test_parity_auth_get_registered_page_requires_admin() {
 /// get_registered_paginated requires admin auth.
 #[test]
 fn test_parity_auth_get_registered_paginated_requires_admin() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
@@ -509,7 +509,7 @@ fn test_parity_auth_get_registered_paginated_requires_admin() {
 /// get_public_paginated requires no auth (permissionless).
 #[test]
 fn test_parity_auth_get_public_paginated_is_permissionless() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
     let user = Address::generate(&env);
 
     register_user(&env, &contract_id, "alice", &user);
@@ -528,7 +528,7 @@ fn test_parity_auth_get_public_paginated_is_permissionless() {
 /// get_registered_page works while paused (admin export).
 #[test]
 fn test_parity_pause_get_registered_page_works_while_paused() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
     let user = Address::generate(&env);
 
     register_user(&env, &contract_id, "alice", &user);
@@ -550,7 +550,7 @@ fn test_parity_pause_get_registered_page_works_while_paused() {
 /// get_registered_paginated works while paused (admin export).
 #[test]
 fn test_parity_pause_get_registered_paginated_works_while_paused() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
     let user = Address::generate(&env);
 
     register_user(&env, &contract_id, "alice", &user);
@@ -576,7 +576,7 @@ fn test_parity_pause_get_registered_paginated_works_while_paused() {
 /// get_public_paginated works while paused (Issue #294).
 #[test]
 fn test_parity_pause_get_public_paginated_works_while_paused() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
     let user = Address::generate(&env);
 
     register_user(&env, &contract_id, "alice", &user);
@@ -605,7 +605,7 @@ fn test_parity_pause_get_public_paginated_works_while_paused() {
 /// get_registered_page returns Vec<(String, Address)> — only username and address.
 #[test]
 fn test_parity_return_type_get_registered_page() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
     let user = Address::generate(&env);
 
     register_user(&env, &contract_id, "alice", &user);
@@ -625,7 +625,7 @@ fn test_parity_return_type_get_registered_page() {
 /// get_registered_paginated returns ExportPage with full ContributorRecord.
 #[test]
 fn test_parity_return_type_get_registered_paginated() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
     let user = Address::generate(&env);
 
     register_user(&env, &contract_id, "alice", &user);
@@ -647,14 +647,14 @@ fn test_parity_return_type_get_registered_paginated() {
         // ExportPage has pagination metadata
         assert_eq!(page.total, 1);
         assert!(!page.has_more);
-        assert!(page.merkle_root.len() > 0, "Should have merkle root");
+        assert!(!page.merkle_root.is_empty(), "Should have merkle root");
     });
 }
 
 /// get_public_paginated returns ExportPage with full ContributorRecord.
 #[test]
 fn test_parity_return_type_get_public_paginated() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
     let user = Address::generate(&env);
 
     register_user(&env, &contract_id, "alice", &user);
@@ -672,7 +672,7 @@ fn test_parity_return_type_get_public_paginated() {
         // ExportPage has pagination metadata
         assert_eq!(page.total, 1);
         assert!(!page.has_more);
-        assert!(page.merkle_root.len() > 0, "Should have merkle root");
+        assert!(!page.merkle_root.is_empty(), "Should have merkle root");
     });
 }
 
@@ -698,8 +698,10 @@ fn test_parity_coverage_complete() {
 
     const EXPECTED_TEST_COUNT: usize = 24; // 8 scenarios × 3 APIs
 
-    assert!(
-        EXPECTED_TEST_COUNT >= 24,
-        "Should have at least 24 parity tests covering all three APIs"
-    );
+    const {
+        assert!(
+            EXPECTED_TEST_COUNT >= 24,
+            "Should have at least 24 parity tests covering all three APIs"
+        );
+    }
 }

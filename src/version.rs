@@ -133,6 +133,9 @@ impl core::fmt::Display for Version {
 }
 
 /// Contract migration state.
+#[allow(dead_code)]
+// Staged migration-state machine; exercised by the tests in this file,
+// wired into `run_migration_steps` in a follow-up.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MigrationState {
     /// No migration needed
@@ -148,6 +151,9 @@ pub enum MigrationState {
 }
 
 /// Compatibility information between versions.
+#[allow(dead_code)]
+// Staged version-compatibility report; constructed by `for_upgrade` and
+// covered by the tests in this file.
 #[derive(Clone, Copy, Debug)]
 pub struct CompatibilityInfo {
     pub current_version: Version,
@@ -159,6 +165,7 @@ pub struct CompatibilityInfo {
 
 impl CompatibilityInfo {
     /// Create compatibility info for an upgrade.
+    #[allow(dead_code)] // Staged with `CompatibilityInfo`; covered by the tests in this file.
     pub fn for_upgrade(current: Version, target: Version) -> Self {
         let breaking_changes = current.major != target.major;
         let data_migration_required = breaking_changes || current.minor != target.minor;
@@ -412,5 +419,123 @@ mod tests {
             ),
             other => panic!("unexpected authorized function: {other:?}"),
         }
+    }
+
+    // ── Protocol version gate tests for outdated clients ──────────────────────
+    //
+    // These verify that `is_compatible` on the deployed contract correctly
+    // rejects clients that require a version the contract does not satisfy,
+    // and accepts clients whose minimum requirement the contract meets.
+
+    #[test]
+    fn protocol_gate_rejects_client_requiring_higher_minor() {
+        use crate::TrustBridgeContract;
+        use soroban_sdk::{testutils::Address as _, Address, Env};
+
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // CONTRACT_VERSION is 1.1.0; a client requiring 1.2.0 must be rejected.
+        env.as_contract(&contract_id, || {
+            assert!(
+                !TrustBridgeContract::is_compatible(env.clone(), 1, 2, 0),
+                "outdated contract (1.1.0) must not satisfy a client requiring 1.2.0"
+            );
+        });
+    }
+
+    #[test]
+    fn protocol_gate_rejects_client_requiring_higher_major() {
+        use crate::TrustBridgeContract;
+        use soroban_sdk::{testutils::Address as _, Address, Env};
+
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // A client requiring major 2 always signals a breaking ABI change.
+        env.as_contract(&contract_id, || {
+            assert!(
+                !TrustBridgeContract::is_compatible(env.clone(), 2, 0, 0),
+                "contract at major 1 must not satisfy a client requiring major 2"
+            );
+        });
+    }
+
+    #[test]
+    fn protocol_gate_accepts_exact_version() {
+        use crate::TrustBridgeContract;
+        use soroban_sdk::{testutils::Address as _, Address, Env};
+
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // A client whose minimum is exactly the deployed version must succeed.
+        env.as_contract(&contract_id, || {
+            let (major, minor, patch) = TrustBridgeContract::version(env.clone());
+            assert!(
+                TrustBridgeContract::is_compatible(env.clone(), major, minor, patch),
+                "contract must be compatible with its own version"
+            );
+        });
+    }
+
+    #[test]
+    fn protocol_gate_accepts_older_minimum() {
+        use crate::TrustBridgeContract;
+        use soroban_sdk::{testutils::Address as _, Address, Env};
+
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // A client that only requires 1.0.0 must pass against any 1.x deployment.
+        env.as_contract(&contract_id, || {
+            assert!(
+                TrustBridgeContract::is_compatible(env.clone(), 1, 0, 0),
+                "contract at 1.1.0 must satisfy a client requiring only 1.0.0"
+            );
+        });
+    }
+
+    #[test]
+    fn protocol_gate_version_returns_stable_tuple() {
+        use crate::TrustBridgeContract;
+        use soroban_sdk::{testutils::Address as _, Address, Env};
+
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // The stored version must match the CONTRACT_VERSION build constant.
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::version(env.clone()),
+                (1, 1, 0),
+                "version must match build constant"
+            );
+        });
     }
 }

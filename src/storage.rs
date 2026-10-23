@@ -39,6 +39,8 @@ pub const PAUSED_KEY: Symbol = symbol_short!("pause");
 /// Last `PauseReason` recorded by `pause` / `unpause`.
 pub const PAUSE_RSN_KEY: Symbol = symbol_short!("pause_rsn");
 /// Consolidated alias for [`PAUSE_RSN_KEY`].
+#[allow(dead_code)] // Issue #211: alias retained for callers that spell out the key name;
+                    // PAUSE_RSN_KEY is the canonical persisted key.
 pub const PAUSE_REASON_KEY: Symbol = PAUSE_RSN_KEY;
 pub const COOLDOWN_KEY: Symbol = symbol_short!("cdown");
 /// Seconds a requested address rotation must wait before it can execute
@@ -140,6 +142,7 @@ pub const MAX_FALLBACK_ADDRESSES: u32 = 5;
 pub const VERSION_KEY: Symbol = VER_KEY;
 
 /// Key for a pending admin transfer proposal (Issue #195).
+#[allow(dead_code)] // Issue #195: consumed by the timelocked admin-transfer propose/execute flow.
 pub const ADMIN_TRANSFER_KEY: Symbol = symbol_short!("adm_xfr");
 
 /// Key for whether WASM attestation is required before upgrade (Issue #198).
@@ -445,9 +448,13 @@ pub struct Stats {
 
 /// Documented layout version for [`ExportPage`] and its records.
 /// Breaking changes to the struct layout or field ordering bump this version.
+#[allow(dead_code)] // Public ABI constant consumed by off-chain clients (see docs/ABI.md),
+                    // not read inside the contract.
 pub const EXPORT_PAGE_LAYOUT_VERSION: u32 = 2;
 
 /// A single exported record tuple: `(github_username, ContributorRecord)`.
+#[allow(dead_code)] // Public ABI type alias consumed by off-chain clients; see
+                    // `EXPORT_PAGE_LAYOUT_VERSION` and `ts-differential-tests/export_page.*`.
 pub type ExportRecord = (String, ContributorRecord);
 
 /// A single page of registry records returned by paginated export functions.
@@ -531,6 +538,21 @@ pub struct HealthSnapshot {
     pub cooldown_remaining_secs: u64,
     /// Whether a non-expired upgrade attestation is currently live.
     pub attestation_present: bool,
+}
+
+/// Pre-Wave operator probes for pause flag, admin presence, and index
+/// generation (Issue #668). Returned by `get_health_probes`, which — unlike
+/// `get_health` — works before `initialize`, so an uninitialized deployment
+/// reports `admin_set: false` instead of failing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
+pub struct HealthProbes {
+    /// Whether the contract is currently paused.
+    pub paused: bool,
+    /// Whether an admin has been written by `initialize`.
+    pub admin_set: bool,
+    /// Current registry index generation (bumped on removals).
+    pub index_gen: u32,
 }
 
 /// A pending squatter-challenge record stored per username (Issue #214).
@@ -625,6 +647,11 @@ pub fn require_initialized(env: &Env) -> Result<(), ContractError> {
     require_matching_network(env)
 }
 
+/// Returns whether an admin is stored, without the init/network gate.
+pub fn has_admin(env: &Env) -> bool {
+    env.storage().instance().has(&ADMIN_KEY)
+}
+
 pub fn get_admin(env: &Env) -> Result<Address, ContractError> {
     require_initialized(env)?;
     env.storage()
@@ -634,6 +661,8 @@ pub fn get_admin(env: &Env) -> Result<Address, ContractError> {
 }
 
 /// Write `admin` into instance storage. Used only by `initialize`.
+#[allow(dead_code)] // Issue #248: `initialize` writes ADMIN_KEY directly; this helper is
+                    // exercised by `storage_dead_code_tests::setup_contract`.
 pub fn set_admin(env: &Env, admin: &Address) {
     env.storage().instance().set(&ADMIN_KEY, admin);
 }
@@ -715,6 +744,11 @@ pub fn extend_record_ttl(env: &Env, github_username: &String) -> bool {
 pub fn remove_record(env: &Env, github_username: &String) {
     let key = (REG_KEY, canon(env, github_username));
     env.storage().persistent().remove(&key);
+    // Issue #588: an outstanding re-verify flag lives under its own `pend_rev`
+    // prefix, so dropping the registration must drop it too — otherwise a
+    // later re-registration of the same name inherits a stale flag (see
+    // `docs/STORAGE_KEYS.md`).
+    clear_pending_reverify(env, github_username);
 }
 
 /// Existence check for a single registration.
@@ -972,8 +1006,13 @@ pub fn get_index_generation(env: &Env) -> u32 {
     env.storage().instance().get(&INDEX_GEN_KEY).unwrap_or(0)
 }
 
+/// Wraps rather than saturates (Issue #693): a saturating bump would pin the
+/// generation at `u32::MAX`, so every removal after that point would leave
+/// outstanding cursors valid against a shifted index. Wrapping keeps each
+/// bump distinct from the generation it replaces; a collision needs exactly
+/// 2^32 removals between issuing and resuming a cursor.
 fn bump_index_generation(env: &Env) {
-    let next = get_index_generation(env).saturating_add(1);
+    let next = get_index_generation(env).wrapping_add(1);
     env.storage().instance().set(&INDEX_GEN_KEY, &next);
 }
 
@@ -1277,6 +1316,8 @@ pub fn set_emergency_pause_ts(env: &Env, ts: u64) {
 }
 
 /// Rejects the call while the emergency pause flag is set.
+#[allow(dead_code)] // Staged for the emergency-pause call-site consolidation; not yet invoked
+                    // by an entry point. Covered by `storage_dead_code_tests`.
 pub fn require_not_emergency_paused(env: &Env) -> Result<(), ContractError> {
     if get_emergency_pause(env) {
         Err(ContractError::Paused)
@@ -1343,13 +1384,50 @@ pub fn get_pending_reverify(env: &Env, github_username: &String) -> bool {
 }
 
 pub fn set_pending_reverify(env: &Env, github_username: &String, flag: bool) {
-    let key = (PENDING_REVERIFY_KEY, canon(env, github_username));
-    env.storage().persistent().set(&key, &flag);
+    // A `false` flag is the absence of a pending re-verification, so it is
+    // stored as a removed key rather than as a persisted `false` — that keeps
+    // `has` consistent with `get_pending_reverify` and leaves no stale entry
+    // behind for a later re-registration to inherit (Issue #588).
+    if flag {
+        let key = (PENDING_REVERIFY_KEY, canon(env, github_username));
+        env.storage().persistent().set(&key, &true);
+    } else {
+        clear_pending_reverify(env, github_username);
+    }
 }
 
 pub fn clear_pending_reverify(env: &Env, github_username: &String) {
     let key = (PENDING_REVERIFY_KEY, canon(env, github_username));
     env.storage().persistent().remove(&key);
+}
+
+/// Returns the usernames flagged for re-verification among index entries
+/// `[offset, offset + limit)` (Issue #587).
+///
+/// The scan touches at most `limit` index entries, so gas stays bounded no
+/// matter how large the registry is; a page may therefore hold fewer than
+/// `limit` usernames. Callers advance `offset` by `limit` until it reaches
+/// the registry count. `limit == 0` falls back to `DEFAULT_PAGE_LIMIT`.
+///
+/// # Errors
+///
+/// - [`ContractError::InvalidBatchSize`] if `limit > MAX_PAGE_LIMIT`.
+pub fn get_pending_reverify_page(
+    env: &Env,
+    offset: u32,
+    limit: u32,
+) -> Result<Vec<String>, ContractError> {
+    if limit > MAX_PAGE_LIMIT {
+        return Err(ContractError::InvalidBatchSize);
+    }
+    let names = get_index_page(env, offset, limit);
+    let mut page = Vec::new(env);
+    for username in names.iter() {
+        if get_pending_reverify(env, &username) {
+            page.push_back(username);
+        }
+    }
+    Ok(page)
 }
 
 pub fn get_last_upgrade(env: &Env) -> u64 {
@@ -1403,16 +1481,19 @@ pub fn remove_wasm_attestation(env: &Env) {
 // ── Admin transfer (Issue #195) ───────────────────────────────────────────────
 
 /// Returns the pending admin transfer proposal, if one exists.
+#[allow(dead_code)] // Issue #195: used by the timelocked admin-transfer propose/execute flow.
 pub fn get_admin_transfer(env: &Env) -> Option<AdminTransferProposal> {
     env.storage().instance().get(&ADMIN_TRANSFER_KEY)
 }
 
 /// Stores a new admin transfer proposal, overwriting any existing one.
+#[allow(dead_code)] // Issue #195: used by the timelocked admin-transfer propose/execute flow.
 pub fn set_admin_transfer(env: &Env, proposal: &AdminTransferProposal) {
     env.storage().instance().set(&ADMIN_TRANSFER_KEY, proposal);
 }
 
 /// Removes the pending admin transfer proposal.
+#[allow(dead_code)] // Issue #195: used by the timelocked admin-transfer cancel/execute flow.
 pub fn clear_admin_transfer(env: &Env) {
     env.storage().instance().remove(&ADMIN_TRANSFER_KEY);
 }
@@ -1564,6 +1645,8 @@ pub fn charge_verify_rate(env: &Env, verifier: &Address, units: u32) -> Result<(
 
 /// Units `verifier` has already spent in the current ledger (0 after rollover).
 /// Read-only helper for tests and diagnostics.
+#[allow(dead_code)] // Diagnostics/test helper: not called from an entry point; covered by
+                    // the rate-limit tests in this module.
 pub fn verify_units_spent(env: &Env, verifier: &Address) -> u32 {
     let key = (VERIFY_RATE_KEY, verifier.clone());
     match env.storage().persistent().get::<_, (u32, u32)>(&key) {
@@ -2879,6 +2962,347 @@ mod pending_reverify_tests {
             assert!(!get_pending_reverify(&env, &old));
             assert!(get_pending_reverify(&env, &new));
         });
+    }
+
+    /// Issue #588 edge case: `set_pending_reverify(.., false)` clears the flag
+    /// by removing the key — it must not persist a `false` entry, which would
+    /// make `has` disagree with `get_pending_reverify`.
+    #[test]
+    fn test_set_pending_reverify_false_removes_key() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        env.as_contract(&contract_id, || {
+            let octocat = name(&env, "octocat");
+            let key = (PENDING_REVERIFY_KEY, canon(&env, &octocat));
+
+            set_pending_reverify(&env, &octocat, true);
+            assert!(env.storage().persistent().has(&key));
+
+            set_pending_reverify(&env, &octocat, false);
+            assert!(!get_pending_reverify(&env, &octocat));
+            assert!(!env.storage().persistent().has(&key));
+        });
+    }
+
+    /// Issue #588 edge case: setting the flag does not require the username to
+    /// be registered — the key is written straight through and stays readable.
+    #[test]
+    fn test_set_pending_reverify_on_unknown_username_is_allowed() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        env.as_contract(&contract_id, || {
+            let ghost = name(&env, "ghost");
+            set_pending_reverify(&env, &ghost, true);
+            assert!(get_pending_reverify(&env, &ghost));
+        });
+    }
+
+    /// Both directions are idempotent: repeating a write never changes the
+    /// observable state, and repeated clears are safe no-ops.
+    #[test]
+    fn test_pending_reverify_writes_are_idempotent() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        env.as_contract(&contract_id, || {
+            let octocat = name(&env, "octocat");
+            let key = (PENDING_REVERIFY_KEY, canon(&env, &octocat));
+
+            set_pending_reverify(&env, &octocat, true);
+            set_pending_reverify(&env, &octocat, true);
+            assert!(get_pending_reverify(&env, &octocat));
+
+            set_pending_reverify(&env, &octocat, false);
+            let removed = !env.storage().persistent().has(&key);
+            set_pending_reverify(&env, &octocat, false);
+            clear_pending_reverify(&env, &octocat);
+            assert!(!get_pending_reverify(&env, &octocat));
+            assert!(removed, "first false write must have removed the key");
+            assert!(!env.storage().persistent().has(&key));
+        });
+    }
+}
+
+// ── Storage footprint budget check (Issue #661) ─────────────────────────────
+//
+// Measures the XDR-serialized size of the keys that grow with the registry and
+// compares them against the machine-readable budget table in
+// `docs/STORAGE_FOOTPRINT.md`. A new field on `ContributorRecord`, a larger
+// `CHUNK_SIZE`, or a fatter instance map fails CI here instead of silently
+// raising rent. Run via `make storage-footprint-check`.
+#[cfg(test)]
+mod storage_footprint_budget_tests {
+    extern crate std;
+
+    use super::*;
+    use crate::TrustBridgeContract;
+    use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
+    use std::{
+        format,
+        string::{String as StdString, ToString},
+        vec::Vec as StdVec,
+    };
+
+    const FOOTPRINT_DOC: &str = include_str!("../docs/STORAGE_FOOTPRINT.md");
+    const BEGIN: &str = "<!-- footprint-budget:begin -->";
+    const END: &str = "<!-- footprint-budget:end -->";
+
+    /// GitHub's username cap — measuring at the cap gives a worst-case bound.
+    const MAX_USERNAME_LEN: usize = 39;
+
+    /// Parses `| \`key\` | <max_bytes> |` rows between the budget markers.
+    fn parse_budgets(doc: &str) -> Result<StdVec<(StdString, u32)>, StdString> {
+        let start = doc
+            .find(BEGIN)
+            .ok_or("missing footprint-budget:begin marker")?;
+        let end = doc.find(END).ok_or("missing footprint-budget:end marker")?;
+        if end < start {
+            return Err("footprint-budget markers out of order".into());
+        }
+        let mut out = StdVec::new();
+        for line in doc[start + BEGIN.len()..end].lines() {
+            let line = line.trim();
+            if !line.starts_with("| `") {
+                continue;
+            }
+            let cells: StdVec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+            if cells.len() < 2 {
+                return Err(format!("malformed budget row: {line}"));
+            }
+            let key = cells[0].trim_matches('`').to_string();
+            let max = cells[1]
+                .parse::<u32>()
+                .map_err(|_| format!("budget for `{key}` is not a byte count: {}", cells[1]))?;
+            out.push((key, max));
+        }
+        if out.is_empty() {
+            return Err("footprint budget table is empty".into());
+        }
+        Ok(out)
+    }
+
+    /// Every measured key must have a budget and fit under it; every budget
+    /// must correspond to a measured key so stale rows are caught too.
+    fn check_budgets(
+        measured: &[(&str, u32)],
+        budgets: &[(StdString, u32)],
+    ) -> Result<(), StdString> {
+        let mut errors = StdVec::new();
+        for (key, bytes) in measured {
+            match budgets.iter().find(|(k, _)| k == key) {
+                None => errors.push(format!("`{key}` measured at {bytes} B has no budget row")),
+                Some((_, max)) if bytes > max => errors.push(format!(
+                    "`{key}` measured at {bytes} B exceeds budget {max} B"
+                )),
+                Some(_) => {}
+            }
+        }
+        for (key, _) in budgets {
+            if !measured.iter().any(|(k, _)| k == key) {
+                errors.push(format!("budget row `{key}` is not measured by this test"));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("\n"))
+        }
+    }
+
+    fn max_len_username(env: &Env, i: u32) -> String {
+        let prefix = format!("u{i:05}");
+        let name = format!("{prefix}{}", "a".repeat(MAX_USERNAME_LEN - prefix.len()));
+        String::from_str(env, &name)
+    }
+
+    /// Registers one full chunk of max-length usernames and returns the
+    /// XDR size of each growing key. Each registration is its own invocation,
+    /// as on-chain, so no single call trips the per-transaction limits.
+    fn measure(env: &Env) -> StdVec<(&'static str, u32)> {
+        let admin = Address::generate(env);
+        let contract_id = env.register(TrustBridgeContract, ());
+        let client = crate::TrustBridgeContractClient::new(env, &contract_id);
+        env.mock_all_auths();
+        client.initialize(&admin);
+        for i in 0..CHUNK_SIZE {
+            client.register(
+                &max_len_username(env, i),
+                &Address::generate(env),
+                &Vec::new(env),
+            );
+        }
+        env.as_contract(&contract_id, || {
+            let record = get_record(env, &max_len_username(env, 0)).unwrap();
+            let chunk = get_chunk(env, 0);
+            let index = get_index(env);
+            assert_eq!(
+                chunk.len(),
+                CHUNK_SIZE,
+                "fixture must fill exactly one chunk"
+            );
+            std::vec![
+                ("reg", record.to_xdr(env).len()),
+                ("chunk", chunk.to_xdr(env).len()),
+                ("idx_per_user", index.to_xdr(env).len() / CHUNK_SIZE),
+            ]
+        })
+    }
+
+    #[test]
+    fn measured_keys_fit_documented_footprint_budget() {
+        let env = Env::default();
+        let measured = measure(&env);
+        let budgets = parse_budgets(FOOTPRINT_DOC).unwrap_or_else(|e| panic!("{e}"));
+        if let Err(e) = check_budgets(&measured, &budgets) {
+            panic!("storage footprint budget check FAILED — update docs/STORAGE_FOOTPRINT.md only for an intentional change:\n{e}\nmeasured: {measured:?}");
+        }
+    }
+
+    #[test]
+    fn over_budget_measurement_is_rejected() {
+        let budgets = std::vec![("reg".to_string(), 100)];
+        let err = check_budgets(&[("reg", 101)], &budgets).unwrap_err();
+        assert!(err.contains("exceeds budget 100 B"), "{err}");
+    }
+
+    #[test]
+    fn unbudgeted_and_stale_keys_are_rejected() {
+        let budgets = std::vec![("stale".to_string(), 10)];
+        let err = check_budgets(&[("newkey", 1)], &budgets).unwrap_err();
+        assert!(
+            err.contains("`newkey` measured at 1 B has no budget row"),
+            "{err}"
+        );
+        assert!(err.contains("budget row `stale` is not measured"), "{err}");
+    }
+
+    #[test]
+    fn malformed_budget_table_fails_with_stable_error() {
+        assert_eq!(
+            parse_budgets("no markers").unwrap_err(),
+            "missing footprint-budget:begin marker"
+        );
+        let empty = format!("{BEGIN}\n{END}");
+        assert_eq!(
+            parse_budgets(&empty).unwrap_err(),
+            "footprint budget table is empty"
+        );
+        let bad = format!("{BEGIN}\n| `reg` | lots |\n{END}");
+        assert!(parse_budgets(&bad)
+            .unwrap_err()
+            .contains("not a byte count"));
+    }
+}
+
+// ── Storage rent playbook consistency (Issue #660) ──────────────────────────
+//
+// `docs/STORAGE_RENT.md` carries the operator TTL-extension playbook. Its
+// constants table is checked here so an operator never schedules a keeper
+// against numbers the contract no longer uses. Run via
+// `make storage-rent-check`.
+#[cfg(test)]
+mod storage_rent_playbook_tests {
+    extern crate std;
+
+    use super::*;
+    use std::{
+        format,
+        string::{String as StdString, ToString},
+        vec::Vec as StdVec,
+    };
+
+    const RENT_DOC: &str = include_str!("../docs/STORAGE_RENT.md");
+    const BEGIN: &str = "<!-- rent-playbook:begin -->";
+    const END: &str = "<!-- rent-playbook:end -->";
+
+    /// Keeper cadence the playbook commits to: two-thirds of the threshold,
+    /// so a missed run still leaves ~10 days of margin before archival.
+    const KEEPER_INTERVAL: u32 = TTL_THRESHOLD / 3 * 2;
+
+    fn parse_playbook(doc: &str) -> Result<StdVec<(StdString, u32)>, StdString> {
+        let start = doc
+            .find(BEGIN)
+            .ok_or("missing rent-playbook:begin marker")?;
+        let end = doc.find(END).ok_or("missing rent-playbook:end marker")?;
+        if end < start {
+            return Err("rent-playbook markers out of order".into());
+        }
+        let mut out = StdVec::new();
+        for line in doc[start + BEGIN.len()..end].lines() {
+            let line = line.trim();
+            if !line.starts_with("| `") {
+                continue;
+            }
+            let cells: StdVec<&str> = line.trim_matches('|').split('|').map(str::trim).collect();
+            if cells.len() < 2 {
+                return Err(format!("malformed playbook row: {line}"));
+            }
+            let name = cells[0].trim_matches('`').to_string();
+            let value = cells[1]
+                .parse::<u32>()
+                .map_err(|_| format!("`{name}` value is not a number: {}", cells[1]))?;
+            out.push((name, value));
+        }
+        if out.is_empty() {
+            return Err("rent playbook table is empty".into());
+        }
+        Ok(out)
+    }
+
+    fn expected() -> [(&'static str, u32); 5] {
+        [
+            ("LEDGERS_PER_DAY", LEDGERS_PER_DAY),
+            ("TTL_THRESHOLD", TTL_THRESHOLD),
+            ("TTL_BUMP", TTL_BUMP),
+            ("KEEPER_INTERVAL", KEEPER_INTERVAL),
+            (
+                "MAX_KEEPER_BATCH",
+                crate::batch::BatchConfig::default().max_batch_size,
+            ),
+        ]
+    }
+
+    #[test]
+    fn playbook_constants_match_contract() {
+        let documented = parse_playbook(RENT_DOC).unwrap_or_else(|e| panic!("{e}"));
+        let expected = expected();
+        assert_eq!(
+            documented.len(),
+            expected.len(),
+            "playbook table rows: {documented:?}"
+        );
+        for (name, value) in expected {
+            let doc_value = documented
+                .iter()
+                .find(|(n, _)| n == name)
+                .unwrap_or_else(|| panic!("docs/STORAGE_RENT.md playbook is missing `{name}`"))
+                .1;
+            assert_eq!(
+                doc_value, value,
+                "docs/STORAGE_RENT.md playbook `{name}` = {doc_value}, contract uses {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn keeper_interval_leaves_margin_before_threshold() {
+        assert!(KEEPER_INTERVAL < TTL_THRESHOLD);
+        assert!(TTL_THRESHOLD < TTL_BUMP);
+        assert_eq!(KEEPER_INTERVAL, LEDGERS_PER_DAY * 20);
+    }
+
+    #[test]
+    fn malformed_playbook_fails_with_stable_error() {
+        assert_eq!(
+            parse_playbook("nothing here").unwrap_err(),
+            "missing rent-playbook:begin marker"
+        );
+        let bad = format!("{BEGIN}\n| `TTL_BUMP` | ninety days |\n{END}");
+        assert!(parse_playbook(&bad).unwrap_err().contains("not a number"));
+        let empty = format!("{BEGIN}\n{END}");
+        assert_eq!(
+            parse_playbook(&empty).unwrap_err(),
+            "rent playbook table is empty"
+        );
     }
 }
 

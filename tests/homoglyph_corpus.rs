@@ -713,7 +713,7 @@ fn test_homoglyph_registration_blocked_at_register_entry_point() {
 /// registration. A sponsor cannot bypass the homoglyph guard.
 #[test]
 fn test_homoglyph_registration_blocked_at_register_sponsored_entry_point() {
-    use soroban_sdk::{testutils::Address as _, Address, Env, Vec};
+    use soroban_sdk::{testutils::Address as _, Address, Env};
     use trustbridge_contract::{ContractError, TrustBridgeContract};
 
     let env = Env::default();
@@ -872,8 +872,10 @@ fn test_homoglyph_corpus_coverage_complete() {
     const EXPECTED_CORPUS_SIZE: usize = 80; // Approximate, update as corpus grows
 
     // The real validation is in each corpus test. This just documents the scope.
-    assert!(
-        EXPECTED_CORPUS_SIZE >= 78,
-        "Corpus should cover at least 78 known homoglyph/confusable codepoints"
-    );
+    const {
+        assert!(
+            EXPECTED_CORPUS_SIZE >= 78,
+            "Corpus should cover at least 78 known homoglyph/confusable codepoints"
+        );
+    }
 }

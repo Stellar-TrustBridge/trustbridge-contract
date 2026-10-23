@@ -64,9 +64,9 @@ pub use oracle_proof::{
 };
 pub use staged_wasm::StagedWasm;
 pub use storage::{
-    ChallengeRecord, ContributorRecord, ExportAttestation, ExportPage, HealthSnapshot, PauseReason,
-    PendingBatchRemove, PendingRoleGrant, PendingRotation, RecordProof, RepairReport, Role,
-    RoleHolder, Stats, VerificationConfig, VerifierAllowEntry, WasmAttestation, WasmProvenance,
+    ChallengeRecord, ContributorRecord, ExportAttestation, ExportPage, HealthProbes, HealthSnapshot,
+    PauseReason, PendingBatchRemove, PendingRoleGrant, PendingRotation, RecordProof, RepairReport,
+    Role, RoleHolder, Stats, VerificationConfig, VerifierAllowEntry, WasmAttestation, WasmProvenance,
     MAX_FALLBACK_ADDRESSES, MAX_VERIFIERS,
 };
 pub use version::Version;

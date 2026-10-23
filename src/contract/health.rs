@@ -99,4 +99,19 @@ impl TrustBridgeContract {
             attestation_present,
         })
     }
+
+    /// Returns the pre-Wave operator probes: pause flag, admin presence, and
+    /// index generation (Issue #668).
+    ///
+    /// Read-only, no auth required, works while paused, and — unlike
+    /// [`get_health`](Self::get_health) — never errors: an uninitialized
+    /// deployment reports `admin_set: false` so the probe fails closed with a
+    /// readable answer instead of `NotInitialized`.
+    pub fn get_health_probes(env: Env) -> HealthProbes {
+        HealthProbes {
+            paused: storage_is_paused(&env),
+            admin_set: crate::storage::has_admin(&env),
+            index_gen: crate::storage::get_index_generation(&env),
+        }
+    }
 }

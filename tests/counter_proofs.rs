@@ -503,3 +503,91 @@ fn proof_revoke_decrements_and_is_idempotent() {
     assert_eq!(verified_final, 0, "P7: verified must still be 0");
     assert_eq!(vc_final, 0, "P7: verified_count must still be 0");
 }
+
+// ─── P7/P8: counters match the enumerable index under batch ops (Issue #670) ─
+
+fn index_len(env: &Env, cid: &Address) -> u32 {
+    env.mock_all_auths();
+    env.as_contract(cid, || {
+        TrustBridgeContract::get_all_registered(env.clone())
+            .unwrap()
+            .len()
+    })
+}
+
+fn names(env: &Env, list: &[&str]) -> Vec<String> {
+    let mut v = Vec::new(env);
+    for n in list {
+        v.push_back(s(env, n));
+    }
+    v
+}
+
+/// **P7** — After mixed `batch_verify` / `batch_remove` calls containing
+/// unregistered and duplicate entries, `stats().total` equals the enumerable
+/// index length and `verified` equals the live verified records.
+#[test]
+fn proof_counters_match_index_under_mixed_batches() {
+    let (env, admin, user, cid) = setup();
+    for n in ["a1", "a2", "a3", "a4", "a5"] {
+        register(&env, &cid, &user, n);
+    }
+
+    env.mock_all_auths();
+    env.as_contract(&cid, || {
+        let r = TrustBridgeContract::batch_verify(
+            env.clone(),
+            admin.clone(),
+            names(&env, &["a1", "a2", "a2", "ghost", "a3"]),
+        )
+        .unwrap();
+        assert_eq!(r.successful + r.failed, r.total);
+    });
+    assert_eq!(stats(&env, &cid), (index_len(&env, &cid), 3));
+
+    env.as_contract(&cid, || {
+        let r = TrustBridgeContract::batch_remove(
+            env.clone(),
+            admin.clone(),
+            names(&env, &["a1", "a4", "a4", "ghost"]),
+        )
+        .unwrap();
+        assert_eq!(r.successful, 2);
+    });
+
+    let (total, verified) = stats(&env, &cid);
+    assert_eq!(
+        total,
+        index_len(&env, &cid),
+        "total must equal index length"
+    );
+    assert_eq!(total, 3);
+    assert_eq!(
+        verified, 2,
+        "only the removed verified record is decremented"
+    );
+    assert_eq!(verified, verified_count(&env, &cid));
+}
+
+/// **P8** — A rejected batch (oversized) moves no counter and leaves the
+/// enumerable index untouched.
+#[test]
+fn proof_rejected_batch_moves_no_counter() {
+    let (env, admin, user, cid) = setup();
+    register(&env, &cid, &user, "a1");
+    let before = (stats(&env, &cid), index_len(&env, &cid));
+
+    let mut big = Vec::new(&env);
+    for _ in 0..101 {
+        big.push_back(s(&env, "a1"));
+    }
+    env.mock_all_auths();
+    env.as_contract(&cid, || {
+        assert_eq!(
+            TrustBridgeContract::batch_remove(env.clone(), admin.clone(), big.clone()),
+            Err(ContractError::InvalidBatchSize)
+        );
+    });
+
+    assert_eq!((stats(&env, &cid), index_len(&env, &cid)), before);
+}

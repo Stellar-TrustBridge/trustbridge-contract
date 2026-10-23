@@ -28,7 +28,7 @@ use soroban_sdk::{
     testutils::{Address as _, Ledger as _, LedgerInfo},
     Address, Env, Vec,
 };
-use trustbridge_contract::{ContractError, Role, TrustBridgeContract};
+use trustbridge_contract::TrustBridgeContract;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -131,7 +131,7 @@ fn test_proof_for_registered_unverified_username() {
     // registered_at is set to env.ledger().timestamp() at registration time —
     // it may be 0 in a default Env where timestamp starts at 0, so we just
     // verify the field is present and the proof is self-consistent.
-    assert_eq!(proof.exists, true);
+    assert!(proof.exists);
 }
 
 // ─── 3. Verified existence proof ─────────────────────────────────────────────
@@ -415,4 +415,100 @@ fn test_proof_lifecycle_transitions() {
     assert!(!after_remove.exists);
     assert!(!after_remove.verified);
     assert_eq!(after_remove.registered_at, 0);
+}
+
+// ─── Export binding against tampered records (Issue #672) ────────────────────
+
+const NODE_DOMAIN: &[u8] = b"trustbridge/export-node/v1:";
+
+/// Recomputes an export page root from `(username, address, verified)`
+/// tuples using the contract's leaf hash and the documented tree shape.
+fn root_from(env: &Env, rows: &[(soroban_sdk::String, Address, bool)]) -> soroban_sdk::BytesN<32> {
+    let mut level: std::vec::Vec<soroban_sdk::BytesN<32>> = rows
+        .iter()
+        .map(|(u, a, v)| {
+            TrustBridgeContract::merkle_leaf_hash(env.clone(), u.clone(), a.clone(), *v)
+        })
+        .collect();
+    while level.len() > 1 {
+        let mut next = std::vec::Vec::new();
+        for pair in level.chunks(2) {
+            if let [l, r] = pair {
+                let mut buf = soroban_sdk::Bytes::from_slice(env, NODE_DOMAIN);
+                buf.append(&soroban_sdk::Bytes::from(l.clone()));
+                buf.append(&soroban_sdk::Bytes::from(r.clone()));
+                next.push(env.crypto().sha256(&buf).to_bytes());
+            } else {
+                next.push(pair[0].clone());
+            }
+        }
+        level = next;
+    }
+    level.remove(0)
+}
+
+/// An exported page verifies against its root as-is, and fails once any
+/// bound field (username, address, verified flag) or the row order changes.
+#[test]
+fn test_export_binding_rejects_tampered_records() {
+    let (env, admin, user, contract_id) = setup();
+    let other = Address::generate(&env);
+    register(&env, &contract_id, &user, "alice");
+    register(&env, &contract_id, &other, "bob");
+    register(&env, &contract_id, &user, "carol");
+    verify(&env, &contract_id, &admin, "bob");
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
+        let rows: std::vec::Vec<_> = page
+            .records
+            .iter()
+            .map(|(u, r)| (u, r.stellar_address, r.verified))
+            .collect();
+        assert_eq!(
+            root_from(&env, &rows),
+            page.merkle_root,
+            "untampered export verifies"
+        );
+
+        let mut renamed = rows.clone();
+        renamed[0].0 = username(&env, "mallory");
+        assert_ne!(
+            root_from(&env, &renamed),
+            page.merkle_root,
+            "username tamper"
+        );
+
+        let mut readdressed = rows.clone();
+        readdressed[1].1 = Address::generate(&env);
+        assert_ne!(
+            root_from(&env, &readdressed),
+            page.merkle_root,
+            "address tamper"
+        );
+
+        let mut flipped = rows.clone();
+        flipped[2].2 = !flipped[2].2;
+        assert_ne!(
+            root_from(&env, &flipped),
+            page.merkle_root,
+            "verified tamper"
+        );
+
+        let mut reordered = rows.clone();
+        reordered.swap(0, 1);
+        assert_ne!(
+            root_from(&env, &reordered),
+            page.merkle_root,
+            "reorder tamper"
+        );
+
+        let dropped = &rows[..2];
+        assert_ne!(
+            root_from(&env, dropped),
+            page.merkle_root,
+            "dropped row tamper"
+        );
+    });
 }

@@ -237,3 +237,42 @@ CONTRACT_ID=C... ONESHOT=1 ./scripts/event_indexer.sh
   }
 }
 ```
+## Explicit subgraph event waivers (Issue #600)
+
+The contributor-history subgraph intentionally excludes the operational events
+listed below. These are explicit per-topic waivers, **not** mappings; raw
+contract events remain available through `scripts/event_indexer.sh`. Every
+`#[contractevent]` must have either an `@entity` type of the same name and a
+mapping-table row above, or one waiver row below. The parity check rejects
+missing, duplicate, stale or ambiguous entries.
+
+| Waived topic | Reason |
+|---|---|
+| `upgraded_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `paused_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+| `unpaused_event` | Operational event outside contributor-history schema; available via raw event indexer |
+| `emergency_paused_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+| `emergency_cleared_event` | Operational event outside contributor-history schema; available via raw event indexer |
+| `guardian_changed_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+| `role_grant_cancelled_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+| `wasm_staged_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `upgrade_attested_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `attestation_cleared_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `role_granted_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+| `role_revoked_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+| `batch_remove_proposed_event` | Batch administration event; individual removed records use RemovedEvent entity |
+| `batch_remove_executed_event` | Batch administration event; individual removed records use RemovedEvent entity |
+| `batch_remove_cancelled_event` | Batch administration event; individual removed records use RemovedEvent entity |
+| `staged_wasm_cleared_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `upgrade_proposed_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `upgrade_approved_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `upgrade_proposal_executed_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `upgrade_proposal_cancelled_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `verification_configured_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+| `audit_config_changed_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+
+Run `make subgraph-parity` to verify the event inventory, mapping table,
+Graph schema, and waivers locally. Changes to an event name (including topic
+renames) require corresponding schema or waiver changes. `Address` and
+`BytesN<32>` on-chain values map to Graph `Bytes` in the schema; this check
+validates event/entity identity, not payload field type equivalence.

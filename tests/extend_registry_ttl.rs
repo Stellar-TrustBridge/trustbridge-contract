@@ -245,7 +245,6 @@ fn test_extend_registry_ttl_batch_size_one() {
 fn test_extend_registry_ttl_is_permissionless() {
     let (env, _admin, contract_id) = setup();
     let user = Address::generate(&env);
-    let random_caller = Address::generate(&env);
 
     register_user(&env, &contract_id, "alice", &user);
 
@@ -268,7 +267,7 @@ fn test_extend_registry_ttl_is_permissionless() {
 /// and the keeper must be able to extend TTL during a maintenance window.
 #[test]
 fn test_extend_registry_ttl_works_while_paused() {
-    let (env, admin, contract_id) = setup();
+    let (env, _admin, contract_id) = setup();
     let user = Address::generate(&env);
 
     register_user(&env, &contract_id, "alice", &user);
@@ -566,8 +565,91 @@ fn test_extend_registry_ttl_coverage_complete() {
     const EXPECTED_TEST_COUNT: usize = 25;
 
     // The real validation is in each individual test. This documents the scope.
+    const {
+        assert!(
+            EXPECTED_TEST_COUNT >= 24,
+            "Test suite should have at least 24 dedicated tests for extend_registry_ttl"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// § Partial Failure Behaviour (Issue #669)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const LEDGERS_PER_DAY: u32 = 17_280;
+const TTL_BUMP: u32 = LEDGERS_PER_DAY * 90;
+
+fn record_ttl(env: &Env, contract_id: &Address, username: &str) -> u32 {
+    use soroban_sdk::{symbol_short, testutils::storage::Persistent as _};
+    env.as_contract(contract_id, || {
+        env.storage()
+            .persistent()
+            .get_ttl(&(symbol_short!("reg"), s(env, username)))
+    })
+}
+
+fn advance_days(env: &Env, days: u32) {
+    use soroban_sdk::testutils::Ledger as _;
+    env.ledger()
+        .with_mut(|l| l.sequence_number += days * LEDGERS_PER_DAY);
+}
+
+/// A batch mixing stale, fresh, and unregistered usernames leaves every
+/// registered record in a single expiry generation: unregistered entries are
+/// skipped without aborting, and no registered entry is left behind.
+#[test]
+fn test_extend_registry_ttl_partial_batch_leaves_single_expiry_generation() {
+    let (env, _admin, contract_id) = setup();
+    register_user(&env, &contract_id, "alice", &Address::generate(&env));
+    advance_days(&env, 61);
+    register_user(&env, &contract_id, "bob", &Address::generate(&env));
+
+    let stale = record_ttl(&env, &contract_id, "alice");
     assert!(
-        EXPECTED_TEST_COUNT >= 24,
-        "Test suite should have at least 24 dedicated tests for extend_registry_ttl"
+        stale < TTL_BUMP - 60 * LEDGERS_PER_DAY,
+        "alice must be stale"
+    );
+
+    env.as_contract(&contract_id, || {
+        let usernames = Vec::from_array(&env, [s(&env, "alice"), s(&env, "ghost"), s(&env, "bob")]);
+        let extended = TrustBridgeContract::extend_registry_ttl(env.clone(), usernames).unwrap();
+        assert_eq!(extended, 2, "unregistered entry is skipped, not fatal");
+    });
+
+    let alice = record_ttl(&env, &contract_id, "alice");
+    let bob = record_ttl(&env, &contract_id, "bob");
+    assert_eq!(
+        alice, bob,
+        "registered records must share one expiry generation"
+    );
+    assert!(alice >= TTL_BUMP, "stale record must be bumped to TTL_BUMP");
+}
+
+/// A rejected batch is all-or-nothing: an oversized list fails before any
+/// entry is touched, so no record moves to a new expiry generation.
+#[test]
+fn test_extend_registry_ttl_rejected_batch_extends_nothing() {
+    let (env, _admin, contract_id) = setup();
+    register_user(&env, &contract_id, "alice", &Address::generate(&env));
+    advance_days(&env, 61);
+    let before = record_ttl(&env, &contract_id, "alice");
+
+    env.as_contract(&contract_id, || {
+        let mut usernames = Vec::new(&env);
+        usernames.push_back(s(&env, "alice"));
+        for _ in 0..100 {
+            usernames.push_back(s(&env, "ghost"));
+        }
+        assert_eq!(
+            TrustBridgeContract::extend_registry_ttl(env.clone(), usernames),
+            Err(ContractError::InvalidBatchSize)
+        );
+    });
+
+    assert_eq!(
+        record_ttl(&env, &contract_id, "alice"),
+        before,
+        "no partial extension"
     );
 }

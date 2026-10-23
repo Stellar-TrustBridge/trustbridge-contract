@@ -34,7 +34,6 @@ pub fn is_zero_address(env: &Env, address: &Address) -> bool {
 /// Stack buffer size for username copies. Sized above `MAX_USERNAME_LEN`, so
 /// an over-long username is rejected on length before it is ever read.
 const USERNAME_BUF: usize = 64;
-const USERNAME_BUF_LEN: usize = USERNAME_BUF;
 
 /// Copies a username into a fixed stack buffer.
 ///

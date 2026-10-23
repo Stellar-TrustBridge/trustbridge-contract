@@ -36,7 +36,7 @@ FUTURENET_FRIENDBOT_URL ?= https://friendbot-futurenet.stellar.org
 FUTURENET_IDENTITY ?= $(SOURCE)
 FUTURENET_DRY_RUN ?= false
 
-.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser soak-cursor storage-keys-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-batch-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
+.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser soak-cursor storage-keys-check storage-footprint-check storage-rent-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-batch-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
         invoke-verify invoke-revoke-verification invoke-get-all-registered invoke-export-paginated \
@@ -45,7 +45,7 @@ FUTURENET_DRY_RUN ?= false
         invoke-propose-batch-remove invoke-execute-batch-remove invoke-cancel-batch-remove \
         invoke-get-pending-batch-remove \
         ttl-keeper \
-	export-registry validate-registry dr-test futurenet-smoke assert-build \
+	export-registry validate-registry dr-test futurenet-smoke network-params assert-build \
 	xdr-fixtures diff-test
 
 help: ## Show this help
@@ -95,6 +95,12 @@ soak-cursor: ## Run the deterministic export_cursor soak property test (CURSOR_S
 
 storage-keys-check: ## Fail if a storage.rs key is missing from docs/STORAGE_KEYS.md
 	./scripts/check_storage_keys.sh
+
+storage-footprint-check: ## Fail if measured storage key sizes exceed the budget table in docs/STORAGE_FOOTPRINT.md
+	cargo test --lib storage_footprint_budget_tests
+
+storage-rent-check: ## Fail if the TTL playbook constants in docs/STORAGE_RENT.md drift from src/storage.rs
+	cargo test --lib storage_rent_playbook_tests
 
 bindings-golden: ## Verify the get_address simulate golden fixture (UPDATE_GOLDEN=1 to regenerate)
 	cargo test --test bindings_golden -- --nocapture
@@ -238,10 +244,13 @@ wasm-size: build ## Report release WASM size and check against budget (WASM_SIZE
 error-codes: ## Verify ContractError discriminants agree across enum, golden, and ABI.md (Issue #402)
 	./scripts/check_error_codes.sh
 
+subgraph-parity: ## Check Graph schema/entity coverage and documented waivers (Issue #600)
+	python3 scripts/check_subgraph_parity.py
+
 event-topics: ## Verify the indexer's topic table matches src/events.rs (Issue #399)
 	./scripts/check_event_topics.sh
 
-check: fmt lint error-codes event-topics abi-check test build docs-check wasm-size ## Run full local quality gate
+check: fmt lint error-codes event-topics subgraph-parity abi-check test build docs-check wasm-size ## Run full local quality gate
 
 wasm-hash-pin: build ## Verify release WASM hash matches wasm-hash.pin (mirrors CI hash gate)
 	@if [ -f $(WASM_V1) ]; then WASM=$(WASM_V1); elif [ -f $(WASM_LEGACY) ]; then WASM=$(WASM_LEGACY); else echo "ERROR: No WASM artifact found. Run 'make build' first."; exit 1; fi; \
@@ -574,6 +583,13 @@ futurenet-smoke: ## Deploy and smoke-check Futurenet using pinned RPC and Friend
 	ADMIN=$(ADMIN) SOURCE=$(SOURCE) IDENTITY=$(FUTURENET_IDENTITY) \
 		RPC_URL=$(FUTURENET_RPC_URL) FRIENDBOT_URL=$(FUTURENET_FRIENDBOT_URL) \
 		STELLAR=$(STELLAR) DRY_RUN=$(FUTURENET_DRY_RUN) ./scripts/futurenet_smoke_test.sh
+network-params: ## Print RPC, passphrase, and funding parameters for NETWORK (fails on unknown NETWORK)
+	@case "$(NETWORK)" in \
+	  testnet)   echo "NETWORK=testnet";   echo "RPC_URL=https://soroban-testnet.stellar.org"; echo "PASSPHRASE=Test SDF Network ; September 2015"; echo "FRIENDBOT=https://friendbot.stellar.org" ;; \
+	  futurenet) echo "NETWORK=futurenet"; echo "RPC_URL=$(FUTURENET_RPC_URL)"; echo "PASSPHRASE=Test SDF Future Network ; October 2022"; echo "FRIENDBOT=$(FUTURENET_FRIENDBOT_URL)" ;; \
+	  mainnet)   echo "NETWORK=mainnet";   echo "RPC_URL=<operator-provided>"; echo "PASSPHRASE=Public Global Stellar Network ; September 2015"; echo "FRIENDBOT=<none>" ;; \
+	  *) echo "error: unknown NETWORK '$(NETWORK)' (expected testnet|futurenet|mainnet)" >&2; exit 1 ;; \
+	esac
 TTL_KEEPER_BATCH_SIZE ?=
 TTL_KEEPER_DRY_RUN ?= false
 

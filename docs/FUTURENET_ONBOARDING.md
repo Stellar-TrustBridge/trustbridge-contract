@@ -26,7 +26,9 @@ export SOURCE=contributor          # Stellar CLI identity name
 export ADMIN=$SOURCE               # for single-identity testing; use a separate admin in production
 ```
 
-All commands below assume these variables are set.
+All commands below assume these variables are set. Futurenet RPC, passphrase,
+and Friendbot differ from Testnet — run `make network-params NETWORK=futurenet`
+or see [DEPLOYMENT.md](DEPLOYMENT.md#futurenet-vs-testnet-parameters-issue-671).
 
 ---
 

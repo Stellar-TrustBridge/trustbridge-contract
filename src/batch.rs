@@ -2,15 +2,23 @@
 //!
 //! This module provides helpers for performing multiple operations efficiently,
 //! particularly useful for dashboard syncing and bulk verifications.
-use super::{
-    bump_ever_verified_count, clear_pending_reverify, event_domain, get_record, is_admin_caller,
+//!
+//! Imports deliberately use `crate::storage` for all storage helpers so that
+//! module boundaries are explicit and batch logic does not couple to lib.rs
+//! internals. The only `super::` import is `event_domain`, which is a private
+//! lib.rs helper that builds the event-domain stamp and has no equivalent in
+//! storage.rs (refactor(batch): import helpers from storage).
+use super::event_domain;
+use crate::audit::{AuditEventType, AuditLogEntry};
+use crate::storage::{
+    bump_ever_verified_count, charge_verify_rate, clear_pending_reverify, get_record,
+    get_role as storage_get_role, get_verified_count as storage_get_verified_count,
+    is_active_verifier as storage_is_active_verifier, is_admin_caller, is_verification_expired,
     push_audit_entry, require_initialized, require_not_paused, require_role_not_expired,
-    set_record, set_verified_count, storage_get_role, storage_get_verified_count,
-    storage_is_active_verifier, verifier_allowlist_active,
+    set_record, set_verified_at, set_verified_count, verifier_allowlist_active,
 };
-use crate::storage::{charge_verify_rate, is_verification_expired, set_verified_at};
 use crate::utils::is_zero_address;
-use crate::{AuditEventType, AuditLogEntry, ContractError, Role, VerifiedEvent};
+use crate::{ContractError, Role, VerifiedEvent};
 use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
 /// Result of a single batch operation.

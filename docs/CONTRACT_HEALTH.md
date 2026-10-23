@@ -94,6 +94,24 @@ Expected output when healthy:
 
 ---
 
+## Pre-Wave probes (Issue #668)
+
+`get_health_probes` returns the three checks operators run before a Wave.
+Unlike `get_health` it never errors, so an uninitialized deployment reports
+`admin_set: false` instead of `NotInitialized`.
+
+```bash
+stellar contract invoke --id $CONTRACT_ID --network testnet -- get_health_probes
+```
+
+| Field | Healthy value | Unhealthy → action |
+|-------|---------------|--------------------|
+| `paused` | `false` | `true` → check `get_pause_reason`, then `unpause` per the runbook |
+| `admin_set` | `true` | `false` → contract never initialized; run `initialize` before any Wave traffic |
+| `index_gen` | stable between probes | unexpected jump → removals happened; re-sync dashboards (cursors are invalidated) |
+
+---
+
 ## Edge cases
 
 | Scenario | Snapshot behavior |

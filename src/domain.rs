@@ -98,4 +98,6 @@ impl EventDomain {
 /// `events.rs` can reuse it instead of spelling the symbol out at each call
 /// site, keeping the emergency emitters consistent with the rest of the
 /// contract.
+#[allow(dead_code)] // Staged for the emergency-lifecycle emitter rework (see doc above);
+                    // `events.rs` does not reference it yet.
 pub const EMERGENCY_DOMAIN_TOPIC: &str = "emergency_domain";

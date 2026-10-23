@@ -53,7 +53,7 @@ fn env_with_passphrase(passphrase: &str) -> Env {
     let env = Env::default();
     env.ledger().set(LedgerInfo {
         timestamp: 1_000_000,
-        protocol_version: 22,
+        protocol_version: env.ledger().get().protocol_version,
         sequence_number: 100,
         network_id: sha256_passphrase(passphrase),
         base_reserve: 5_000_000,
@@ -77,8 +77,8 @@ fn sha256_passphrase(passphrase: &str) -> [u8; 32] {
         out[i % 32] ^= b.wrapping_add(i as u8);
     }
     // Mix pass index into upper half so short passphrases still differ.
-    for i in 0..32usize {
-        out[i] = out[i].wrapping_add((i as u8).wrapping_mul(7));
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = byte.wrapping_add((i as u8).wrapping_mul(7));
     }
     out
 }
@@ -401,4 +401,67 @@ fn test_network_mismatch_error_code_is_stable() {
         30,
         "NetworkMismatch must remain at code 30 (frozen ABI)"
     );
+}
+
+// ─── Cross-network deployment misuse (Issue #666) ────────────────────────────
+
+const PUBNET: &str = "Public Global Stellar Network ; September 2015";
+const TESTNET: &str = "Test SDF Network ; September 2015";
+
+/// Initializes the contract on `init_net`, then moves the same ledger state to
+/// `call_net` — the shape of a snapshot restored onto another network.
+fn setup_between(init_net: &str, call_net: &str) -> (Env, Address) {
+    let env = env_with_passphrase(init_net);
+    let admin = Address::generate(&env);
+    let contract_id = env.register(TrustBridgeContract, ());
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+    });
+    env.ledger()
+        .with_mut(|li| li.network_id = sha256_passphrase(call_net));
+    (env, contract_id)
+}
+
+fn register_on(env: &Env, contract_id: &Address) -> Result<(), ContractError> {
+    env.mock_all_auths();
+    let user = Address::generate(env);
+    env.as_contract(contract_id, || {
+        TrustBridgeContract::register(env.clone(), s(env, "octocat"), user, Vec::new(env))
+    })
+}
+
+#[test]
+fn test_network_mismatch_pubnet_state_on_testnet_fails_closed() {
+    let (env, contract_id) = setup_between(PUBNET, TESTNET);
+    assert_eq!(
+        register_on(&env, &contract_id),
+        Err(ContractError::NetworkMismatch)
+    );
+    // No partial state: the rejected call must not have written a record.
+    // Switch back to the original network to read it.
+    env.ledger()
+        .with_mut(|li| li.network_id = sha256_passphrase(PUBNET));
+    env.as_contract(&contract_id, || {
+        assert!(!TrustBridgeContract::has_record(
+            env.clone(),
+            s(&env, "octocat")
+        ));
+    });
+}
+
+#[test]
+fn test_network_mismatch_testnet_state_on_pubnet_fails_closed() {
+    let (env, contract_id) = setup_between(TESTNET, PUBNET);
+    assert_eq!(
+        register_on(&env, &contract_id),
+        Err(ContractError::NetworkMismatch)
+    );
+}
+
+#[test]
+fn test_network_matching_pubnet_and_testnet_succeed() {
+    for net in [PUBNET, TESTNET] {
+        let (env, contract_id) = setup_between(net, net);
+        assert_eq!(register_on(&env, &contract_id), Ok(()));
+    }
 }

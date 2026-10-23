@@ -32,6 +32,14 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Single compromised admin key wiping a large slice of the registry in one `batch_remove` call | Above a configurable size threshold, `batch_remove` requires a second, distinct admin-equivalent signature — see [Dual-Control batch_remove](#dual-control-batch_remove-issue-219) |
 | Auditor trusting an unbound, unsigned `export_registry.sh` JSON dump | `export_attestation` binds a page to a SHA-256 digest, version, and ledger for offline comparison — see [Signed Export Attestation](#signed-export-attestation-issue-223) |
 
+### Export record binding (Issue #672)
+
+Every `ExportPage.merkle_root` binds each exported record's username, Stellar
+address, verified flag, and page position. Altering any of these fields,
+reordering rows, or dropping a row after export produces a different root, so
+a consumer recomputing the root with `merkle_leaf_hash` detects the tamper.
+Locked by `tests/record_proof.rs::test_export_binding_rejects_tampered_records`.
+
 ### Out of Scope (handled off-chain)
 
 | Concern | Responsibility |
@@ -109,7 +117,10 @@ everything else below requires admin) and `tests/auth_matrix.csv`.
 | `clear_emergency_pause` | ✅ | ❌ (`NotAuthorized`) | ❌ | Guardian deliberately cannot clear; admin review required |
 | `set_guardian` / `remove_guardian` | ✅ | ❌ | ❌ | Guardian onboarding is admin-only; see [ADMIN_RUNBOOK guardian recipes](ADMIN_RUNBOOK.md#guardian-recipes) |
 | `set_role` / `remove_role` / `set_role_with_expiry` / `activate_role` | ✅ | ❌ | ❌ | Guardian cannot grant roles, even to itself, unless it also holds admin |
-| `upgrade` / `stage_wasm` / `attest_upgrade` / multisig upgrade propose/approve/execute | ✅ | ❌ | ❌ | WASM upgrade paths remain multisig-gated admin-only |
+| `upgrade` / `attest_upgrade` / `clear_staged` | ✅ | ❌ | ❌ | Admin-only upgrade and staged-slot clearing; `clear_staged` is idempotent |
+| `stage_wasm` | ✅ | ❌ | ❌ | Admin or Upgrader-role holder; guardian/verifier alone cannot stage |
+| `get_staged` | ✅ | ✅ | ✅ | Public read, no auth (also available to unauthenticated callers) |
+| `propose_multisig_upgrade` / `approve_upgrade` / `execute_upgrade` | ✅ | ❌ | ❌ | Also callable by Upgrader-role holders, subject to proposal rules |
 | `batch_remove` (incl. dual-control propose/execute) | ✅ | ❌ | ❌ | Large removes need admin, never guardian |
 | `pause` / `unpause` | ✅ | ❌ | ❌ | Plain pause is admin-only; guardian path is `emergency_pause` only |
 
@@ -1558,3 +1569,11 @@ another. Every repair is an explicit, auditable admin transaction.
 Covered by `tests/repair_index.rs`, which drifts the counters against a
 known-good fixture and checks both the dry-run report and the corrected
 on-chain state after `apply = true`.
+
+## Cross-network misuse (Issue #666)
+
+`initialize` records the executing network id, and every gated entrypoint
+re-checks it via `require_initialized`. State initialized on pubnet and
+executed on testnet — or the reverse — fails closed with `NetworkMismatch`
+(code 30) before any write, so a rejected call leaves no partial state.
+Covered by the pubnet/testnet cases in `tests/network_mismatch.rs`.

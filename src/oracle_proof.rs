@@ -216,6 +216,9 @@ fn is_valid_signature_shape(sig: &BytesN<64>) -> bool {
 /// # Errors
 /// - [`ContractError::NotAuthorized`] if the proof is invalid for any reason
 ///   (not allowlisted, expired, bad signature, or bad layout).
+#[allow(dead_code)] // Staged convenience wrapper: the wired contract entry point is
+                    // `TrustBridgeContract::verify_with_oracle_proof` (lib.rs), which runs
+                    // `verify_ownership_proof` plus the shared `mark_verified` tail.
 pub fn verify_with_oracle_proof(
     env: &Env,
     subject: &Address,
@@ -300,8 +303,6 @@ mod tests {
             assert!(verify_with_proof(&env, &proof).is_ok());
         });
     }
-
-    const SUBJECT: &str = "GAZOJB42QBRQC44KFDMPWIKO5JBARJ3MBALJQU2T7M2WZUDZ2D3FVT4I";
 
     #[test]
     fn non_allowlisted_key_is_rejected() {

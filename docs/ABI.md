@@ -4,6 +4,34 @@ This document tracks the stable ABI surface exposed by the TrustBridge contract,
 including storage layout versions and field ordering that external consumers
 (notably dashboard export consumers) depend on.
 
+## Staged WASM entrypoints (Issue #594)
+
+The **canonical exported Soroban function names** are defined by the
+`#[contractimpl]` on `TrustBridgeContract` in [`src/lib.rs`](../src/lib.rs).
+Use these exact names after `--` in `stellar contract invoke` and in
+[`tests/auth_matrix.csv`](../tests/auth_matrix.csv):
+
+| Exported function | Rust signature (excluding `env: Env`) | Authorization |
+|---|---|---|
+| `stage_wasm` | `stage_wasm(caller: Address, wasm_hash: BytesN<32>) -> Result<(), ContractError>` | Admin or `Role::Upgrader`; caller must sign |
+| `get_staged` | `get_staged() -> Option<StagedWasm>` | Public read; no auth |
+| `clear_staged` | `clear_staged(caller: Address) -> Result<(), ContractError>` | Admin only; caller must sign |
+
+`StagedWasm` contains `wasm_hash: BytesN<32>`, `staged_by: Address`,
+and `staged_at: u64`. A new `stage_wasm` replaces the slot; `clear_staged`
+succeeds even when the slot is empty. While a hash is staged,
+`execute_upgrade` rejects a different hash with `StagedWasmMismatch`.
+See the [operator commands](ADMIN_RUNBOOK.md#staged-wasm-cli-recipes)
+and [security rules](SECURITY.md#staged-wasm-slot-issue-300).
+
+**Names that are not ABI entrypoints:** `get_staged_wasm`,
+`set_staged_wasm`, and `clear_staged_wasm` are internal storage
+helpers in [`src/staged_wasm.rs`](../src/staged_wasm.rs), not CLI
+functions. `commit_staged_wasm` is **not exported** and has no
+backward-compatibility alias; clients using that old name must migrate
+to the documented staging/upgrade flow. Do not substitute
+`clear_staged_wasm` for `clear_staged` in a contract invocation.
+
 ## export_page layout
 
 The `export_page` storage encoding is versioned and pinned by a golden layout
@@ -221,6 +249,19 @@ struct HealthSnapshot {
     cooldown_secs: u64,
     cooldown_remaining_secs: u64,
     attestation_present: bool,
+}
+```
+
+### HealthProbes
+
+Returned by `get_health_probes` (Issue #668). Never errors — an
+uninitialized deployment reports `admin_set: false`.
+
+```rust
+struct HealthProbes {
+    paused: bool,
+    admin_set: bool,
+    index_gen: u32,             // bumped on every index removal
 }
 ```
 
@@ -443,8 +484,8 @@ before committing a correction.
 
 | Field | Type | Notes |
 |-------|------|-------|
-| `stored_total` | `u32` | Value of `count` read from instance storage |
-| `recomputed_total` | `u32` | Value recomputed by walking the index |
+| `stored_count` | `u32` | Value of `count` read from instance storage |
+| `recomputed_count` | `u32` | Value recomputed by walking the index |
 | `stored_verified` | `u32` | Value of `verified` read from instance storage |
 | `recomputed_verified` | `u32` | Value recomputed by counting `verified = true` records |
 | `drifted` | `bool` | `true` when either counter differed from its recomputed value |
@@ -511,6 +552,20 @@ repeated entry is counted once against `vcount`.
 and `test_bench_batch_remove_max`, not just editing the constant.**
 
 ## Functions
+
+### `stage_wasm(caller: Address, wasm_hash: BytesN<32>) -> Result<(), ContractError>`
+
+Stages the intended upgrade hash; admin or Upgrader authorization required.
+Replaces any existing staged slot.
+
+### `get_staged() -> Option<StagedWasm>`
+
+Public read of the staged slot, returning `None` when empty.
+
+### `clear_staged(caller: Address) -> Result<(), ContractError>`
+
+Admin-only, idempotent slot clearing. This is the exported function, not
+the internal `clear_staged_wasm` helper; `commit_staged_wasm` is not exported.
 
 ### `initialize(admin: Address) -> Result<(), ContractError>`
 
@@ -1002,6 +1057,15 @@ fields and a sibling-hash path, like any standard Merkle proof. See
 the contract's own tree code) that verifies for a member and fails for a
 non-member.
 
+#### Cross-page Merkle root stability (Issue #619)
+
+Merkle roots in `get_public_paginated` and exported record snapshots satisfy cross-page root stability:
+- **Snapshot Determinism**: For a fixed, unchanged registry snapshot, reconstructing the exported records via sequential pagination yields an identical record sequence and identical full-export Merkle root regardless of the `limit` parameter or page boundary splits (e.g. limit 1, 2, 5, 10, or 50).
+- **Page Offset and Window Stability**: When different page queries return the same underlying record set (such as tail pages where `limit >= remaining_records`), `ExportPage.merkle_root` is identical across calls.
+- **Empty Tail and Single-Record Edge Cases**: An empty registry or a cursor past the end of the registry returns an empty record set with the canonical all-zero sentinel root (`[0u8; 32]`). A single-record page root is strictly equal to that single leaf's hash.
+- **Mutation Sensitivity**: Removing a record invalidates prior roots and previous page cursors. Changing bot status via `set_bot_status` preserves leaf consistency under the v1 leaf schema.
+- **Initialization Gate**: Uninitialized contract calls fail with `ContractError::NotInitialized` rather than returning an empty root.
+
 #### ExportPage layout compatibility
 
 The checked-in golden layout at
@@ -1050,6 +1114,46 @@ record's current `stellar_address` — see
 `OracleProofBadLayout` (58), `OracleProofNotAllowlisted` (59),
 `OracleProofExpired` (60), `OracleProofBadSignature` (61), `AlreadyVerified`.
 A well-formed signature that does not verify traps the invocation.
+
+---
+
+### `get_pending_reverify(offset: u32, limit: u32) -> Result<Vec<String>, ContractError>`
+
+Lists canonical GitHub usernames flagged for re-verification after an address
+change (`PENDING_REVERIFY_KEY`, Issue #587).
+
+| | |
+|---|---|
+| **Auth** | None (read-only) |
+| **Mutates** | No |
+| **Errors** | `NotInitialized`, `InvalidBatchSize` (`limit > MAX_PAGE_LIMIT`) |
+| **Returns** | `Vec<String>` — flagged usernames within the scanned window |
+| **Pagination** | Offset-based over the registry index: scans entries `[offset, offset + limit)` |
+| **Limit** | `0` → `DEFAULT_PAGE_LIMIT`; `> MAX_PAGE_LIMIT` (100) → `InvalidBatchSize` |
+
+Gas is bounded by `limit`, so a page may hold fewer than `limit` names (or
+none) while more remain. Advance `offset` by `limit` until it reaches
+`get_stats().total`. An empty registry returns an empty page. A name drops
+out once `verify` / `batch_verify` clears its flag; `rename` moves the flag
+to the new name.
+
+```bash
+stellar contract invoke --id $ID --network testnet \
+  -- get_pending_reverify --offset 0 --limit 100
+```
+
+---
+
+### `get_health_probes() -> HealthProbes`
+
+Pre-Wave operator probes: pause flag, admin presence, index generation
+(Issue #668). See [`CONTRACT_HEALTH.md`](CONTRACT_HEALTH.md#pre-wave-probes-issue-668).
+
+| | |
+|---|---|
+| **Auth** | None (read-only; works while paused) |
+| **Mutates** | No |
+| **Errors** | None — uninitialized reports `admin_set: false` |
 
 ---
 

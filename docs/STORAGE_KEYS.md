@@ -8,6 +8,75 @@ Related docs: [ARCHITECTURE](ARCHITECTURE.md) · [ABI](ABI.md) · [SECURITY](SEC
 
 ---
 
+## Key Namespace Diagram
+
+The contract uses **two independent storage partitions** in Soroban, each with distinct key namespaces:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      Soroban Contract Storage                           │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    │
+                    ┌───────────────┴───────────────┐
+                    │                               │
+        ┌───────────▼──────────────┐   ┌───────────▼──────────────┐
+        │  Instance Storage        │   │ Persistent Storage (TTL) │
+        │  (single value per key)  │   │  (per-entry, versioned)  │
+        └──────────────────────────┘   └──────────────────────────┘
+                    │                               │
+         ┌──────────┴──────────┐       ┌────────────┴────────────┐
+         │                     │       │                         │
+    ┌────▼────────┐  ┌────────▼─┐  ┌──▼──────────┐  ┌──────────▼──┐
+    │ State Keys  │  │ Index    │  │Per-Username │  │Per-Address  │
+    │ (singleton) │  │ & Config │  │ Namespaces  │  │ Namespaces  │
+    └─────────────┘  └──────────┘  └─────────────┘  └─────────────┘
+         │                │              │                 │
+    ┌────┴─────┐     ┌────┴────┐    ┌────┴──────┐    ┌────┴──────┐
+    │ Counter  │     │Chunk    │    │(reg)      │    │(role)     │
+    │ Flags    │     │Config   │    │(lastact)  │    │(pendrole) │
+    │ Control  │     │Version  │    │(pendrot)  │    │(role_exp) │
+    │Admin     │     │Network  │    │(pend_rev) │    │(vfyrate)  │
+    │Transfer  │     │...      │    │(chllng)   │    └───────────┘
+    │Pause     │     │         │    │(vfy_at)   │
+    │Guardian  │     │         │    └───────────┘
+    │Roles     │     │         │
+    │...       │     │         │
+    └──────────┘     └─────────┘
+```
+
+### Collision Prevention Strategy
+
+1. **Partition Isolation**: Instance and persistent keys live in separate Soroban namespaces — no collision possible even if symbol names were duplicated across partitions.
+
+2. **Symbol Uniqueness**: Within each partition, all `Symbol` constants are distinct (verified by `scripts/check_storage_keys.sh`).
+
+3. **Tuple Discriminators**: Persistent keys use `(Symbol, Context)` tuples. The discriminator (first element) is encoded first in XDR serialization, so different discriminators create different keys regardless of context overlap:
+   - `(Symbol("reg"), "alice")` ≠ `(Symbol("chllng"), "alice")` ← different discriminators
+   - `(Symbol("role"), address_A)` ≠ `(Symbol("role"), address_B)` ← different contexts
+
+4. **Context Type Safety**: Different context types serialize differently:
+   - `String` (GitHub usernames) serializes with a length prefix and UTF-8 bytes
+   - `Address` (Stellar accounts) serializes as a fixed 32-byte account ID
+   - `u32` (chunk indices) serializes as a 4-byte integer
+   - These byte sequences never collide across namespaces even if values overlap
+
+### Adding a New Key
+
+When introducing a new storage key, **new contributors** should:
+
+1. **Choose a partition**: Instance (singleton, no TTL) or persistent (per-entry, TTL-managed)?
+2. **Pick a context type**: None (instance), or `String` (username), `Address` (account), `u32` (index), etc.?
+3. **Reserve a symbol**: Pick a short unique name (`symbol_short!("new_key")`).
+4. **Check collision-free**:
+   - Run `make storage-keys-check` to verify your constant is documented.
+   - If persistent, ensure your discriminator doesn't duplicate an existing one.
+   - If reusing a context type, review the namespace diagram above — your discriminator must differ from all others using that type.
+5. **Document** in the tables below and this diagram.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md#storage-key-best-practices) for the full workflow.
+
+---
+
 ## Instance Storage (per contract instance)
 
 These keys live in Soroban's **instance** storage partition. Each key is a `Symbol` mapped to a single value.
@@ -40,9 +109,10 @@ These keys live in Soroban's **instance** storage partition. Each key is a `Symb
 | `"attest"` | `ATTEST_KEY` | `Option<WasmAttestation>` | Pending upgrade attestation (Wave #24) |
 | `"adt_log"` | `AUDIT_LOG_KEY` | `Vec<AuditLogEntry>` | Audit log entries (Issue #217) |
 | `"adt_stat"` | `AUDIT_STATS_KEY` | `AuditStats` | Audit statistics aggregator |
+| `"adt_cfg"` | `AUDIT_CONFIG_KEY` | `Option<AuditConfig>` | Admin-tunable audit configuration (Issue #412). Absent until an admin calls `set_audit_config`, in which case callers fall back to `AuditConfig::default()` |
 | `"reserved"` | `RESERVED_KEY` | `Vec<String>` | Reserved username list (Issue #213) |
 | `"adm_xfr"` | `ADMIN_TRANSFER_KEY` | `Option<AdminTransferProposal>` | Pending admin transfer proposal (Issue #195) |
-| `"att_req"` | `ATTEST_REQUIRED_KEY` | `bool` | Whether WASM attestation is required before upgrade (Issue #198) |
+| `"att_req"` | `ATTEST_REQUIRED_KEY` | `bool` | Whether WASM attestation is required before upgrade (Issue #198). Default `false`. Set via `set_attestation_required(caller, bool)` (admin-only); read via `get_attestation_required()` (public). When `true`, `upgrade` and the staged-WASM path fail with `AttestationRequired` if no valid attestation is present. `clear_attestation` does **not** clear this flag. |
 | `"brm_thr"` | `BATCH_REMOVE_THRESHOLD_KEY` | `u32` | Dual-control batch_remove size threshold (Issue #219) |
 | `"brm_pend"` | `PENDING_BATCH_REMOVE_KEY` | `Option<PendingBatchRemove>` | Pending large batch_remove proposal (Issue #219) |
 | `"vfylimit"` | `VERIFY_LIMIT_KEY` | `u32` | Per-ledger verify/revoke rate limit (Issue #292) |
@@ -72,7 +142,7 @@ These keys use **tuples** as storage keys, where the first element is a `Symbol`
 | `"chunk"` | `CHUNK_KEY` | `u32` (chunk index) | `Vec<String>` | Chunked slice of the username index for paginated reads |
 | `"lastact"` | `LAST_ACT_KEY` | `String` (GitHub username) | `u64` (ledger timestamp) | Per-user cooldown tracking for rate-limiting |
 | `"pendrot"` | `PENDING_ROT_KEY` | `String` (GitHub username) | `PendingRotation` | Pending address rotation with delay (Issue #234) |
-| `"pend_rev"` | `PENDING_REVERIFY_KEY` | `String` (GitHub username, canonical lower-case) | `bool` | Flag indicating re-verification needed after address change (Issue #208). Set (TTL-extended) when a verified record changes address; cleared by `verify`/`batch_verify` and whenever the record is removed; moved to the new name by `rename` |
+| `"pend_rev"` | `PENDING_REVERIFY_KEY` | `String` (GitHub username, canonical lower-case) | `bool` | Flag indicating re-verification needed after address change (Issue #208). Set (TTL-extended) when a verified record changes address; cleared by `verify`/`batch_verify` and whenever the record is removed; moved to the new name by `rename`. Listed by `get_pending_reverify(offset, limit)` (Issue #587) |
 | `"chllng"` | `CHALLENGE_KEY` | `String` (GitHub username) | `ChallengeRecord` | Squatter challenge record (Issue #214) |
 | `"pendrole"` | `PENDING_ROLE_KEY` | `Address` | `PendingRoleGrant` | Timelocked role grant awaiting activation (Issue #220) |
 | `"role_exp"` | `ROLE_EXPIRY_KEY` | `Address` | `u64` (timestamp) | Expiry timestamp for role grant (Issue #221) |
@@ -157,6 +227,7 @@ numbers are informational and are not linted.
 | `"adt_log"` | `AUDIT_LOG_KEY` | 117 | Key for audit log entries list. Ring buffer capped at `MAX_AUDIT_LOG_ENTRIES` (100): `push_audit_entry` evicts the oldest (`pop_front`) on overflow; `AuditConfig.max_events` (default 1000, Issue #412) is the admin-tunable retention target and is not yet wired as the storage cap. |
 | `"adt_stat"` | `AUDIT_STATS_KEY` | 119 | Key for audit stats. |
 | `"chllng"` | `CHALLENGE_KEY` | 121 | Key prefix for per-username challenge records (Issue #214). |
+| `"adt_cfg"` | `AUDIT_CONFIG_KEY` | 123 | Key for the persisted `AuditConfig` (Issue #412). Absent means no config has been written, so callers use `AuditConfig::default()`. |
 | `"pause_rsn"` | `PAUSE_RSN_KEY` / `PAUSE_REASON_KEY` | 127 | Key for the pause reason code (Issue #211). |
 | `"reserved"` | `RESERVED_KEY` | 130 | Key for the reserved username set (Issue #213). |
 | alias of `VER_KEY` | `VERSION_KEY` | 141 | Key for the version stored at `storage::get_version` / `set_version` |

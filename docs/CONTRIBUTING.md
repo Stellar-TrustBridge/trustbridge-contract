@@ -350,6 +350,54 @@ rejected in code review.
 
 ---
 
+## Fuzz Testing
+
+The `fuzz/` directory contains `cargo-fuzz` targets that complement the
+homoglyph corpus and unit tests with random byte-level exploration.
+
+**Requires a nightly toolchain** — `cargo-fuzz` is a nightly-only tool.
+Install it once:
+
+```bash
+rustup toolchain install nightly
+cargo install --locked cargo-fuzz
+```
+
+### Available targets
+
+| Target | Path | What it fuzzes |
+|---|---|---|
+| `export_cursor` | `fuzz/fuzz_targets/export_cursor.rs` | Paginated-export cursor parsing (`get_public_paginated`) |
+| `username_validate` | `fuzz/fuzz_targets/username_validate.rs` | `is_valid_github_username` — no-panic guarantee |
+| `github_username` | `fuzz/fuzz_targets/github_username.rs` | `is_valid_github_username` — non-ASCII rejection invariant |
+
+### Running a target
+
+```bash
+# Run the github_username target for 1 000 iterations (smoke test)
+cargo +nightly fuzz run github_username -- -max_total_time=10
+
+# Longer soak (10 million inputs)
+cargo +nightly fuzz run github_username -- -runs=10000000
+```
+
+The `github_username` target asserts two invariants on every input:
+
+1. **No panics** — the validator must never trap.
+2. **Non-ASCII rejection** — any byte ≥ 0x80 must cause the validator
+   to return `false`.  This rules out homoglyph substitution via
+   multi-byte UTF-8 (Cyrillic, Arabic, CJK, accented Latin, emoji).
+
+### Adding a new target
+
+1. Create `fuzz/fuzz_targets/<name>.rs`.
+2. Add a `[[bin]]` entry in `fuzz/Cargo.toml` pointing to it.
+3. Document the target in the table above.
+4. Ensure the target contains an assertion (not just a no-panic check)
+   so it provides more than the existing `username_validate` coverage.
+
+---
+
 ## Supply-chain checks
 
 The `cargo-deny` CI job runs `cargo deny --config deny.toml check` on every
@@ -776,3 +824,96 @@ Do not open public issues for security vulnerabilities. See `SECURITY.md` for re
 - Check Stellar Soroban docs
 
 We appreciate your contributions to decentralized open-source identity on Stellar!
+
+---
+
+## Storage Key Best Practices
+
+Storage keys are **on-chain correctness concerns**: a collision is a catastrophic bug, and key layout changes must stay synchronized across `docs/STORAGE_KEYS.md`, `src/storage.rs`, and test fixtures.
+
+### When adding a new storage key
+
+1. **Pick the partition**:
+   - **Instance**: Use for singleton state (admin address, pause flag, network ID, etc.). No TTL, no per-entry context.
+   - **Persistent**: Use for per-entry data (registrations, roles, pending operations). TTL-managed; requires a context type (username, address, etc.).
+
+2. **Pick a unique symbol**:
+   - Use `symbol_short!("name")` — limited to 9 bytes (ASCII alphanumerics, underscore).
+   - Inspect `src/storage.rs` to ensure your symbol is not already defined.
+   - Run `make storage-keys-check` to lint; CI will fail if the symbol is not documented.
+
+3. **For persistent keys, choose a context type**:
+   - `String` for usernames (context: GitHub username, e.g. `(Symbol("reg"), "alice")`).
+   - `Address` for Stellar accounts (context: account ID).
+   - `u32` for integers (context: chunk index, ledger sequence).
+   - Different context types serialize to different bytes in Soroban's XDR — no collision even if two namespaces use overlapping values.
+
+4. **Verify collision-free**:
+   - Instance keys: Ensure your symbol is not already used in the instance table in `docs/STORAGE_KEYS.md`.
+   - Persistent keys with new discriminator: Ensure the symbol is not in the persistent table.
+   - Persistent keys reusing an existing discriminator: **Never**. Each persistent namespace must have a unique discriminator.
+   - If in doubt, see `docs/STORAGE_KEYS.md` § Key Namespace Diagram.
+
+5. **Document before committing**:
+   - Add a row to the appropriate table in `docs/STORAGE_KEYS.md`.
+   - Add a row to the "Complete Key Inventory" section.
+   - Run `make storage-keys-check` to confirm both tables are consistent.
+   - If persistent, update the TTL behavior table.
+   - Link the issue or feature in the "Purpose" column if applicable.
+
+6. **Update tests**:
+   - Add a test to `tests/storage_keys_collision.rs` (see below) to verify the key is stored/read correctly.
+   - If the key participates in a workflow, add an integration test to `tests/integration.rs`.
+
+### Collision detection automation
+
+`scripts/check_storage_keys.sh` is run in CI as `make storage-keys-check`. It:
+- Parses all `const NAME: Symbol = symbol_short!("...")` from `src/storage.rs`.
+- Verifies each constant name and symbol string appear in `docs/STORAGE_KEYS.md`.
+- Rejects `Symbol::new()` — all keys must be statically defined constants.
+- Fails if `CHUNK_CNT_KEY` is not exactly one definition with symbol `"chkcnt"` (Issue #468).
+
+**Fix**: Add your key to both the inline constant table and the Complete Key Inventory section of `docs/STORAGE_KEYS.md`, then re-run.
+
+### TTL best practices (persistent keys only)
+
+- **Default TTL threshold**: `LEDGERS_PER_DAY * 30` (~30 days).
+- **Default TTL bump**: `LEDGERS_PER_DAY * 90` (~90 days).
+- Document the exact conditions when TTL is extended (read vs. write, or both).
+- See `docs/STORAGE_RENT.md` before changing TTL constants — storage rent is sensitive.
+
+### Testing storage keys
+
+New storage key workflows are tested in:
+- `tests/storage_keys_collision.rs` — automated collision detection and namespace validation.
+- `tests/integration.rs` — end-to-end workflows using the key.
+
+Add a test case for the happy path (key is stored, retrieved, updated correctly) and at least one failure path (e.g. attempting to write while paused, or accessing a non-existent entry).
+
+### Example: Adding a new instance key
+
+```rust
+// src/storage.rs
+pub const MY_STATE_KEY: Symbol = symbol_short!("my_state");
+
+// docs/STORAGE_KEYS.md — Instance Storage table
+| `"my_state"` | `MY_STATE_KEY` | `MyStateType` | Description of the state |
+
+// docs/STORAGE_KEYS.md — Complete Key Inventory
+| `"my_state"` | `MY_STATE_KEY` | line_number | Description |
+
+// tests/storage_keys_collision.rs
+#[test]
+fn test_my_state_key_stored_correctly() {
+    let (env, _admin, _user1, _user2, contract_id) = setup_test_env();
+    env.as_contract(&contract_id, || {
+        // Happy path: set and read
+        TrustBridgeContract::my_getter(env.clone()).unwrap();
+        // Failure path: verify error on invalid input
+    });
+}
+
+// Run
+make storage-keys-check
+make test
+```

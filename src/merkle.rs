@@ -170,7 +170,7 @@ mod tests {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Address;
 
-    fn rec(env: &Env, addr: &Address, verified: bool) -> ContributorRecord {
+    fn rec(_env: &Env, addr: &Address, verified: bool) -> ContributorRecord {
         ContributorRecord {
             stellar_address: addr.clone(),
             payout_address: addr.clone(),

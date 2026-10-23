@@ -280,6 +280,32 @@ lives at
 `tests/event_replay.rs` (`cargo test event`) applies it through a reference
 consumer and asserts the stream is replay-safe.
 
+
+### Full contract-event replay coverage (Issue #598)
+
+The [Rust replay test](../tests/event_replay.rs) and
+[language-neutral fixture](../tests/testdata/event_replay_fixture.json)
+cover all 35 `#[contractevent]` structures declared in
+[`src/events.rs`](../src/events.rs). Each type has a unique delivery envelope
+and an exact replay. The original registration/verification scenario is preserved.
+The test compares **ordered event types and event IDs** against JSON and checks
+that its complete type catalogue equals the source declarations, preventing
+quiet fixture drift when a new event is added.
+
+Event types covered:
+
+`registered_event`, `bot_status_changed_event`, `removed_event`, `verified_event`, `verification_revoked_event`, `upgraded_event`, `paused_event`, `unpaused_event`, `emergency_paused_event`, `emergency_cleared_event`, `guardian_changed_event`, `role_grant_pending_event`, `role_grant_cancelled_event`, `renamed_event`, `rotation_requested_event`, `rotation_executed_event`, `rotation_cancelled_event`, `wasm_staged_event`, `upgrade_attested_event`, `attestation_cleared_event`, `role_granted_event`, `role_revoked_event`, `batch_remove_proposed_event`, `batch_remove_executed_event`, `batch_remove_cancelled_event`, `challenge_started_event`, `challenge_cancelled_event`, `challenge_completed_event`, `staged_wasm_cleared_event`, `upgrade_proposed_event`, `upgrade_approved_event`, `upgrade_proposal_executed_event`, `upgrade_proposal_cancelled_event`, `verification_configured_event`, `audit_config_changed_event`.
+
+Events without `github_username` (upgrade hashes, roles, proposals, guardians,
+audit configuration) use their own payload subject in real indexers. Dedupe
+**must not** key on that subject: it keys solely on the network, contract,
+ledger, transaction, and event index envelope above. Multiple events in one
+ledger or transaction remain unique through `event_index`, including batch
+remove proposals and executions. A repeated upgrade delivery is not a new
+upgrade simply because an indexer reconnects. The reference consumer records
+non-registry event application counts, rather than pretending all payloads
+change the registry's username/address state.
+
 See [ABI.md — Events](ABI.md#events) for the full topic/payload reference per
 event type.
 

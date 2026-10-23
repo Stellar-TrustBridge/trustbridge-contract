@@ -200,6 +200,63 @@ Use this checklist before and during each Wave to avoid rent surprises.
 
 ---
 
+## Operator Playbook: TTL Extension (Issue #660)
+
+Step-by-step procedure for keeping every registry entry live across a Wave.
+An expired `reg` or `chunk` entry mid-Wave makes `get_public_paginated` and
+`get_address` fail for that contributor, which bricks the dashboard's reads.
+
+### Policy constants
+
+The table below is machine-checked against `src/storage.rs` and
+`src/batch.rs` by `storage_rent_playbook_tests` (run `make storage-rent-check`),
+so it cannot drift from the contract. Estimator inputs in
+[STORAGE_RENT_ESTIMATOR.md](STORAGE_RENT_ESTIMATOR.md#canonical-constants-implementation-facts)
+use the same values.
+
+<!-- rent-playbook:begin -->
+| Constant | Ledgers / count | Meaning |
+|---|---:|---|
+| `LEDGERS_PER_DAY` | 17280 | ≈ 5 s ledger close |
+| `TTL_THRESHOLD` | 518400 | Bump when remaining TTL drops below ~30 days |
+| `TTL_BUMP` | 1555200 | Each bump extends to ~90 days ahead of the current ledger |
+| `KEEPER_INTERVAL` | 345600 | Run the keeper at least every ~20 days (2/3 of `TTL_THRESHOLD`) |
+| `MAX_KEEPER_BATCH` | 100 | Usernames per `extend_registry_ttl` call (`BatchConfig::default().max_batch_size`) |
+<!-- rent-playbook:end -->
+
+### Steps
+
+1. **Size the job.** Read `total` from one `get_public_paginated(None, 1)` call
+   and divide by `MAX_KEEPER_BATCH` to get the number of keeper transactions.
+   Plug `total` into the estimator
+   ([STORAGE_RENT_ESTIMATOR.md](STORAGE_RENT_ESTIMATOR.md#ui-consumable-estimator-input-shape))
+   to budget XLM for the rent the bumps will pay.
+2. **Dry-run.** `make ttl-keeper CONTRACT_ID=C... SOURCE=keeper TTL_KEEPER_DRY_RUN=true`
+   walks the registry and prints the batches without sending anything.
+3. **Extend.** `make ttl-keeper CONTRACT_ID=C... SOURCE=keeper NETWORK=testnet`.
+   `SOURCE` only has to pay fees — `extend_registry_ttl` is permissionless and
+   works while the contract is paused, so a pause never blocks rent upkeep.
+4. **Check the result.** The keeper exits non-zero if any batch failed. Each
+   call returns the number of entries actually extended; a value lower than the
+   batch length means some usernames were removed since the index was read
+   (skipped, not an error).
+5. **Spot-check a cold record.** Read `liveUntilLedgerSeq` for
+   `["reg","<username>"]` (see [Reading a record's TTL](#reading-a-records-ttl-from-outside-issue-230));
+   it should be roughly `current ledger + TTL_BUMP`.
+6. **Schedule the next run** no later than `KEEPER_INTERVAL` ledgers from now.
+
+### Failure handling
+
+| Symptom | Cause | Action |
+|---|---|---|
+| `InvalidBatchSize` | Empty batch, or batch over `MAX_KEEPER_BATCH` | Let the keeper read the cap from `src/batch.rs`; lower `TTL_KEEPER_BATCH_SIZE` only to go smaller |
+| `NotInitialized` | Wrong `CONTRACT_ID` or an uninitialized instance | Confirm the id against the deployment record before retrying |
+| Returned count is `0` for a batch of live users | Entries are already **archived** | `extend_ttl` cannot touch archived entries. Restore them first (`stellar contract restore --durability persistent --key '["reg","<username>"]'`), then rerun the keeper |
+| Instance entry archived (every call fails) | Instance TTL lapsed | Restore the contract instance, then rerun; instance keys share one TTL, see [Instance Storage](#instance-storage) |
+| Network / RPC error | Transient | Rerun — extensions are idempotent, a repeated batch only re-bumps entries already above `TTL_THRESHOLD` (no-op) |
+
+---
+
 ## Keeper Implementation
 
 The contract exposes `extend_registry_ttl(usernames: Vec<String>)` (permissionless) as the
@@ -220,6 +277,23 @@ contract-side behaviour these batches rely on.
 > hard-coded batch size keeps sending oversized batches after the contract
 > tightens its cap, and every one comes back `InvalidBatchSize` — a keeper that
 > appears to run and extends nothing, while the records expire silently.
+
+### Partial batches and expiry generations (Issue #669)
+
+`extend_registry_ttl` never leaves a batch half-applied:
+
+- **Unregistered usernames are skipped**, not fatal. Every registered username
+  in the same call is still extended, so all of them land in one expiry
+  generation (`TTL_BUMP` ledgers from the current ledger). The return value
+  counts only the extended entries — compare it with the batch length to spot
+  names the keeper's off-chain list should drop.
+- **A rejected call extends nothing.** `NotInitialized` and `InvalidBatchSize`
+  are returned before any entry is touched, so a keeper retrying after a
+  rejection never sees mixed TTLs from the failed attempt.
+
+Locked by `test_extend_registry_ttl_partial_batch_leaves_single_expiry_generation`
+and `test_extend_registry_ttl_rejected_batch_extends_nothing` in
+[tests/extend_registry_ttl.rs](../tests/extend_registry_ttl.rs).
 
 ### Running the keeper
 
@@ -321,8 +395,10 @@ light client can then compare it against `as_of_ledger` from the proof and use
 `ttl_threshold_ledgers` / `ttl_bump_ledgers` to predict when the next read will
 bump the entry.
 
-If the entry has been archived, the same key is what
-[`extend_registry_ttl`](ABI.md) needs to revive it.
+If the entry has been archived, restore it with that same key
+(`stellar contract restore`) before calling
+[`extend_registry_ttl`](ABI.md) — extending skips archived entries (see the
+[playbook](#operator-playbook-ttl-extension-issue-660)).
 
 ---
 

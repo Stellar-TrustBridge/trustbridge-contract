@@ -75,7 +75,7 @@ documented alongside `src/storage.rs`. Label anything else as an assumption.
 | `LEDGERS_PER_DAY` | `17_280` | ≈ 5 s ledger close |
 | `TTL_THRESHOLD` | `LEDGERS_PER_DAY * 30` (= `518_400`) | Extend when remaining TTL drops below ~30 days |
 | `TTL_BUMP` | `LEDGERS_PER_DAY * 90` (= `1_555_200`) | Restore TTL to ~90 days from current ledger |
-| `CHUNK_SIZE` | `100` | Usernames per persistent index chunk (Issue #2 / DASHBOARD_SYNC) |
+| `CHUNK_SIZE` | `50` | Usernames per persistent index chunk (`src/storage.rs`; measured in [STORAGE_FOOTPRINT.md](STORAGE_FOOTPRINT.md#measured-footprint-budget-ci-check)) |
 | `DEFAULT_PAGE_LIMIT` | `20` or `50` (see notes) | Export default when `limit == 0` — **not a rent driver** |
 | `MAX_PAGE_LIMIT` | `100` | Export page cap — **not a rent driver** |
 
@@ -91,8 +91,9 @@ permissionless keeper `extend_registry_ttl(usernames)`.
 | Keeper path | Off-chain job supplies username lists; contract extends without deserializing full export |
 | Cadence (ops) | Schedule keeper runs so cold records are bumped before archival — see [DEPLOYMENT.md](DEPLOYMENT.md) / [SECURITY.md](SECURITY.md#storage-ttl) |
 
-**Assumption (ops, not encoded on-chain):** operators run a keeper at least
-every ~25–30 days for cold usernames so entries do not approach archival.
+**Ops cadence:** run the keeper at least every `KEEPER_INTERVAL`
+(~20 days, two-thirds of `TTL_THRESHOLD`) — the step-by-step procedure is the
+[operator playbook](STORAGE_RENT.md#operator-playbook-ttl-extension-issue-660).
 
 ---
 

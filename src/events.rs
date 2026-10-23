@@ -445,8 +445,3 @@ pub struct AuditConfigChangedEvent {
     pub log_unauthorized: bool,
     pub timestamp: u64,
 }
-
-#[cfg(test)]
-mod test {
-    use crate::{TrustBridgeContract, TrustBridgeContractClient};
-}

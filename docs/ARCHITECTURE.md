@@ -581,3 +581,22 @@ sequenceDiagram
         S-->>D: optional address + source registry id
     end
 ```
+
+### Storage Key Namespace
+
+The contract uses two independent storage partitions (instance and persistent).
+Storage keys are carefully designed to prevent collisions:
+
+- **Instance keys** (singleton values): Admin address, pause flag, network ID, counters, etc.
+- **Persistent keys** (per-entry, TTL-managed): Registration records, role assignments, pending operations, etc.
+
+Persistent keys use `(Symbol, Context)` tuples where the Symbol discriminator is encoded first in XDR serialization, preventing collisions even when different namespaces use the same context type.
+
+**New contributors must read [STORAGE_KEYS.md](STORAGE_KEYS.md) § Key Namespace Diagram before adding a new storage key.** The diagram shows how discriminators partition the keyspace and documents the collision-prevention strategy.
+
+Automated tests (`tests/storage_keys_collision.rs`) and a linter script (`scripts/check_storage_keys.sh`) verify:
+1. All Symbol constants are unique.
+2. All persistent discriminators are distinct.
+3. The documentation matches the implementation.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md#storage-key-best-practices) for the workflow when adding a new key.

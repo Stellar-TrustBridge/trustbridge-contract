@@ -116,7 +116,7 @@ Override the default RPC endpoint with environment variables:
 export STELLAR_RPC_URL="https://soroban-testnet.stellar.org"
 
 # Futurenet public RPC
-export STELLAR_RPC_URL="https://rpc-futurenet.stellar.org:443"
+export STELLAR_RPC_URL="https://rpc-futurenet.stellar.org"
 
 # Friendbot for testnet funding
 export STELLAR_FRIENDBOT_URL="https://friendbot.stellar.org"
@@ -153,4 +153,5 @@ Public RPC endpoints have rate limits. If you see `429 Too Many Requests`:
 - [CONTRACT_HEALTH.md](./CONTRACT_HEALTH.md) — Expected latency and health metrics
 - [FUTURENET_ONBOARDING.md](./FUTURENET_ONBOARDING.md) — Futurenet-specific setup
 - [DEPLOYMENT.md](./DEPLOYMENT.md) — RPC configuration details in the Makefile
+- [DEPLOYMENT.md § Futurenet vs Testnet Parameters](./DEPLOYMENT.md#futurenet-vs-testnet-parameters-issue-671) — side-by-side parameter table (`make network-params`)
 - 

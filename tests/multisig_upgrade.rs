@@ -662,3 +662,74 @@ fn test_propose_preserves_live_proposal_state_on_already_pending_error() {
         assert_eq!(live.approvers.len(), 1);
     });
 }
+
+// ── Attestation-required flag (Issue #198 / #406) ────────────────────────────
+
+#[test]
+fn test_attestation_required_defaults_to_false() {
+    let (env, _admin, _upgrader, _random, contract_id) = setup();
+
+    env.as_contract(&contract_id, || {
+        assert!(
+            !TrustBridgeContract::get_attestation_required(env.clone()),
+            "attestation_required must default to false"
+        );
+    });
+}
+
+#[test]
+fn test_admin_can_set_attestation_required() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+
+    // Enable: each require_auth needs a fresh mock_all_auths frame.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+        assert!(TrustBridgeContract::get_attestation_required(env.clone()));
+    });
+
+    // Toggle back off.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), false).unwrap();
+        assert!(!TrustBridgeContract::get_attestation_required(env.clone()));
+    });
+}
+
+#[test]
+fn test_non_admin_cannot_set_attestation_required() {
+    let (env, _admin, upgrader, random, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::set_attestation_required(env.clone(), upgrader.clone(), true),
+            Err(ContractError::NotAuthorized),
+            "upgrader must not set attestation_required"
+        );
+        assert_eq!(
+            TrustBridgeContract::set_attestation_required(env.clone(), random.clone(), true),
+            Err(ContractError::NotAuthorized),
+            "random actor must not set attestation_required"
+        );
+    });
+}
+
+#[test]
+fn test_clear_attestation_does_not_disable_required_flag() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        // Turn on the gate then clear any pending attestation.
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+        TrustBridgeContract::clear_attestation(env.clone()).unwrap();
+
+        // The required flag must still be on — clearing the attestation record
+        // is a separate operation from disabling the gate.
+        assert!(
+            TrustBridgeContract::get_attestation_required(env.clone()),
+            "clear_attestation must not disable the attestation_required flag"
+        );
+    });
+}

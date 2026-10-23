@@ -30,10 +30,7 @@ use soroban_sdk::{
     testutils::{Address as _, Events as _},
     Address, Env, String, Symbol, TryFromVal, Vec,
 };
-use trustbridge_contract::{
-    BatchRemoveCancelledEvent, BatchRemoveExecutedEvent, BatchRemoveProposedEvent, Role,
-    TrustBridgeContract,
-};
+use trustbridge_contract::{Role, TrustBridgeContract};
 
 fn s(env: &Env, text: &str) -> String {
     String::from_str(env, text)
@@ -246,6 +243,98 @@ fn generate_xdr_fixtures() {
             r#"{{"event_kind":"batch_remove_cancelled","cancelled_by":"{proposed_by_str}","proposed_by":"{proposed_by_str}"}}"#
         ),
     );
+
+    // Issue #599: emitted event payload fixtures. These are deterministic
+    // synthetic host events (not transactions or upgrade execution).
+    // This avoids invoking update_current_contract_wasm in a fixture test.
+    let hash = soroban_sdk::BytesN::from_array(&env, &[0xAB; 32]);
+    env.as_contract(&contract_id, || {
+        use trustbridge_contract::{
+            EventDomain, RoleGrantedEvent, RoleRevokedEvent, UpgradeApprovedEvent,
+            UpgradeProposalCancelledEvent, UpgradeProposalExecutedEvent, UpgradeProposedEvent,
+            UpgradedEvent,
+        };
+        let domain = EventDomain::new(&env, (1, 1, 0));
+        UpgradedEvent {
+            new_wasm_hash: hash.clone(),
+            version: (1, 1, 0),
+            timestamp: 1_700_000_000,
+            domain: domain.clone(),
+        }
+        .publish(&env);
+        RoleGrantedEvent {
+            address: user.clone(),
+            role: 1,
+            admin: admin.clone(),
+            timestamp: 1_700_000_001,
+            domain: domain.clone(),
+        }
+        .publish(&env);
+        RoleRevokedEvent {
+            address: user.clone(),
+            admin: admin.clone(),
+            timestamp: 1_700_000_002,
+            domain,
+        }
+        .publish(&env);
+        UpgradeProposedEvent {
+            proposal_id: 7,
+            proposed_by: admin.clone(),
+            wasm_hash: hash.clone(),
+            executable_at: 1_700_000_100,
+            timestamp: 1_700_000_003,
+        }
+        .publish(&env);
+        UpgradeApprovedEvent {
+            proposal_id: 7,
+            approved_by: second.clone(),
+            approval_count: 2,
+            timestamp: 1_700_000_004,
+        }
+        .publish(&env);
+        UpgradeProposalExecutedEvent {
+            proposal_id: 7,
+            executed_by: admin.clone(),
+            wasm_hash: hash.clone(),
+            approval_count: 2,
+            timestamp: 1_700_000_005,
+        }
+        .publish(&env);
+        UpgradeProposalCancelledEvent {
+            proposal_id: 8,
+            cancelled_by: admin.clone(),
+            wasm_hash: hash,
+            timestamp: 1_700_000_006,
+        }
+        .publish(&env);
+    });
+
+    for (name, kind, timestamp) in [
+        ("upgraded_event", "upgraded", 1_700_000_000u64),
+        ("role_granted_event", "role_granted", 1_700_000_001),
+        ("role_revoked_event", "role_revoked", 1_700_000_002),
+        ("upgrade_proposed_event", "upgrade_proposed", 1_700_000_003),
+        ("upgrade_approved_event", "upgrade_approved", 1_700_000_004),
+        (
+            "upgrade_proposal_executed_event",
+            "upgrade_proposal_executed",
+            1_700_000_005,
+        ),
+        (
+            "upgrade_proposal_cancelled_event",
+            "upgrade_proposal_cancelled",
+            1_700_000_006,
+        ),
+    ] {
+        let payload = find_event_xdr(&env, &contract_id, name);
+        print_fixture(
+            name,
+            &payload,
+            &std::format!(
+                r#"{{"fixture_version":1,"event_kind":"{kind}","ledger_hint":1000042,"timestamp":{timestamp}}}"#
+            ),
+        );
+    }
 
     println!();
     println!(

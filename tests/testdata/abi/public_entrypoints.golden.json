@@ -7,6 +7,10 @@
       "arity": 2
     },
     {
+      "name": "clear_staged",
+      "arity": 1
+    },
+    {
       "name": "get_address",
       "arity": 1
     },
@@ -19,12 +23,24 @@
       "arity": 0
     },
     {
+      "name": "get_health_probes",
+      "arity": 0
+    },
+    {
       "name": "get_oracle_allowlist",
       "arity": 0
     },
     {
+      "name": "get_pending_reverify",
+      "arity": 2
+    },
+    {
       "name": "get_registered_paginated",
       "arity": 2
+    },
+    {
+      "name": "get_staged",
+      "arity": 0
     },
     {
       "name": "initialize",
@@ -57,6 +73,10 @@
     {
       "name": "set_oracle_allowlist",
       "arity": 1
+    },
+    {
+      "name": "stage_wasm",
+      "arity": 2
     },
     {
       "name": "usernames_match",
