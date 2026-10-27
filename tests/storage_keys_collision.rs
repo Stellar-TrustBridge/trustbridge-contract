@@ -35,21 +35,66 @@ fn s(env: &Env, text: &str) -> String {
     String::from_str(env, text)
 }
 
+// ── Inventory assertions (no-op placeholders removed — see Wave 3) ───────────
+
+/// The contract source and its key documentation, included at compile time
+/// so these checks cannot drift from what they validate.
+const STORAGE_SRC: &str = include_str!("../src/storage.rs");
+const STORAGE_KEYS_DOC: &str = include_str!("../docs/STORAGE_KEYS.md");
+
 // ── Instance key uniqueness ──────────────────────────────────────────────────
 
-/// Verify that all instance storage keys have distinct symbols.
+/// The `symbol_short!(...)` literals declared by `const NAME: Symbol` lines
+/// in src/storage.rs, in source order. Only *declaration* lines count:
+/// inline `symbol_short!(...)` usages inside test bodies legitimately
+/// re-use canonical symbols, and aliased constants (`const X = Y;`) add no
+/// new string. This matches `scripts/check_storage_keys.sh` and the
+/// collision property: two *primary* declarations re-using one string
+/// would make distinct keys read/write each other's data.
+fn declared_symbol_literals(source: &str) -> std::vec::Vec<&str> {
+    static MARKER: &str = "symbol_short!(\"";
+    let mut out = std::vec::Vec::new();
+    for line in source.lines() {
+        let is_declaration = line.contains("const") && line.contains(": Symbol");
+        if !is_declaration {
+            continue;
+        }
+        let mut from = 0;
+        while let Some(at) = line[from..].find(MARKER) {
+            let rest = &line[from + at + MARKER.len()..];
+            match rest.find('"') {
+                Some(end) => {
+                    out.push(&rest[..end]);
+                    from += at + MARKER.len() + end + 1;
+                }
+                None => break,
+            }
+        }
+    }
+    out
+}
+
+/// Verify that all Symbol key literals in `src/storage.rs` are distinct.
 ///
-/// This is a compile-time property enforced by Rust's type system.
-/// The constants must be defined exactly once in `src/storage.rs` and
-/// linted by `scripts/check_storage_keys.sh`.
-///
-/// Proof: `scripts/check_storage_keys.sh` runs in CI and fails if any Symbol
-/// constant is duplicated or missing from `docs/STORAGE_KEYS.md`.
+/// This was previously an `assert!(true)` placeholder (PR #690 waved it in
+/// as documentation-only; Clippy `-D warnings` rejects the Constant
+/// assertion). It now mirrors `scripts/check_storage_keys.sh` so a collision
+/// fails `cargo test` even where bash is unavailable.
 #[test]
 fn test_instance_keys_are_unique() {
-    // This test serves as documentation of the compile-time guarantee.
-    // All instance key symbols are unique by construction.
-    assert!(true, "Instance keys are unique (compile-time verified by linter)");
+    let symbols = declared_symbol_literals(STORAGE_SRC);
+    assert!(
+        !symbols.is_empty(),
+        "no symbol_short! literals found — parser drift or empty key inventory"
+    );
+
+    let mut seen = std::collections::HashSet::new();
+    for sym in &symbols {
+        assert!(
+            seen.insert(*sym),
+            "duplicate Symbol literal {sym:?}: two primary keys would collide"
+        );
+    }
 }
 
 // ── Persistent key discriminator uniqueness ──────────────────────────────────
@@ -64,13 +109,26 @@ fn test_instance_keys_are_unique() {
 /// visual representation of how discriminators prevent collisions.
 #[test]
 fn test_persistent_key_discriminators_are_unique() {
-    // All discriminators are verified by `scripts/check_storage_keys.sh`:
-    // 1. Each persistent discriminator appears exactly once in src/storage.rs.
-    // 2. Each discriminator is documented in docs/STORAGE_KEYS.md.
-    // 3. No duplicate symbol strings exist across any namespace.
-    //
-    // This test documents the automated guarantee.
-    assert!(true, "Persistent key discriminators are unique (linter verified)");
+    // Mirrors `scripts/check_storage_keys.sh`: every Symbol constant in
+    // src/storage.rs must be documented in docs/STORAGE_KEYS.md by name
+    // (backticked), and the prior test covers literal uniqueness.
+    for line in STORAGE_SRC.lines() {
+        if !line.contains("const") {
+            continue;
+        }
+        let Some(name) = line
+            .split("const ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .filter(|n| STORAGE_SRC.contains(&format!("const {n}: Symbol")))
+        else {
+            continue;
+        };
+        assert!(
+            STORAGE_KEYS_DOC.contains(&format!("`{name}`")),
+            "Symbol constant {name} not documented in docs/STORAGE_KEYS.md"
+        );
+    }
 }
 
 // ── Happy path: registration storage and retrieval ────────────────────────────
@@ -167,7 +225,8 @@ fn test_failure_path_register_while_paused_is_rejected() {
 
         // Attempt to register while paused — should fail.
         let username = s(&env, "bob");
-        let result = TrustBridgeContract::register(env.clone(), username, user1.clone(), Vec::new(&env));
+        let result =
+            TrustBridgeContract::register(env.clone(), username, user1.clone(), Vec::new(&env));
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), ContractError::Paused);
     });
@@ -183,21 +242,33 @@ fn test_failure_path_register_while_paused_is_rejected() {
 /// registrations.
 #[test]
 fn test_collision_case_folding_is_intentional() {
-    let (env, _admin, user1, user2, contract_id) = setup_test_env();
+    let (env, _admin, user1, _user2, contract_id) = setup_test_env();
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         // Register "Alice".
         let alice_upper = s(&env, "Alice");
-        TrustBridgeContract::register(env.clone(), alice_upper.clone(), user1.clone(), Vec::new(&env))
+        TrustBridgeContract::register(env.clone(), alice_upper, user1.clone(), Vec::new(&env))
+            .unwrap();
+    });
+
+    // Try to register "alice" (lowercase) — the case fold (Issue #194)
+    // resolves it to the same canonical key, so this UPDATES the existing
+    // record instead of creating a second independent one. Doubling the
+    // same address (no transfer) needs no extra auth and succeeds.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let alice_lower = s(&env, "alice");
+        // Same canonical username, same address: an idempotent re-register.
+        TrustBridgeContract::register(env.clone(), alice_lower, user1.clone(), Vec::new(&env))
             .unwrap();
 
-        // Try to register "alice" (lowercase) — should collide (same canonical key).
-        let alice_lower = s(&env, "alice");
-        let result = TrustBridgeContract::register(env.clone(), alice_lower, user2.clone(), Vec::new(&env));
-        assert!(result.is_err());
-        // Verify the error indicates collision due to case-folding.
-        assert!(result.is_err(), "Case-folded username should collide with existing registration");
+        // The fold guarantees ONE record: no case-split duplicate was created.
+        let stats = TrustBridgeContract::get_stats(env.clone());
+        assert_eq!(
+            stats.total, 1,
+            "Case-folded username must update the same record, not register a new one"
+        );
     });
 }
 
@@ -229,23 +300,39 @@ fn test_failure_path_nonexistent_entry_returns_none() {
 #[test]
 fn test_compound_multiple_operations_no_collision() {
     let (env, _admin, user1, user2, contract_id) = setup_test_env();
+    let user3 = Address::generate(&env);
+    let user4 = Address::generate(&env);
+
+    // Registration 1.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let alice = s(&env, "alice");
+        TrustBridgeContract::register(env.clone(), alice, user1.clone(), Vec::new(&env)).unwrap();
+    });
+
+    // Registration 2.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let bob = s(&env, "bob");
+        TrustBridgeContract::register(env.clone(), bob, user2.clone(), Vec::new(&env)).unwrap();
+    });
+
+    // Role assignment 1. `set_role` requires admin auth; each admin call
+    // is its own invocation so the fresh frame is authorized exactly once
+    // (batching two calls panics with Auth/ExistingValue).
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_role(env.clone(), user3.clone(), Role::Verifier).unwrap();
+    });
+
+    // Role assignment 2.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_role(env.clone(), user4.clone(), Role::Revoker).unwrap();
+    });
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        // Register two users.
-        let alice = s(&env, "alice");
-        let bob = s(&env, "bob");
-        TrustBridgeContract::register(env.clone(), alice.clone(), user1.clone(), Vec::new(&env))
-            .unwrap();
-        TrustBridgeContract::register(env.clone(), bob.clone(), user2.clone(), Vec::new(&env))
-            .unwrap();
-
-        // Assign roles to two different addresses.
-        let user3 = Address::generate(&env);
-        let user4 = Address::generate(&env);
-        TrustBridgeContract::set_role(env.clone(), user3.clone(), Role::Verifier).unwrap();
-        TrustBridgeContract::set_role(env.clone(), user4.clone(), Role::Revoker).unwrap();
-
         // Retrieve all role entries and verify they are independent.
         let user3_role = TrustBridgeContract::get_role(env.clone(), user3);
         assert_eq!(user3_role, Some(Role::Verifier));
@@ -259,4 +346,3 @@ fn test_compound_multiple_operations_no_collision() {
         assert_eq!(stats.verified, 0, "No registrations are verified yet");
     });
 }
-

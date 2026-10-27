@@ -3237,8 +3237,14 @@ mod storage_rent_playbook_tests {
 
     #[test]
     fn keeper_interval_leaves_margin_before_threshold() {
-        assert!(KEEPER_INTERVAL < TTL_THRESHOLD);
-        assert!(TTL_THRESHOLD < TTL_BUMP);
+        // Const-context assertions: the invariants are compile-time facts
+        // (`KEEPER_INTERVAL`/`TTL_THRESHOLD`/`TTL_BUMP` are consts), and
+        // Clippy's `assertions_on_constants` (CI denies warnings) requires
+        // const blocks instead of runtime asserts.
+        const {
+            assert!(KEEPER_INTERVAL < TTL_THRESHOLD);
+            assert!(TTL_THRESHOLD < TTL_BUMP);
+        }
         assert_eq!(KEEPER_INTERVAL, LEDGERS_PER_DAY * 20);
     }
 
