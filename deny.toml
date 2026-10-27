@@ -12,7 +12,30 @@ version = 2
 # Unmaintained advisories fail only for direct dependencies.
 unmaintained = "workspace"
 yanked = "warn"
-ignore = []
+# RUSTSEC-2026-0387 (crypto-bigint): operations intended to be constant-time
+# can take secret-dependent branches (timing side channel, crypto-failure).
+#
+# Why ignored — no compatible fix exists today:
+#   * The advisory is patched only in crypto-bigint >= 0.7.6.
+#   * Our only path to crypto-bigint is elliptic-curve 0.13.8 (via k256/p256
+#     via soroban-env-host), which pins crypto-bigint ^0.5. Semver-bound,
+#     `cargo update -p crypto-bigint` stays inside 0.5.x (verified with
+#     --dry-run; latest 0.5.x = 0.5.5, already resolved, no backport).
+#   * The newest soroban-env-host releases (through 30.0.0, Oct 2026) still
+#     pin elliptic-curve ^0.13.5, so no soroban upgrade closes this either.
+#   * A [patch] section overriding crypto-bigint to 0.7.x cannot compile:
+#     elliptic-curve 0.13's API is written against 0.5 types.
+# Risk posture:
+#   * The contract calls none of the elliptic-curve/secp256 built-ins where
+#     this code lives (grep for secp256 in src/ and tests/ is empty); the
+#     affected arithmetic is not exercised by TrustBridge logic.
+#   * Advisory class is timing variability, not key recovery; no known exploit.
+# Removal condition — delete this ignore (and re-run `cargo deny check`)
+# when soroban-env-host ships a release built on elliptic-curve >= 0.14
+# (crypto-bigint >= 0.7.6), then bump soroban-sdk and drop the pin comment.
+ignore = [
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint <0.7.6 timing advisory; no compatible fix: pinned by soroban's elliptic-curve ^0.13 chain; unreached code path (no secp256 builtins used)" },
+]
 
 [licenses]
 version = 2
