@@ -104,6 +104,23 @@ meter execution costs across the entire batch ceiling:
 Oversized batches (`> MAX_WRITE_BATCH`) and empty batches (`0`) are rejected immediately before
 contract budget consumption with `ContractError::InvalidBatchSize`.
 
+### Soak test target for repeated `register` + `verify` pairs (Issue #698)
+
+Repeated `register` → `verify` cycles across growing registry sizes exercise persistent storage rent bumps, chunked index growth (`INDEX_KEY` / `CHUNK_CNT_KEY`), monotonic counter updates (`COUNT_KEY`, `VERIFIED_COUNT_KEY`, `EVER_VERIFIED_COUNT_KEY`), and audit ring-buffer eviction (`MAX_AUDIT_LOG_ENTRIES = 100`) together.
+
+| Target / Test | Scope | What it catches before Wave scale |
+|---|---|---|
+| `make soak-register-verify` (`REGISTER_VERIFY_SOAK_PAIRS=25` default) | Runs `test_batch_register` + `test_bench_double_verify_rejection` + `test_report_register_budget_samples` sequentially with `--test-threads=1` | Per-pair CPU/memory drift, duplicate-verify rejection cost (`AlreadyVerified` must stay cheaper than first `verify`), and batch ceiling (`MAX_WRITE_BATCH = 25`) budget headroom |
+| `cargo test --test integration test_scale_batch_register --features scale-test -- --nocapture --test-threads=1` | Multi-batch sequential registration soak (`4 × MAX_WRITE_BATCH = 100` entries) | Linear index growth or unexpected storage footprint/rent spikes across repeated batches |
+| `make soak-cursor` (`CURSOR_SOAK_ITERATIONS=512`, or `20000` for extended local soak) | Deterministic cursor pagination property soak after repeated registrations/removals | Cursor corruption across chunk boundaries and index compactions |
+
+#### Failure & edge-case guarantees under soak
+
+- **Empty or oversized batches** (`0` or `> MAX_WRITE_BATCH`) fail closed with `ContractError::InvalidBatchSize` before any storage write or CPU budget spike (`test_batch_register_empty_list_rejected_before_budget_spend`, `test_batch_register_oversized_batch_rejected`).
+- **Malformed usernames** fail closed with `ContractError::InvalidUsername` (code `11`) before `require_auth()` and before touching `COUNT_KEY` or `INDEX_KEY`.
+- **Pause mid-soak** (`pause` / `emergency_pause`) rejects subsequent `register` and `verify` calls with `ContractError::Paused` (code `7`) atomically, leaving prior verified records and counters intact (`test_batch_register_paused_contract_blocks_register`).
+- **Duplicate `verify` on an already-verified record** returns `ContractError::AlreadyVerified` at a lower CPU/memory cost than the initial `verify` (`test_bench_double_verify_rejection`), preventing double-counting in `get_verified_count()`.
+
 ---
 
 ## CI job
@@ -141,6 +158,8 @@ make bench-batch-register-budget    # batch register ceiling CPU/mem integration
 make bench-export                   # get_all_registered sweep
 make bench-username                 # usernames_match sweep
 make bench-double-verify            # verify success vs rejection
+make soak-register-verify           # repeated register + verify pair soak & budget check
+make soak-cursor                    # cursor pagination soak (CURSOR_SOAK_ITERATIONS=512)
 ```
 
 ---

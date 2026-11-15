@@ -747,6 +747,8 @@ make bench-batch-register-budget  # batch register ceiling CPU/mem integration t
 make bench-export                 # get_all_registered sweep
 make bench-username               # usernames_match sweep
 make bench-double-verify          # verify success vs rejection
+make soak-register-verify         # repeated register + verify pair soak (Issue #698)
+make soak-cursor                  # cursor pagination soak (CURSOR_SOAK_ITERATIONS=512)
 ```
 
 Always run with `--test-threads=1` (the Makefile targets do this automatically).
