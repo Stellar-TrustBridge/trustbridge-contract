@@ -154,4 +154,5 @@ Public RPC endpoints have rate limits. If you see `429 Too Many Requests`:
 - [FUTURENET_ONBOARDING.md](./FUTURENET_ONBOARDING.md) — Futurenet-specific setup
 - [DEPLOYMENT.md](./DEPLOYMENT.md) — RPC configuration details in the Makefile
 - [DEPLOYMENT.md § Futurenet vs Testnet Parameters](./DEPLOYMENT.md#futurenet-vs-testnet-parameters-issue-671) — side-by-side parameter table (`make network-params`)
+- [ADMIN_RUNBOOK.md § Oracle Outage Incident Checklist](./ADMIN_RUNBOOK.md#oracle-outage-incident-checklist-issue-694) — pause, `set_oracle_allowlist` rotation, and communicator steps during oracle downtime
 - 

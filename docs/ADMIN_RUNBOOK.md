@@ -1198,3 +1198,86 @@ Subgraph consumers: `RoleGrantPendingEvent` handler mapping lives in
 [docs/subgraph/schema.graphql](subgraph/schema.graphql); topic symbol coverage
 is enforced by `scripts/check_event_topics.sh` over `scripts/event_indexer.sh`
 `TOPIC_TABLE`. Dashboard state notes: [DASHBOARD_SYNC.md](DASHBOARD_SYNC.md).
+
+---
+
+## Oracle Outage Incident Checklist (Issue #694)
+
+Use this checklist when the off-chain GitHub identity oracle service experiences unplanned downtime, clock/TTL skew, or an Ed25519 signing key compromise affecting `verify_with_oracle_proof` (`src/oracle_proof.rs`).
+
+### 1. Triage & Classify Failure Mode
+
+Inspect recent invocation errors and on-chain health before mutating contract state:
+
+| Observed Error / Symptom | `ContractError` Code | Root Cause | Immediate Action |
+|---|---|---|---|
+| Off-chain oracle HTTP 5xx / timeout | N/A (off-chain) | Oracle service unavailable; no new `OracleProof` payloads issued | Switch verification to manual `verify` / `batch_verify` via `Role::Verifier` (Step 3) or rotate to standby oracle key (Step 3) |
+| `OracleProofExpired` | `60` | Proof `expires_at != 0` and `env.ledger().timestamp() > expires_at` | Re-issue proof with fresh `expires_at` once oracle recovers, or verify via `Role::Verifier` |
+| `OracleProofNotAllowlisted` | `59` | `oracle_pubkey` (`BytesN<32>`) is missing from instance key `oraclepk` (`get_oracle_allowlist`) | Inspect `get_oracle_allowlist` and update allowlist via `set_oracle_allowlist` (Step 3) |
+| `OracleProofBadLayout` | `58` | Empty `message` or all-zero 64-byte `signature` | Fix caller serialization before resubmitting; no crypto was executed |
+| `OracleProofBadSignature` / host crypto trap | `61` / trap | Non-canonical scalar encoding (`bytes[63] & 0xE0 != 0`) or forged/corrupted signature | If suspected key compromise or proof flood, freeze immediately (Step 2) and rotate allowlist (Step 3) |
+| `AddressMismatch` | `26` | Signed `message` does not match canonical `<github_username>:<stellar_address>:<expires_at>` | Re-mint proof for the currently registered `stellar_address` |
+
+Run the pre-incident read probe (no auth required, works while paused):
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --network $NETWORK \
+  -- get_health_probes
+```
+
+### 2. Pause Decision (Key Compromise vs. Service Outage)
+
+- **Service-only outage (no key compromise):** Do **not** pause the contract unless registration itself must be frozen. Leaving the contract unpaused allows contributors to continue calling `register` while operators verify accounts via `verify` / `batch_verify` or rotate the oracle allowlist.
+- **Suspected oracle key compromise or malformed proof flood:** Freeze writes immediately using either the guardian circuit-breaker or the admin key. While paused, `verify_with_oracle_proof` fails closed with `ContractError::Paused` (code `7`) **before** any allowlist lookup or Ed25519 signature verification (`tests/integration.rs::test_integration_oracle_proof_paused_rejects_before_crypto`):
+
+```bash
+# Option A: Fast freeze via Guardian (no admin key needed)
+make invoke-emergency-pause CONTRACT_ID=$CONTRACT_ID NETWORK=$NETWORK SOURCE=guardian-identity CALLER=$GUARDIAN_ADDRESS
+
+# Option B: Admin pause with reason code (1 = security/incident)
+make invoke-pause CONTRACT_ID=$CONTRACT_ID NETWORK=$NETWORK SOURCE=admin-identity PAUSE_REASON_CODE=1 SEND=yes
+```
+
+Confirm `is_paused` returns `true`. Public reads (`get_address`, `get_public_paginated`, `get_stats`, `get_health_probes`) remain available to indexers and dashboards throughout the freeze.
+
+### 3. Allowlist Rotate (`set_oracle_allowlist` / `get_oracle_allowlist`)
+
+To fail over to a standby oracle signer or revoke a compromised Ed25519 public key (`BytesN<32>`):
+
+1. **Inspect the current oracle pubkey allowlist** (unauthenticated read):
+   ```bash
+   stellar contract invoke \
+     --id $CONTRACT_ID \
+     --network $NETWORK \
+     -- get_oracle_allowlist
+   ```
+2. **Replace the allowlist with the healthy/standby 32-byte Ed25519 public key(s)** (requires `admin.require_auth()`):
+   ```bash
+   stellar contract invoke \
+     --id $CONTRACT_ID \
+     --source-account admin-identity \
+     --network $NETWORK \
+     --send=yes \
+     -- set_oracle_allowlist --pubkeys '["<NEW_32_BYTE_HEX_PUBKEY>"]'
+   ```
+   - `set_oracle_allowlist` atomically overwrites the `oraclepk` instance storage entry (`src/oracle_proof.rs`).
+   - Passing an empty vector (`'[]'`) disables all oracle-proof verification immediately (`verify_with_proof` returns `ContractError::OracleProofNotAllowlisted`, code `59`) without pausing contributor registrations.
+3. **Confirm rotation**: Re-run `get_oracle_allowlist` and verify only the intended public keys are present.
+4. **Optional Verifier fallback**: If the off-chain oracle service remains offline during an active Wave, onboard or use a time-bounded `Role::Verifier` key (`add_verifier` / `make invoke-verify` / `make bulk-verify`) so contributor verifications continue without blocking payouts.
+
+### 4. Communicator Steps
+
+Keep contributors, Wave operators, and downstream indexers informed at each stage:
+
+1. **Initial Incident Notice (within 15 minutes of detection):**
+   - Post status update in contributor channels (TrustBridge dashboard banner, Discord/Telegram announcement, and pinned GitHub Discussion).
+   - State clearly whether **registrations (`register`)** are still open or temporarily paused (`ContractError::Paused`, code `7`), and whether verification has failed over to manual `Role::Verifier` review or a standby oracle key.
+   - Never include private keys, raw seed phrases, or unredacted sensitive operator credentials in incident logs or public updates.
+2. **Periodic Progress Updates:**
+   - Share ETA updates and notify contributors if proofs signed by a retired oracle key (`OracleProofNotAllowlisted`, code `59`) or expired during downtime (`OracleProofExpired`, code `60`) must be re-requested from the dashboard once the new oracle key is live.
+3. **Resolution & All-Clear Notice:**
+   - If the contract was paused, lift the freeze (`make invoke-clear-emergency-pause` and/or `make invoke-unpause`) and confirm `get_health_probes` reports `paused: false`.
+   - Validate end-to-end recovery by submitting a known-good `verify_with_oracle_proof` (or `make invoke-lookup` + `make invoke-stats`) on the target network.
+   - Publish a post-incident summary covering outage duration, root cause, whether `oraclepk` was rotated, and any revoked/re-verified records.
