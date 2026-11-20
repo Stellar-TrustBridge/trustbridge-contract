@@ -591,8 +591,14 @@ mod tests {
         merged.push_back((u2, rec(&env, &a2, true)));
         let merged_root = root_of_records(&env, &merged);
 
-        assert_ne!(merged_root, root_p1, "merged root must differ from page 1 root");
-        assert_ne!(merged_root, root_p2, "merged root must differ from page 2 root");
+        assert_ne!(
+            merged_root, root_p1,
+            "merged root must differ from page 1 root"
+        );
+        assert_ne!(
+            merged_root, root_p2,
+            "merged root must differ from page 2 root"
+        );
     }
 
     /// The address strkey encoding is what goes into the leaf, not any internal
