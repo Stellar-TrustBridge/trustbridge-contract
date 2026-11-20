@@ -153,35 +153,56 @@ The full table lives in `scripts/event_indexer.sh` (`TOPIC_TABLE`).
 `scripts/check_event_topics.sh` fails CI if the table falls out of step with
 `src/events.rs`.
 
-| Topic symbol | `event_kind` | `category` |
-|---|---|---|
-| `registered_event` | `registered` | `registry` |
-| `removed_event` | `removed` | `registry` |
-| `renamed_event` | `renamed` | `registry` |
-| `verified_event` | `verified` | `attest` |
-| `verification_revoked_event` | `verification_revoked` | `attest` |
-| `verification_configured_event` | `verification_configured` | `attest` |
-| `challenge_started_event` | `challenge_started` | `challenge` |
-| `challenge_cancelled_event` | `challenge_cancelled` | `challenge` |
-| `challenge_completed_event` | `challenge_completed` | `challenge` |
-| `role_granted_event` | `role_granted` | `role` |
-| `role_revoked_event` | `role_revoked` | `role` |
-| `role_grant_pending_event` | `role_grant_pending` | `role` |
-| `role_grant_cancelled_event` | `role_grant_cancelled` | `role` |
-| `paused_event` | `paused` | `admin` |
-| `unpaused_event` | `unpaused` | `admin` |
-| `emergency_paused_event` | `emergency_paused` | `admin` |
-| `emergency_cleared_event` | `emergency_cleared` | `admin` |
-| `guardian_changed_event` | `guardian_changed` | `admin` |
-| `rotation_requested_event` | `rotation_requested` | `admin` |
-| `rotation_executed_event` | `rotation_executed` | `admin` |
-| `rotation_cancelled_event` | `rotation_cancelled` | `admin` |
-| `upgraded_event` | `upgraded` | `upgrade` |
-| `upgrade_attested_event` | `upgrade_attested` | `upgrade` |
-| `attestation_cleared_event` | `attestation_cleared` | `upgrade` |
-| `batch_remove_proposed_event` | `batch_remove_proposed` | `batch` |
-| `batch_remove_executed_event` | `batch_remove_executed` | `batch` |
-| `batch_remove_cancelled_event` | `batch_remove_cancelled` | `batch` |
+The table below lists **every** published topic (Issue #754). The **Subgraph**
+column records how [`docs/subgraph/README.md`](subgraph/README.md) handles it:
+
+- `` `EntityName` ``: mapped 1:1 to a Graph entity (see *Event → entity mapping*)
+- `waived`: deliberately not modelled in the subgraph, with a reason in the
+  README's *Explicit subgraph event waivers* table. Consumers still get it from
+  this raw indexer. Operational signals such as pause, upgrade and index
+  generation fall in this group, so watch them here rather than in the subgraph.
+
+`make subgraph-parity` (`scripts/check_subgraph_parity.py`, run in CI) fails if a
+topic is missing from or stale in this table, if `event_kind` / `category` drift
+from `TOPIC_TABLE`, or if the Subgraph column disagrees with the README.
+
+| Topic symbol | `event_kind` | `category` | Subgraph |
+|---|---|---|---|
+| `registered_event` | `registered` | `registry` | `RegisteredEvent` |
+| `removed_event` | `removed` | `registry` | `RemovedEvent` |
+| `renamed_event` | `renamed` | `registry` | `RenamedEvent` |
+| `bot_status_changed_event` | `bot_status_changed` | `registry` | `BotStatusChangedEvent` |
+| `verified_event` | `verified` | `attest` | `VerifiedEvent` |
+| `verification_revoked_event` | `verification_revoked` | `attest` | `VerificationRevokedEvent` |
+| `verification_configured_event` | `verification_configured` | `attest` | waived |
+| `challenge_started_event` | `challenge_started` | `challenge` | `ChallengeStartedEvent` |
+| `challenge_cancelled_event` | `challenge_cancelled` | `challenge` | `ChallengeCancelledEvent` |
+| `challenge_completed_event` | `challenge_completed` | `challenge` | `ChallengeCompletedEvent` |
+| `role_granted_event` | `role_granted` | `role` | waived |
+| `role_revoked_event` | `role_revoked` | `role` | waived |
+| `role_grant_pending_event` | `role_grant_pending` | `role` | `RoleGrantPendingEvent` |
+| `role_grant_cancelled_event` | `role_grant_cancelled` | `role` | waived |
+| `paused_event` | `paused` | `admin` | waived |
+| `unpaused_event` | `unpaused` | `admin` | waived |
+| `emergency_paused_event` | `emergency_paused` | `admin` | waived |
+| `emergency_cleared_event` | `emergency_cleared` | `admin` | waived |
+| `guardian_changed_event` | `guardian_changed` | `admin` | waived |
+| `rotation_requested_event` | `rotation_requested` | `admin` | `RotationRequestedEvent` |
+| `rotation_executed_event` | `rotation_executed` | `admin` | `RotationExecutedEvent` |
+| `rotation_cancelled_event` | `rotation_cancelled` | `admin` | `RotationCancelledEvent` |
+| `upgraded_event` | `upgraded` | `upgrade` | waived |
+| `upgrade_attested_event` | `upgrade_attested` | `upgrade` | waived |
+| `attestation_cleared_event` | `attestation_cleared` | `upgrade` | waived |
+| `wasm_staged_event` | `wasm_staged` | `upgrade` | waived |
+| `staged_wasm_cleared_event` | `staged_wasm_cleared` | `upgrade` | waived |
+| `upgrade_proposed_event` | `upgrade_proposed` | `upgrade` | waived |
+| `upgrade_approved_event` | `upgrade_approved` | `upgrade` | waived |
+| `upgrade_proposal_executed_event` | `upgrade_proposal_executed` | `upgrade` | waived |
+| `upgrade_proposal_cancelled_event` | `upgrade_proposal_cancelled` | `upgrade` | waived |
+| `batch_remove_proposed_event` | `batch_remove_proposed` | `batch` | waived |
+| `batch_remove_executed_event` | `batch_remove_executed` | `batch` | waived |
+| `batch_remove_cancelled_event` | `batch_remove_cancelled` | `batch` | waived |
+| `audit_config_changed_event` | `audit_config_changed` | `audit` | waived |
 
 An event whose `topic[0]` does not match any row is written with
 `event_kind: "unknown"` and `category: "unclassified"`. This is intentional: an
@@ -194,7 +215,13 @@ be worse than a gap in classification.
 1. Add the `#[contractevent]` struct to `src/events.rs`.
 2. Add a row to the `TOPIC_TABLE` in `scripts/event_indexer.sh`:
    `<topic_symbol>|<event_kind>|<category>`
-3. `scripts/check_event_topics.sh` will fail CI until both sides agree.
+3. Add a row to the table above, with the Subgraph column set to the mapped
+   entity or `waived`.
+4. Add either a mapping row (plus a `schema.graphql` entity) or a waiver row with
+   a reason to [`docs/subgraph/README.md`](subgraph/README.md).
+5. `scripts/check_event_topics.sh` and `make subgraph-parity` fail CI until all
+   sides agree (`python3 scripts/check_subgraph_parity.py --self-test` proves the
+   drift cases are caught).
 
 ---
 

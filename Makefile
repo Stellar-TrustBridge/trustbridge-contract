@@ -244,7 +244,8 @@ wasm-size: build ## Report release WASM size and check against budget (WASM_SIZE
 error-codes: ## Verify ContractError discriminants agree across enum, golden, and ABI.md (Issue #402)
 	./scripts/check_error_codes.sh
 
-subgraph-parity: ## Check Graph schema/entity coverage and documented waivers (Issue #600)
+subgraph-parity: ## Check Graph schema/entity coverage, waivers, and the EVENT_INDEXING.md topic table (Issues #600, #754)
+	python3 scripts/check_subgraph_parity.py --self-test
 	python3 scripts/check_subgraph_parity.py
 
 event-topics: ## Verify the indexer's topic table matches src/events.rs (Issue #399)
