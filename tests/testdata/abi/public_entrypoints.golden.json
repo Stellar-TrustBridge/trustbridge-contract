@@ -23,6 +23,10 @@
       "arity": 0
     },
     {
+      "name": "get_bot_status",
+      "arity": 1
+    },
+    {
       "name": "get_health_probes",
       "arity": 0
     },

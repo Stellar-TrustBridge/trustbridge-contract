@@ -848,6 +848,19 @@ Contract-side behaviour is pinned by `test_verified_only_lookup_*` in
 
 ---
 
+### `get_bot_status(github_username: String) -> Result<bool, ContractError>`
+
+Returns the stored `is_bot` flag for a registered contributor. Read-only,
+permissionless, and available while paused. Returns `NotInitialized` before
+contract initialization and `NotRegistered` for a missing username.
+
+```bash
+stellar contract invoke --id $ID --network testnet \
+  -- get_bot_status --github-username octocat
+```
+
+---
+
 ### `remove(caller: Address, github_username: String) -> Result<(), ContractError>`
 
 Remove a registration.

@@ -296,6 +296,11 @@ Event types covered:
 
 `registered_event`, `bot_status_changed_event`, `removed_event`, `verified_event`, `verification_revoked_event`, `upgraded_event`, `paused_event`, `unpaused_event`, `emergency_paused_event`, `emergency_cleared_event`, `guardian_changed_event`, `role_grant_pending_event`, `role_grant_cancelled_event`, `renamed_event`, `rotation_requested_event`, `rotation_executed_event`, `rotation_cancelled_event`, `wasm_staged_event`, `upgrade_attested_event`, `attestation_cleared_event`, `role_granted_event`, `role_revoked_event`, `batch_remove_proposed_event`, `batch_remove_executed_event`, `batch_remove_cancelled_event`, `challenge_started_event`, `challenge_cancelled_event`, `challenge_completed_event`, `staged_wasm_cleared_event`, `upgrade_proposed_event`, `upgrade_approved_event`, `upgrade_proposal_executed_event`, `upgrade_proposal_cancelled_event`, `verification_configured_event`, `audit_config_changed_event`.
 
+For a direct read of the bot flag, use the permissionless
+`get_bot_status(github_username)` entrypoint; it returns `NotRegistered` for a
+missing record and remains available while paused. This avoids inferring status
+from event history.
+
 Events without `github_username` (upgrade hashes, roles, proposals, guardians,
 audit configuration) use their own payload subject in real indexers. Dedupe
 **must not** key on that subject: it keys solely on the network, contract,
