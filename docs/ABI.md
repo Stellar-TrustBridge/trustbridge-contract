@@ -1155,6 +1155,9 @@ Pre-Wave operator probes: pause flag, admin presence, index generation
 | **Mutates** | No |
 | **Errors** | None — uninitialized reports `admin_set: false` |
 
+Preferred for liveness/uptime alerting because it never errors. See
+[CONTRACT_HEALTH.md → Choosing a probe & alert SLOs](CONTRACT_HEALTH.md#choosing-a-probe--alert-slos-issue-756).
+
 ---
 
 ## Pagination API Selection Guide (Issue #302)
@@ -2755,7 +2758,10 @@ Returns a packed health snapshot for dashboards and CI probes.
 | **Works while paused** | ✅ |
 | **Errors** | `NotInitialized` |
 
-See [CONTRACT_HEALTH.md](CONTRACT_HEALTH.md) for full reference.
+See [CONTRACT_HEALTH.md](CONTRACT_HEALTH.md) for full reference, and
+[Choosing a probe & alert SLOs](CONTRACT_HEALTH.md#choosing-a-probe--alert-slos-issue-756)
+for when to prefer `get_health_probes`. `NotInitialized` is the only contract
+error, so any other failure is RPC or transport.
 
 ---
 

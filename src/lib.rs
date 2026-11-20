@@ -4360,6 +4360,9 @@ impl TrustBridgeContract {
     /// Read-only, no auth required, and intentionally works while the contract is paused
     /// — the snapshot is most useful precisely when something may be wrong.
     ///
+    /// For uptime/alerting prefer [`get_health_probes`](Self::get_health_probes),
+    /// which never errors; see `docs/CONTRACT_HEALTH.md` (probe SLOs, Issue #756).
+    ///
     /// # Errors
     ///
     /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
@@ -4403,7 +4406,9 @@ impl TrustBridgeContract {
     /// Read-only, no auth required, works while paused, and — unlike
     /// [`get_health`](Self::get_health) — never errors: an uninitialized
     /// deployment reports `admin_set: false` so the probe fails closed with a
-    /// readable answer instead of `NotInitialized`.
+    /// readable answer instead of `NotInitialized`. Intended for liveness
+    /// probes and alert rules; suggested thresholds are in
+    /// `docs/CONTRACT_HEALTH.md` (Issue #756).
     pub fn get_health_probes(env: Env) -> HealthProbes {
         HealthProbes {
             paused: storage_is_paused(&env),
