@@ -404,6 +404,7 @@ fn plan(fx: &Fixture, op: &str, caller: &Address) -> Call {
             });
             call("clear_staged", vec![env, c.into_val(env)])
         }
+        "get_staged" => call("get_staged", vec![env]),
         "config_verification" => call(
             "config_verification",
             vec![
@@ -584,6 +585,20 @@ fn plan(fx: &Fixture, op: &str, caller: &Address) -> Call {
                 vec![env, octocat.into_val(env), proof.into_val(env)],
             )
         }
+        "set_attestation_required" => call(
+            "set_attestation_required",
+            vec![env, c.into_val(env), true.into_val(env)],
+        ),
+        "set_audit_config" => call(
+            "set_audit_config",
+            vec![
+                env,
+                c.into_val(env),
+                true.into_val(env),
+                100u32.into_val(env),
+                true.into_val(env),
+            ],
+        ),
         other => panic!("no dispatcher arm for operation `{other}`; add one to plan()"),
     }
 }

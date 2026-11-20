@@ -110,7 +110,8 @@ use crate::storage::{
 };
 
 use crate::utils::{
-    eq_ignore_ascii_case, is_valid_github_username, is_zero_address, MAX_USERNAME_LEN,
+    eq_ignore_ascii_case, is_empty_or_whitespace, is_valid_github_username, is_zero_address,
+    MAX_USERNAME_LEN,
 };
 
 /// Valid revoke reason codes for `revoke_verification`.
@@ -2440,6 +2441,14 @@ impl TrustBridgeContract {
         require_initialized(&env)?;
         require_not_paused(&env)?;
 
+        // Reject blank or whitespace-only usernames before the full validator
+        // so callers receive a stable InvalidUsername rather than a less
+        // obvious error from a downstream storage lookup on a zero-length key
+        // (Issue #721).
+        if is_empty_or_whitespace(&github_username) {
+            return Err(ContractError::InvalidUsername);
+        }
+
         if !is_valid_github_username(&github_username) {
             return Err(ContractError::InvalidUsername);
         }
@@ -2573,6 +2582,11 @@ impl TrustBridgeContract {
     ) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
+
+        // Same empty-after-trim guard as `register` (Issue #721).
+        if is_empty_or_whitespace(&github_username) {
+            return Err(ContractError::InvalidUsername);
+        }
 
         if !is_valid_github_username(&github_username) {
             return Err(ContractError::InvalidUsername);
