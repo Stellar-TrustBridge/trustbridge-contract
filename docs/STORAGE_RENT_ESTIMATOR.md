@@ -27,12 +27,32 @@ policy constants change in `src/storage.rs`.
 
 ## CI golden check
 
-CI runs `scripts/test_storage_rent_estimator.sh` to compare the estimator's
-output against `scripts/testdata/storage-rent-estimator.golden.txt` and verify
-the storage chunk-size mismatch warning. If an intentional estimator change
-causes drift, inspect `docs/storage-rent-estimator.inputs.v1.json`, update the
-inputs and corresponding golden output together, then run the script locally
-before committing.
+CI (`abi-consistency` job) runs `make storage-rent-estimator`, which is
+`scripts/test_storage_rent_estimator.sh`. It:
+
+1. compares `python3 scripts/storage_rent_estimator.py --users 250 --roles 3 --lastact 100`
+   against `scripts/testdata/storage-rent-estimator.golden.txt`
+2. verifies the `CHUNK_SIZE` mismatch warning against `src/storage.rs`
+3. verifies that invalid inputs fail with the stable errors below
+
+If an intentional change causes drift, follow the refresh procedure in
+[CONTRIBUTING.md → Storage rent estimator golden refresh](CONTRIBUTING.md#storage-rent-estimator-golden-refresh)
+(`make storage-rent-estimator-golden`). Never hand-edit the golden file.
+
+### Estimator errors (stable)
+
+Invalid inputs exit with status **2** and one of these messages on stderr. Scripts
+and dashboards may match on the prefix.
+
+| Condition | Message |
+|---|---|
+| `--inputs` path does not exist | `inputs file not found: <path>` |
+| File is not JSON, or the top level is not an object | `inputs file is not valid JSON: <detail>` |
+| `estimator_inputs_version` is not `1` | `unsupported estimator_inputs_version <v>; expected 1` |
+| `on_chain.layout.chunk_size` or `on_chain.layout.instance_keys` missing | `inputs JSON is missing required field: <dotted.path>` |
+| Negative contributor count | `--users must be >= 0` |
+
+A `CHUNK_SIZE` mismatch is a **warning** (exit 0) printed to stderr, not an error.
 
 ### Re-computation checklist (layout change)
 

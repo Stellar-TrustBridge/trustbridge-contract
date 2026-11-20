@@ -36,7 +36,7 @@ FUTURENET_FRIENDBOT_URL ?= https://friendbot-futurenet.stellar.org
 FUTURENET_IDENTITY ?= $(SOURCE)
 FUTURENET_DRY_RUN ?= false
 
-.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser soak-cursor storage-keys-check storage-footprint-check storage-rent-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-batch-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
+.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser soak-cursor storage-keys-check storage-footprint-check storage-rent-check storage-rent-estimator storage-rent-estimator-golden bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-batch-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
         invoke-verify invoke-revoke-verification invoke-get-all-registered invoke-export-paginated \
@@ -101,6 +101,12 @@ storage-footprint-check: ## Fail if measured storage key sizes exceed the budget
 
 storage-rent-check: ## Fail if the TTL playbook constants in docs/STORAGE_RENT.md drift from src/storage.rs
 	cargo test --lib storage_rent_playbook_tests
+
+storage-rent-estimator: ## Check the storage rent estimator golden output + invalid-input errors (Issue #750)
+	bash scripts/test_storage_rent_estimator.sh
+
+storage-rent-estimator-golden: ## Regenerate scripts/testdata/storage-rent-estimator.golden.txt (review the diff; see docs/CONTRIBUTING.md)
+	UPDATE_GOLDEN=1 bash scripts/test_storage_rent_estimator.sh
 
 bindings-golden: ## Verify the get_address simulate golden fixture (UPDATE_GOLDEN=1 to regenerate)
 	cargo test --test bindings_golden -- --nocapture
