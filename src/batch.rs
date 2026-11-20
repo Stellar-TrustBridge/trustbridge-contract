@@ -164,6 +164,10 @@ pub(super) fn batch_verify(
         return Err(ContractError::InvalidBatchSize);
     }
 
+    if is_zero_address(&env, &caller) {
+        return Err(ContractError::ZeroAddress);
+    }
+
     caller.require_auth();
 
     let is_admin = is_admin_caller(&env, &caller);

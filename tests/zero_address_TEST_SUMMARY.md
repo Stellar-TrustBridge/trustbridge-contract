@@ -1,5 +1,10 @@
 # Zero-Address Test Suite - Issue #300
 
+Issue #755 extends these guards to verification, batch verification, and
+revocation actors. Those tests assert that zero-address callers receive
+`ZeroAddress` and registry verification state remains unchanged. Rotation
+execution also checks the pending destination before any registry mutation.
+
 ## Summary
 
 This test suite validates that the zero-address guard (`is_zero_address`) remains effective against current Soroban SDK `mock_all_auths` behavior.

@@ -2809,6 +2809,8 @@ Emits `ChallengeCancelledEvent`.
 
 Completes a challenge after the delay has elapsed, removing the registration.
 Emits `RemovedEvent` and `ChallengeCompletedEvent`.
+The deadline is inclusive: completion returns `ChallengeNotResolvable` while
+`timestamp < resolve_after` and is allowed at `timestamp == resolve_after`.
 
 | | |
 |---|---|
