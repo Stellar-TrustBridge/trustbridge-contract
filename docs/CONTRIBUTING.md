@@ -431,6 +431,47 @@ Undocumented exceptions are rejected in code review.
 - Prefer fixing clippy warnings locally before opening a PR.
 - Any `#[allow(clippy::*)]` attribute should include a short rationale comment.
 
+### Intentional clippy allow inventory (Issue #696)
+
+Wave reviews enforce strict clippy compliance. Any `#[allow(clippy::*)]`
+suppression that is intentional and not a quick fix must be justified here so
+reviewers can verify intent and future contributors do not silently remove it.
+
+**Rules:**
+
+1. Add a row to the table below when you introduce a new `#[allow(clippy::*)]`
+   that you cannot or deliberately choose not to fix.
+2. The inline comment on the attribute and the table row must agree on the
+   reason. The table is the durable record; the inline comment is the
+   point-of-use reminder.
+3. Remove the row (and the attribute) when the suppression is no longer needed.
+   Stale rows are rejected in code review just like undocumented ones.
+4. Crate-level `#![allow(clippy::*)]` suppressions are banned. Use per-item
+   attributes only, so the scope is as narrow as possible.
+
+**Current intentional allowlist:**
+
+| File | Line (approx.) | Lint | Reason |
+|---|---|---|---|
+| _(none at this time)_ | — | — | — |
+
+**Example** — adding a new entry:
+
+```rust
+// src/batch.rs
+
+// clippy::too_many_arguments: this function mirrors the on-chain ABI exactly;
+// splitting it would require a builder struct that obscures the call surface
+// visible to off-chain tooling. Tracked: N/A (ABI-stable).
+#[allow(clippy::too_many_arguments)]
+pub fn batch_remove(...) { ... }
+```
+
+```markdown
+<!-- docs/CONTRIBUTING.md intentional allowlist row -->
+| `src/batch.rs` | ~42 | `clippy::too_many_arguments` | Mirrors on-chain ABI exactly; splitting requires a builder that obscures the ABI surface |
+```
+
 ---
 
 ## Testing Guidelines
