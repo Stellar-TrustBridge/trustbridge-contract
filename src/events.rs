@@ -262,7 +262,12 @@ pub struct RoleGrantedEvent {
     pub domain: EventDomain,
 }
 
-/// Emitted when a role is revoked from an address via `remove_role`.
+/// Emitted when a role is revoked from an address via `remove_role` or
+/// `remove_verifier`.
+///
+/// Emitted at most once per actual removal (Issue #752): re-running
+/// `remove_role` for an address with nothing left to remove succeeds without
+/// publishing this event, so repeated cleanup never produces duplicates.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoleRevokedEvent {
