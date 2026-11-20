@@ -21,6 +21,7 @@ Related docs: [SECURITY](SECURITY.md) · [ABI](ABI.md) · [DEPLOYMENT](DEPLOYMEN
 - [Recovery notes](#recovery-notes)
 - [Guardian Circuit Breaker (Issue #196)](#guardian-circuit-breaker-issue-196)
 - [Wave Pause Checklist](#wave-pause-checklist)
+- [Oracle Outage Incident Checklist](#oracle-outage-incident-checklist-issue-694)
 
 ## Routine actions
 
@@ -1166,6 +1167,104 @@ stellar contract invoke \
   --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
   -- remove_guardian
 ```
+
+## Oracle Outage Incident Checklist (Issue #694)
+
+Use this checklist when oracle-signed verification stops working (e.g. the
+signing service is unreachable, a key is rotated, or proofs start failing with
+`OracleProofNotAllowlisted` / `OracleProofExpired`).
+
+### Step 1 — Pause the contract
+
+Stop new writes immediately so stale or forged proofs cannot be accepted while
+you investigate.
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- pause --reason-code 2
+```
+
+Confirm: `-- is_paused` must return `true`.
+
+### Step 2 — Rotate the oracle allowlist
+
+Replace the compromised or stale key(s) with the new oracle public key(s).
+An empty allowlist disables oracle-proof verification entirely; supply at least
+one key to re-enable it.
+
+```bash
+# Rotate to a single new key (replace NEW_ORACLE_PUBKEY with the hex-encoded
+# 32-byte Ed25519 public key of the replacement oracle):
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- set_oracle_allowlist \
+     --pubkeys '["<NEW_ORACLE_PUBKEY_HEX>"]'
+
+# Verify the allowlist was set correctly:
+stellar contract invoke \
+  --id $CONTRACT_ID --network testnet \
+  -- get_oracle_allowlist
+```
+
+- Supply multiple keys as a JSON array to allow rolling rotation without a
+  verification gap: `'["<KEY_A>","<KEY_B>"]'`.
+- An empty array `'[]'` disables oracle proofs completely. Only do this if you
+  intend to fall back to admin/verifier attestation for all verifications.
+- The allowlist is stored in instance storage; bump the contract's TTL if
+  needed after a long pause (see [Storage TTL Maintenance](#storage-ttl-maintenance-keeper)).
+
+### Step 3 — Communicate the outage
+
+Notify downstream consumers before unpausing so they can hold submissions:
+
+1. Post a brief incident note to your team channel with:
+   - Incident start time (ledger sequence of the first failing proof).
+   - Scope (which oracle key was affected).
+   - ETA for restoration.
+2. If `verify_with_proof` is a public endpoint, update your status page.
+3. Record the old key(s) you removed in the incident log for post-mortem.
+
+### Step 4 — Validate the new key end-to-end
+
+Before unpausing, confirm the oracle service is signing with the new key and
+that proofs pass. Use `--send=no` (simulate) to test without submitting:
+
+```bash
+# Simulate a verify_with_proof call with a fresh proof from the new oracle:
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account any-account --network testnet \
+  -- verify_with_proof \
+     --github-username octocat \
+     --proof '{"oracle_pubkey":"<NEW_KEY_HEX>","expires_at":<UNIX_TS>,"signature":"<SIG_HEX>"}'
+```
+
+A simulation that returns `Ok(())` (no error, no `OracleProofNotAllowlisted`)
+confirms the allowlist is correct.
+
+### Step 5 — Unpause and monitor
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- unpause --reason-code 4
+```
+
+Confirm: `-- is_paused` returns `false` and `-- is_emergency_paused` returns
+`false`. Monitor `verify_with_proof` calls for the next 15 minutes via
+`scripts/event_indexer.sh` to confirm `VerifiedEvent` entries resume.
+
+### Quick-reference card
+
+| Step | Command | Expected outcome |
+|---|---|---|
+| 1 — Pause | `pause --reason-code 2` | `is_paused` → `true` |
+| 2 — Rotate allowlist | `set_oracle_allowlist --pubkeys '[...]'` | `get_oracle_allowlist` returns new key(s) |
+| 3 — Communicate | — | Team + status page notified |
+| 4 — Validate | `verify_with_proof` (simulate) | No `OracleProof*` error |
+| 5 — Unpause | `unpause --reason-code 4` | `is_paused` → `false` |
+
+---
 
 ## Timelocked role grants (Issue #220)
 
