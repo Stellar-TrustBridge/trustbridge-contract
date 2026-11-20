@@ -63,6 +63,10 @@ jobs:
       - name: Check subgraph event parity
         run: make subgraph-parity
 
+      # Issue #750: estimator golden output + stable invalid-input errors.
+      - name: Check storage rent estimator golden
+        run: make storage-rent-estimator
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 

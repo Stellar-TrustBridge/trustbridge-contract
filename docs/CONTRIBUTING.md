@@ -580,6 +580,52 @@ Cross-ABI goldens that follow the same "regenerate + commit" rule:
 `abi` make target checks the error-code golden; see `make help` for the
 individual targets.
 
+### Storage rent estimator golden refresh
+
+`scripts/testdata/storage-rent-estimator.golden.txt` pins the text report of
+`scripts/storage_rent_estimator.py --users 250 --roles 3 --lastact 100`. CI
+(`make storage-rent-estimator`) fails if the output drifts, so a stale golden
+can't hide a storage-cost regression for Wave operators.
+
+**When to refresh.** Only when the estimate is *meant* to change:
+
+- the storage layout or TTL constants in `src/storage.rs` change (`CHUNK_SIZE`,
+  `TTL_THRESHOLD`, `TTL_BUMP`, `LEDGERS_PER_DAY`, or new/removed keys), together
+  with `docs/storage-rent-estimator.inputs.v1.json` (or a new `vN` file), or
+- the estimator's formula or report format in `scripts/storage_rent_estimator.py`
+  changes.
+
+If the check fails and you did not intend either, the golden is not stale:
+your change has altered storage cost. Investigate before refreshing.
+
+**Toolchain.** Python 3.8+ only (standard library; no packages). Rust is not
+needed: the estimator reads `src/storage.rs` as text for the `CHUNK_SIZE`
+cross-check.
+
+**Procedure.**
+
+```bash
+# 1. Update the inputs first (layout change only), following the re-computation
+#    checklist in docs/STORAGE_RENT_ESTIMATOR.md.
+# 2. Regenerate the golden from the current script and inputs:
+make storage-rent-estimator-golden      # = UPDATE_GOLDEN=1 bash scripts/test_storage_rent_estimator.sh
+# 3. Review the diff, then re-run the check (golden + invalid-input cases):
+git diff scripts/testdata/storage-rent-estimator.golden.txt
+make storage-rent-estimator
+```
+
+**Review checklist** (author and reviewer):
+
+- [ ] The golden diff matches the intended change line for line (for example, a
+      `CHUNK_SIZE` change moves `chunk size` and `index chunks` only).
+- [ ] No `WARNING: chunk_size ... != CHUNK_SIZE` line appears in the golden. The
+      inputs JSON and `src/storage.rs` must agree before refreshing.
+- [ ] `docs/storage-rent-estimator.inputs.v1.json`, `docs/STORAGE_RENT_ESTIMATOR.md`
+      (constants and example tables) and the golden are updated **in the same PR**.
+- [ ] `estimator_inputs_version` is bumped (and the old JSON kept) if the layout changed.
+- [ ] The PR description includes the `make storage-rent-estimator` output and a
+      one-line risk note on how the per-user persistent entry count changed.
+
 ---
 
 ## Snapshot Stabilization Policy

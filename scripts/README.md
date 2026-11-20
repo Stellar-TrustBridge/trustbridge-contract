@@ -164,4 +164,6 @@ only (XLM conversion needs operator-supplied `network_rent_params`). It also
 compares `chunk_size` in the inputs JSON against `CHUNK_SIZE` in
 `src/storage.rs` and prints a warning to stderr on any drift.
 
-Golden-output test: `bash scripts/test_storage_rent_estimator.sh`.
+Golden-output test: `make storage-rent-estimator` (runs in CI). Refresh after an intentional change with
+`make storage-rent-estimator-golden`; see `docs/CONTRIBUTING.md` → *Storage rent estimator golden refresh*.
+Invalid inputs exit 2 with the stable messages listed in `docs/STORAGE_RENT_ESTIMATOR.md`.

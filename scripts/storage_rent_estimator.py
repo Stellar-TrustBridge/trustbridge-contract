@@ -8,6 +8,15 @@ XLM requires operator-supplied protocol rent params and is out of scope here.
 
 The estimator also cross-checks ``CHUNK_SIZE`` in the inputs JSON against the
 value pinned in ``src/storage.rs`` and warns on any mismatch.
+
+Invalid inputs exit with status 2 and one of these stable stderr messages
+(documented in docs/STORAGE_RENT_ESTIMATOR.md):
+
+    inputs file not found: <path>
+    inputs file is not valid JSON: <detail>
+    inputs JSON is missing required field: <dotted.path>
+    unsupported estimator_inputs_version <v>; expected 1
+    --users must be >= 0
 """
 
 from __future__ import annotations
@@ -31,6 +40,38 @@ def parse_storage_chunk_size(storage_rs: Path) -> int | None:
     """Return the ``CHUNK_SIZE`` constant from ``storage.rs``, or ``None``."""
     match = _CHUNK_SIZE_RE.search(storage_rs.read_text())
     return int(match.group(1)) if match else None
+
+
+REQUIRED_FIELDS = (
+    ("on_chain", "layout", "chunk_size"),
+    ("on_chain", "layout", "instance_keys"),
+)
+
+
+def load_inputs(path: Path) -> dict:
+    """Load and validate the inputs JSON; raise ``ValueError`` with a stable message."""
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        raise ValueError(f"inputs file not found: {path}") from None
+    try:
+        inputs = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"inputs file is not valid JSON: {exc.msg} (line {exc.lineno})") from None
+    if not isinstance(inputs, dict):
+        raise ValueError("inputs file is not valid JSON: top level must be an object")
+    version = inputs.get("estimator_inputs_version")
+    if version != SUPPORTED_INPUTS_VERSION:
+        raise ValueError(
+            f"unsupported estimator_inputs_version {version!r}; expected {SUPPORTED_INPUTS_VERSION}"
+        )
+    for path_parts in REQUIRED_FIELDS:
+        node = inputs
+        for part in path_parts:
+            if not isinstance(node, dict) or part not in node:
+                raise ValueError(f"inputs JSON is missing required field: {'.'.join(path_parts)}")
+            node = node[part]
+    return inputs
 
 
 def estimate(inputs: dict, n: int, roles: int, lastact: int) -> dict:
@@ -103,12 +144,10 @@ def main() -> int:
     if args.users < 0:
         parser.error("--users must be >= 0")
 
-    inputs = json.loads(args.inputs.read_text())
-    version = inputs.get("estimator_inputs_version")
-    if version != SUPPORTED_INPUTS_VERSION:
-        parser.error(
-            f"unsupported estimator_inputs_version {version!r}; expected {SUPPORTED_INPUTS_VERSION}"
-        )
+    try:
+        inputs = load_inputs(args.inputs)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     result = estimate(inputs, args.users, args.roles, args.lastact)
 
