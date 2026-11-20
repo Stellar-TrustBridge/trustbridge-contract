@@ -1335,6 +1335,87 @@ Boundary tests: `test_paginated_export_at_max_page_limit`,
 
 ---
 
+### Cursor fuzz bounds and `max_len` reference (Issue #650)
+
+This section documents the invariants the fuzz harnesses enforce so operators
+know exactly what `cargo fuzz` parameters to use and what guarantees the
+harnesses provide.
+
+#### BytesN\<8\> width — the enforced gate
+
+Both `get_registered_paginated` and `get_public_paginated` accept
+`cursor: Option<BytesN<8>>`. The Soroban type system enforces the width at
+the ABI boundary: a value whose byte length is not exactly **8** cannot be
+expressed as `BytesN<8>` and is rejected before it reaches the internal
+`decode_cursor` function. The fuzz targets mirror this by returning early for
+non-8-byte inputs, documenting the type-level gate rather than trying to
+circumvent it.
+
+#### Internal cursor wire format (opaque to callers)
+
+```
+bytes 0..4  offset      big-endian u32  (flat-index position to resume from)
+bytes 4..8  generation  big-endian u32  (index-generation stamp at issue time)
+```
+
+Callers must never construct or interpret these bytes. Always pass back the
+`next_cursor` value exactly as returned by a previous call. The format is an
+internal implementation detail and is not a stabilised wire format.
+
+#### `decode_cursor` error conditions
+
+| Condition | Error |
+|-----------|-------|
+| `generation` ≠ current index generation | `InvalidCursor` (code 52) |
+| `offset` > current registry count | `InvalidCursor` (code 52) |
+| `offset` == registry count (valid) | `Ok` — returns empty last page |
+
+Any removal bumps the index generation, invalidating **all** outstanding
+cursors regardless of whether the removed entry was before or after the
+cursor's offset. The safe recovery is to restart from `cursor = None`; the
+idempotent-upsert sync pattern described in `docs/DASHBOARD_SYNC.md` makes
+a restart safe to replay.
+
+#### Limit constants
+
+| Constant | Value | Fuzz behaviour |
+|----------|------:|----------------|
+| `DEFAULT_PAGE_LIMIT` | `20` | `limit == 0` maps here; never an error |
+| `MAX_PAGE_LIMIT` | `100` | `limit > 100` is clamped to 100; never an error |
+
+Values above `MAX_PAGE_LIMIT` are silently clamped, not rejected. `limit == 0`
+is always valid and uses `DEFAULT_PAGE_LIMIT`. These bounds are enforced by
+assertions in `fuzz/fuzz_targets/export_cursor.rs` and
+`fuzz/fuzz_targets/public_paginated_cursor.rs`.
+
+#### `make` targets and recommended `max_len`
+
+| Target | `-max_len` | Use |
+|--------|:----------:|-----|
+| `make fuzz-parser` | `9` | CI smoke (8 cursor bytes + 1 limit byte) |
+| `make fuzz-parser-extended` | `32` | Local soak — wider input lets the engine explore limit-byte variants and multi-byte cursor noise |
+| `make fuzz-public-paginated` | `16` | Local soak for the `public_paginated_cursor` target (tag + 8 cursor + limit + registry-size) |
+
+Run `FUZZ_RUNS=0` for a continuous local soak; `FUZZ_RUNS=1000` (the default)
+for a bounded CI-equivalent smoke pass.
+
+#### Known-bad cursor seeds (`tests/fuzz/seeds.txt`)
+
+Regression seeds derived from `tests/cursor_pagination.rs` are checked in
+to `tests/fuzz/seeds.txt` (Issue #331). They cover:
+
+- Stale-generation cursors (`generation != 0`) with various offsets
+- Offset-past-end cursors (`offset > 3` on the 3-record fixture)
+- `u32::MAX` generation (wraparound sentinel — `test_generation_wraps_at_u32_max`)
+- Boundary cursor (`offset == registry_count`) — valid, returns empty last page
+- Limit edge cases: `0` (DEFAULT_PAGE_LIMIT), `100` (MAX_PAGE_LIMIT), `255` (clamped)
+- Adversarial all-zeros, all-ones, and alternating-bit patterns
+
+Append a new hex seed to that file whenever a new failure is found so it
+reproduces forever.
+
+---
+
 ### `config_verification(caller: Address, attestation: Symbol, expires_in: u64, threshold: u32) -> Result<(), ContractError>`
 
 Stores the verification configuration parameters (attestation symbol, expiration window, and threshold). Can only be called once by the contract admin. Emits `VerificationConfiguredEvent` on success.

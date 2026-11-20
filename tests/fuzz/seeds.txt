@@ -17,3 +17,54 @@
 0x8080808080808080
 0xEDA080EDA080EDA0
 0x0000000000000027
+
+# Cursor fuzz regression seeds (Issue #650): known-bad cursors derived from
+# tests/cursor_pagination.rs edge cases.  Each u64 encodes a full 8-byte
+# cursor (offset u32 BE | generation u32 BE) followed implicitly by limit=0.
+#
+# Cursor layout reminder (src/storage.rs encode_cursor):
+#   bytes 0..4 = offset  (big-endian u32)
+#   bytes 4..8 = generation (big-endian u32)
+#
+# Stale-generation cursors (generation != 0, any offset):
+# offset=0, generation=1  → 0x00000000_00000001
+0x0000000000000001
+# offset=2, generation=1  → 0x00000002_00000001
+0x0000000200000001
+# offset=0, generation=0xFFFFFFFF (u32::MAX, wraparound sentinel)
+# → test_generation_wraps_at_u32_max_and_still_invalidates_cursors
+0x00000000FFFFFFFF
+# offset=2, generation=u32::MAX  → 0x00000002_FFFFFFFF
+0x00000002FFFFFFFF
+#
+# Offset-past-end cursors (generation=0, offset > registry count):
+# offset=4, generation=0 (past a 3-record fixture) → 0x00000004_00000000
+0x0000000400000000
+# offset=0xFFFFFFFF, generation=0 → 0xFFFFFFFF_00000000
+0xFFFFFFFF00000000
+# offset=u32::MAX-1, generation=0 → 0xFFFFFFFE_00000000
+0xFFFFFFFE00000000
+#
+# Boundary cursor: offset==count, generation=0 (empty last page, NOT an error)
+# offset=3, generation=0 (3-record fixture, offset==total) → 0x00000003_00000000
+0x0000000300000000
+#
+# Limit edge cases encoded as cursor=0 (valid first-page cursor) with
+# limit byte spliced in at byte 8.  Expressed here as seeds for the
+# property-fuzz suite (which uses them as PRNG seeds, not raw byte buffers):
+# limit=0  (DEFAULT_PAGE_LIMIT fallback): seed producing low limit byte
+0x00000000BAADF00D
+# limit=100 (MAX_PAGE_LIMIT exact boundary)
+0x00000000DEADC0DE
+# limit=255 (above MAX_PAGE_LIMIT, clamped)
+0x00000000CAFEF00D
+#
+# Adversarial all-ones and all-zeros cursor bytes:
+# all zeros: offset=0, generation=0 → valid first-page cursor
+0x0000000000000000
+# all ones: offset=0xFFFFFFFF, generation=0xFFFFFFFF → both stale and past-end
+0xFFFFFFFFFFFFFFFF
+# alternating: 0xAAAAAAAA_55555555
+0xAAAAAAAA55555555
+# alternating inverse: 0x55555555_AAAAAAAA
+0x55555555AAAAAAAA

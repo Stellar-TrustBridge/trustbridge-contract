@@ -33,4 +33,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "public_paginated_cursor"
+path = "fuzz_targets/public_paginated_cursor.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
