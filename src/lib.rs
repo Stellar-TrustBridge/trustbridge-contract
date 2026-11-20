@@ -3844,6 +3844,21 @@ impl TrustBridgeContract {
         Ok(())
     }
 
+    /// Returns the bot-account flag for a registered contributor.
+    ///
+    /// Read-only; no auth required and available while paused.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotRegistered`] if `github_username` has no record.
+    pub fn get_bot_status(env: Env, github_username: String) -> Result<bool, ContractError> {
+        require_initialized(&env)?;
+        get_record(&env, &github_username)
+            .map(|record| record.is_bot)
+            .ok_or(ContractError::NotRegistered)
+    }
+
     /// Sets the bot-account flag for a registered contributor.
     ///
     /// The caller must sign and must equal either the contract admin or the

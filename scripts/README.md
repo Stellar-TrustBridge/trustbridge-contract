@@ -14,8 +14,10 @@ out of the repo, and default to **testnet** (never mainnet).
 | `check_fixture_pairing.sh` | Fails if Rust differential fixtures change without a `ts-differential-tests/` update, or the reverse (Issue #577). |
 | `export_registry.sh` | Page the admin export into a single registry JSON snapshot. |
 | `export_registry.py --dry-run` | Validate export attestation without writing: paginates, verifies identity fields, prints count + merkle root (Issue #637). |
+| `verify_merkle_export.py` | Recompute and verify each page's Merkle root from a captured registry export (Issue #718). |
 | `validate_registry.sh` | Diff an export JSON against live on-chain state. |
 | Dry-run export validation | `CONTRACT_ID=C... SOURCE=admin python3 scripts/export_registry.py --dry-run` — exits 0 on valid attestation, writes nothing, prints count + merkle root. |
+| Offline Merkle verification | `python3 scripts/verify_merkle_export.py registry-export-testnet.json` — no network or signer required; exits non-zero for missing roots, malformed pages, or mismatches. |
 | `ttl_keeper.sh` | Walk the index and bump persistent-entry TTLs. |
 | `bulk_verify.sh` / `bulk_revoke.sh` | Batched verify / revoke from a username list, with RPC pacing. |
 | `simulate_pause.sh` | Exercise the pause / unpause lifecycle. |

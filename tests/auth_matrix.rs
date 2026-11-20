@@ -452,6 +452,7 @@ fn plan(fx: &Fixture, op: &str, caller: &Address) -> Call {
                 true.into_val(env),
             ],
         ),
+        "get_bot_status" => call("get_bot_status", vec![env, octocat.into_val(env)]),
         "rename" => call(
             "rename",
             vec![
