@@ -760,7 +760,12 @@ impl TrustBridgeContract {
     /// delete a role's storage entries; letting a time-bounded grant simply
     /// lapse leaves it in storage, just no longer reported by `get_role`.
     ///
-    /// Emits [`RoleRevokedEvent`].
+    /// Emits [`RoleRevokedEvent`] only when something was actually removed (an
+    /// active or expired grant, or a grant still inside its timelock).
+    ///
+    /// **Idempotent (Issue #752):** calling it again for the same address — or
+    /// for an address that never held a role — succeeds without an event, so
+    /// cleanup jobs can safely re-run.
     ///
     /// # Auth
     ///
@@ -778,18 +783,22 @@ impl TrustBridgeContract {
         let admin = get_admin(&env)?;
         admin.require_auth();
 
-        storage_remove_role(&env, &target);
+        let removed_role = storage_remove_role(&env, &target);
         // A revoke also drops any grant still inside its timelock (Issue #220),
         // otherwise the pending grant would resurrect the role on activation.
-        remove_pending_role(&env, &target);
-        let timestamp = env.ledger().timestamp();
-        RoleRevokedEvent {
-            address: target,
-            admin,
-            timestamp,
-            domain: event_domain(&env),
+        let removed_pending = remove_pending_role(&env, &target);
+        // Issue #752: nothing removed → no event, so a repeated cleanup run
+        // does not emit a duplicate RoleRevokedEvent.
+        if removed_role || removed_pending {
+            let timestamp = env.ledger().timestamp();
+            RoleRevokedEvent {
+                address: target,
+                admin,
+                timestamp,
+                domain: event_domain(&env),
+            }
+            .publish(&env);
         }
-        .publish(&env);
 
         Ok(())
     }

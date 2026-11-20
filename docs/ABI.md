@@ -1701,7 +1701,22 @@ Assigns an administrative or operational role (`Admin`, `Upgrader`, `Verifier`).
 
 ### `remove_role(target: Address) -> Result<(), ContractError>`
 
-Revokes a role from an address. Admin-only.
+Revokes a role from an address. Admin-only. Also clears the role's expiry and any
+pending timelocked grant.
+
+This is the **cleanup path for expired grants**. Expiry is lazy, so a lapsed grant
+stays in storage until `remove_role` deletes it.
+
+**Idempotent (Issue #752):** calling it again for the same address, or for an
+address that never held a role, returns `Ok(())` and emits **no** event. Cleanup
+jobs can re-run safely.
+
+| Call | Result | Events |
+|---|---|---|
+| On an active, expired, or pending (timelocked) grant | `Ok(())`, storage cleared | 1 × `RoleRevokedEvent` |
+| Again, with nothing left to remove | `Ok(())`, no change | none |
+| While paused | `Err(Paused)`, grant untouched | none |
+| Without admin auth | auth error, grant untouched | none |
 
 ---
 
@@ -2038,8 +2053,16 @@ topics: ["role_revoked_event", address]
 data:   { admin, timestamp }
 ```
 
-`RoleRevokedEvent` is emitted when an admin revokes a role from an address.
-Like `RoleGrantedEvent`, the `address` topic lets indexers filter server-side.
+`RoleRevokedEvent` is emitted when an admin revokes a role from an address
+(`remove_role`, `remove_verifier`). Like `RoleGrantedEvent`, the `address` topic
+lets indexers filter server-side.
+
+**Indexer expectation (Issue #752):** one `RoleRevokedEvent` per actual removal.
+Re-running `remove_role` on an already-cleaned address emits nothing, and a second
+`remove_verifier` fails with `VerifierNotAllowlisted`, also without an event. So
+indexers never see duplicate revocations from repeated cleanup.
+`prune_expired_verifiers` emits no events. Its `u32` return value is the number of
+expired allowlist entries it dropped (`0` on a re-run).
 Note that `role` is **not** present in the data payload — a consumer that needs
 the previous role must track it from the corresponding `RoleGrantedEvent`.
 

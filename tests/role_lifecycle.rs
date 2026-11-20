@@ -258,3 +258,172 @@ fn test_role_timelock_admin_endpoints_require_admin_auth() {
     assert_eq!(f.client.get_role_delay(), 0);
     assert_eq!(f.client.get_role(&target), None);
 }
+
+// ── Expired role cleanup idempotency (Issue #752) ───────────────────────────
+//
+// Cleanup of expired grants is `remove_role` (role grants, any role) and
+// `prune_expired_verifiers` (verifier allowlist). Both must be safe to run
+// twice: no panic, no state change, and no duplicate events on the re-run.
+
+use soroban_sdk::{testutils::Events as _, Symbol, TryFromVal};
+
+/// `RoleRevokedEvent`s emitted by the contract during the last invocation.
+fn role_revoked_events(f: &Fixture) -> usize {
+    use soroban_sdk::xdr::{ContractEventBody, ScVal};
+    let topic =
+        ScVal::try_from_val(&f.env, &Symbol::new(&f.env, "role_revoked_event").to_val()).unwrap();
+    f.env
+        .events()
+        .all()
+        .filter_by_contract(&f.client.address)
+        .events()
+        .iter()
+        .filter(|e| {
+            let ContractEventBody::V0(v0) = &e.body;
+            v0.topics.first() == Some(&topic)
+        })
+        .count()
+}
+
+#[test]
+fn test_expired_role_cleanup_is_idempotent_for_admin_verifier_revoker() {
+    let f = setup();
+    let holders = [
+        (Address::generate(&f.env), Role::Admin),
+        (Address::generate(&f.env), Role::Verifier),
+        (Address::generate(&f.env), Role::Revoker),
+    ];
+    for (who, role) in &holders {
+        f.client.set_role_with_expiry(who, role, &Some(NOW + 10));
+    }
+    advance_to(&f.env, NOW + 10);
+
+    for (who, role) in &holders {
+        // Expired but still in storage (lazy expiry).
+        assert!(!f.client.has_role(who, role));
+        assert_eq!(f.client.get_role_expiry(who), Some(NOW + 10));
+
+        // First cleanup deletes the grant and emits exactly one event.
+        f.client.remove_role(who);
+        assert_eq!(
+            role_revoked_events(&f),
+            1,
+            "{role:?}: first cleanup emits one event"
+        );
+        assert_eq!(f.client.get_role_expiry(who), None);
+
+        // Second cleanup: Ok, no event, no state change.
+        f.client.remove_role(who);
+        assert_eq!(
+            role_revoked_events(&f),
+            0,
+            "{role:?}: re-run must not emit a duplicate event"
+        );
+        assert_eq!(f.client.get_role(who), None);
+        assert_eq!(f.client.get_role_expiry(who), None);
+    }
+    // The real admin is unaffected by role-slot cleanup.
+    f.client.verify(&f.admin, &f.octocat);
+}
+
+#[test]
+fn test_remove_role_for_address_without_role_is_silent_no_op() {
+    let f = setup();
+    let stranger = Address::generate(&f.env);
+    f.client.remove_role(&stranger);
+    assert_eq!(role_revoked_events(&f), 0);
+    assert_eq!(f.client.get_role(&stranger), None);
+}
+
+#[test]
+fn test_remove_role_still_emits_for_pending_timelocked_grant_once() {
+    let f = setup();
+    let b = Address::generate(&f.env);
+    f.client.set_role_delay(&DELAY);
+    f.client.set_role(&b, &Role::Verifier); // queued, not yet active
+
+    f.client.remove_role(&b);
+    assert_eq!(role_revoked_events(&f), 1);
+    f.client.remove_role(&b);
+    assert_eq!(role_revoked_events(&f), 0);
+}
+
+#[test]
+fn test_prune_expired_verifiers_is_idempotent() {
+    let f = setup();
+    let (a, b, keep) = (
+        Address::generate(&f.env),
+        Address::generate(&f.env),
+        Address::generate(&f.env),
+    );
+    f.client.add_verifier(&a, &(NOW + 10));
+    f.client.add_verifier(&b, &(NOW + 20));
+    f.client.add_verifier(&keep, &0);
+    advance_to(&f.env, NOW + 30);
+
+    assert_eq!(f.client.prune_expired_verifiers(), 2);
+    assert_eq!(
+        f.client.prune_expired_verifiers(),
+        0,
+        "second prune removes nothing"
+    );
+    assert!(f.client.is_active_verifier(&keep));
+    assert!(!f.client.is_active_verifier(&a));
+}
+
+#[test]
+fn test_expired_role_cleanup_while_paused_fails_without_partial_state() {
+    let f = setup();
+    let verifier = Address::generate(&f.env);
+    f.client
+        .set_role_with_expiry(&verifier, &Role::Verifier, &Some(NOW + 10));
+    advance_to(&f.env, NOW + 10);
+    f.client.pause(&1);
+
+    assert_eq!(
+        f.client.try_remove_role(&verifier),
+        Err(Ok(ContractError::Paused))
+    );
+    assert_eq!(
+        f.client.get_role_expiry(&verifier),
+        Some(NOW + 10),
+        "grant must be untouched"
+    );
+
+    f.client.unpause(&1);
+    f.client.remove_role(&verifier);
+    assert_eq!(role_revoked_events(&f), 1);
+}
+
+#[test]
+fn test_expired_role_cleanup_requires_admin_auth() {
+    let f = setup();
+    let verifier = Address::generate(&f.env);
+    f.client
+        .set_role_with_expiry(&verifier, &Role::Verifier, &Some(NOW + 10));
+    advance_to(&f.env, NOW + 10);
+
+    f.env.set_auths(&[]);
+    assert!(f.client.try_remove_role(&verifier).is_err());
+    assert_eq!(
+        f.client.get_role_expiry(&verifier),
+        Some(NOW + 10),
+        "grant must be untouched"
+    );
+}
+
+#[test]
+fn test_remove_verifier_twice_fails_typed_without_second_event() {
+    let f = setup();
+    let v = Address::generate(&f.env);
+    f.client.add_verifier(&v, &(NOW + 10));
+    advance_to(&f.env, NOW + 10);
+
+    f.client.remove_verifier(&v);
+    assert_eq!(role_revoked_events(&f), 1);
+    assert_eq!(
+        f.client.try_remove_verifier(&v),
+        Err(Ok(ContractError::VerifierNotAllowlisted))
+    );
+    assert_eq!(role_revoked_events(&f), 0);
+}

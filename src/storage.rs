@@ -686,10 +686,12 @@ pub fn set_pending_role(env: &Env, address: &Address, grant: &PendingRoleGrant) 
 }
 
 /// Removes the pending role grant for `address`. No-op if none exists.
-pub fn remove_pending_role(env: &Env, address: &Address) {
-    env.storage()
-        .persistent()
-        .remove(&(PENDING_ROLE_KEY, address.clone()));
+/// Drops a queued (timelocked) grant for `address`. Returns `true` if one existed.
+pub fn remove_pending_role(env: &Env, address: &Address) -> bool {
+    let key = (PENDING_ROLE_KEY, address.clone());
+    let existed = env.storage().persistent().has(&key);
+    env.storage().persistent().remove(&key);
+    existed
 }
 
 /// Seconds the `set_role` timelock is currently configured for. `0` means
@@ -1775,14 +1777,19 @@ pub fn set_role_with_expiry(env: &Env, address: &Address, role: &Role, expires_a
 }
 
 /// Revokes `address`'s role and drops it from the enumeration index.
-pub fn remove_role(env: &Env, address: &Address) {
+/// Deletes `address`'s role grant, its expiry and its index entry — including
+/// an already-expired grant (Issue #221). Returns `true` if a role or expiry
+/// entry existed, so callers can stay idempotent (Issue #752): a second call
+/// finds nothing, removes nothing, and returns `false`.
+pub fn remove_role(env: &Env, address: &Address) -> bool {
+    let expiry_key = (ROLE_EXPIRY_KEY, address.clone());
+    let existed = role_key_exists(env, address) || env.storage().persistent().has(&expiry_key);
     env.storage()
         .persistent()
         .remove(&(ROLE_KEY, address.clone()));
-    env.storage()
-        .persistent()
-        .remove(&(ROLE_EXPIRY_KEY, address.clone()));
+    env.storage().persistent().remove(&expiry_key);
     remove_from_role_index(env, address);
+    existed
 }
 
 /// An `(address, role)` pair as returned by `get_role_holders` (Issue #228).
