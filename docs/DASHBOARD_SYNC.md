@@ -461,6 +461,15 @@ an instance-storage scan.
 
 ---
 
+## Health probes for dashboards (Issue #756)
+
+Status panels should call `get_health` (full snapshot). Uptime checks and alert
+rules should call `get_health_probes`, which never errors, so any failure is
+RPC or infra rather than contract state. Re-sync cached registry views when
+`index_gen` changes, the same trigger as an invalidated cursor. Suggested
+probe cadence, error semantics and alert thresholds:
+[CONTRACT_HEALTH.md → Choosing a probe & alert SLOs](CONTRACT_HEALTH.md#choosing-a-probe--alert-slos-issue-756).
+
 ## Event topic classification (Issue #399)
 
 `scripts/event_indexer.sh` is the reference indexer for this guide. Beyond
