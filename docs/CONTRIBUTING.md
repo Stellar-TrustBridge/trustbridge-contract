@@ -48,6 +48,7 @@ build / wasm-size). Every pull request and push to `main` runs these jobs from
 | `oracle-proof-tests` | `cargo test --lib oracle_proof` |
 | `cargo-deny` | `cargo deny --config deny.toml check` (see [Supply-chain checks](#supply-chain-checks)) |
 | `mutants` | `cargo mutants --config mutants.toml --file src/utils.rs` — nightly and `workflow_dispatch` only (see [Mutation Testing](#mutation-testing--utilsrs-issue-243)) |
+| `wasm-size-report` | Builds production WASM, measures size against budget, and uploads `wasm-size-report` artifact (Issue #720) — runs on every PR and push; fails if size exceeds `WASM_SIZE_LIMIT`. See [docs/BENCHMARK_BUDGETS.md § WASM size report artifact](BENCHMARK_BUDGETS.md#wasm-size-report-artifact-issue-720). |
 
 `make ci` runs the same set with the strict hash gate enabled, so it fails while
 `wasm-hash.pin` still contains `PLACEHOLDER` or does not match the built WASM.

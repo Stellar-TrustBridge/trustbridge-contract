@@ -124,6 +124,28 @@ The `bench-budget` job in `.github/workflows/ci.yml` runs after the main
 The job runs on every push and PR to `main`, `master`, and `develop`, the same
 branches as the quality gate.
 
+## WASM size report artifact (Issue #720)
+
+The `wasm-size-report` job in `.github/workflows/ci.yml` runs on every push
+and pull request. It:
+
+1. Builds the production WASM via `stellar contract build`.
+2. Measures the binary size against the `WASM_SIZE_LIMIT` (204 800 bytes /
+   200 KB) and writes a Markdown summary to `wasm-size-report.md`.
+3. Uploads `wasm-size-report.md` as the `wasm-size-report` artifact (30-day
+   retention) so reviewers can read the size trend **without running
+   `make wasm-size` locally**.
+4. Fails the job if the WASM exceeds the budget, keeping the same semantics as
+   `make wasm-size`.
+
+**Reading the artifact:** open the Actions run → *wasm-size-report* artifact.
+The report table shows file path, size, budget, headroom or over-by, and a
+pass/fail status badge.
+
+**Raising the budget:** update `WASM_SIZE_LIMIT` in both `Makefile` and in the
+`Generate WASM size report` step of `.github/workflows/ci.yml` so the two stay
+in sync. Include a justification in the PR description.
+
 ---
 
 ## Running locally

@@ -20,7 +20,7 @@ Related docs: [SECURITY](SECURITY.md) · [ABI](ABI.md) · [DEPLOYMENT](DEPLOYMEN
 - [Emergency Pause Lifecycle](#emergency-pause-lifecycle)
 - [Recovery notes](#recovery-notes)
 - [Guardian Circuit Breaker (Issue #196)](#guardian-circuit-breaker-issue-196)
-- [Wave Pause Checklist](#wave-pause-checklist)
+- [Wave Pause Checklist](#wave-pause-ladder-issue-749)
 
 ## Routine actions
 
@@ -855,24 +855,170 @@ If both the normal pause **and** the emergency pause are active, both must be
 cleared before writes resume. Clear them in either order; the contract tests
 both flags independently in `require_not_paused`.
 
-## Wave Pause Checklist
+## Wave Pause Ladder (Issue #749)
 
-Use this when freezing writes during an active Wave.
+Use this ordered ladder when freezing writes during an active Wave. Work
+through every rung in sequence; do not skip to unpause without confirming
+each step. The ladder ensures no batch path is left hot and no upgrade window
+opens while the registry is mid-incident.
 
-1. Announce freeze window start time, reason, and expected duration in
-	contributor channels (dashboard banner, Discord/Telegram, GitHub discussion).
-2. Call `set_paused(true)` (or `pause`) from the admin identity.
-3. Confirm pause status with `is_paused`.
-4. Share contributor-facing impact:
-	- `register`, `remove`, `verify`, and other write paths return
-	  `ContractError::Paused` (code `7`).
-	- Read-only lookups remain available.
-5. Keep updates periodic until unpause, including ETA changes.
-6. After remediation, call `set_paused(false)` (or `unpause`).
-7. Validate recovery: run a known-good `register` and a read call (`get_stats`
-	or `get_address`) to confirm normal behavior is restored.
-8. Post-incident note: include window duration, impacted functions, and
-	follow-up actions.
+### Step 0 — Communicate (before any contract calls)
+
+Announce the freeze window *before* calling `pause`. Downstream tools
+(dashboard, indexers, payout scripts) need advance notice to drain their
+in-flight queues cleanly. Include:
+
+- Start time and reason (maintenance, security incident, regulatory hold).
+- Expected duration and ETA if known.
+- Which paths are affected (all writes return `Paused`, code `7`; reads
+  remain available).
+- Contact channel for status updates (Discord, GitHub Discussion, dashboard
+  banner).
+
+### Step 1 — Pause all mutations
+
+```bash
+stellar contract invoke --id "$CONTRACT_ID" --source-account admin \
+  --network "$NETWORK" --send=yes -- set_paused --paused true --reason-code 1
+```
+
+Confirm: `-- is_paused` must return `true`.
+
+Reason codes: `1` maintenance, `2` security incident, `3` regulatory, `99` other.
+
+### Step 2 — Drain in-flight operations
+
+After pausing, allow time for any in-flight transactions already submitted to
+the network to settle. Soroban transactions that were broadcast before the
+pause call will either:
+
+- **Succeed** if they reached the validator before `pause` committed.
+- **Fail with `Paused`** if they arrived after.
+
+Wait at least 10–20 seconds (roughly 2–4 ledger closes) before treating the
+pause as fully effective. For scheduled batch operations (bulk verify, bulk
+revoke, TTL keeper), confirm the scripts have exited before proceeding.
+
+Check for in-flight batch removes: `-- get_pending_batch_remove` should return
+`None` or an already-settled proposal before moving on.
+
+### Step 3 — Disable batch paths (if threshold-gated batch_remove is active)
+
+If `get_batch_remove_threshold` returns a non-zero value and a batch proposal
+is pending, cancel it now — the dual-control flow must not complete while the
+registry is frozen:
+
+```bash
+# Cancel any pending dual-control proposal
+stellar contract invoke --id "$CONTRACT_ID" --source-account admin \
+  --network "$NETWORK" --send=yes -- cancel_batch_remove --caller "$ADMIN"
+
+# Confirm no proposal remains
+stellar contract invoke --id "$CONTRACT_ID" --source-account admin \
+  --network "$NETWORK" -- get_pending_batch_remove
+```
+
+If direct `batch_remove` is the concern (not dual-control), the pause itself
+blocks it — no additional step needed. `batch_remove` returns `Paused` while
+`is_paused` is `true`.
+
+### Step 4 — Upgrade freeze (if a WASM upgrade was in progress)
+
+If the incident occurred mid-upgrade, freeze the upgrade path explicitly:
+
+**Cancel a live multisig proposal (if any):**
+```bash
+stellar contract invoke --id "$CONTRACT_ID" --source-account admin \
+  --network "$NETWORK" --send=yes -- cancel_upgrade_proposal --caller "$ADMIN"
+```
+
+**Clear any staged WASM hash (if stage_wasm was used):**
+```bash
+stellar contract invoke --id "$CONTRACT_ID" --source-account admin \
+  --network "$NETWORK" --send=yes -- clear_staged --caller "$ADMIN"
+```
+
+**Clear any pending attestation (if attest_upgrade was used):**
+```bash
+stellar contract invoke --id "$CONTRACT_ID" --source-account admin \
+  --network "$NETWORK" --send=yes -- clear_attestation
+```
+
+Confirm state: `-- get_staged`, `-- get_upgrade_proposal`, and
+`-- get_attestation` should all return empty/None.
+
+This ensures that whoever can freeze the registry cannot simultaneously
+advance an upgrade — the upgrade key (Upgrader role) is separately gated.
+See [SECURITY.md guardian vs admin](SECURITY.md#guardian-vs-admin-capabilities-issue-635).
+
+### Step 5 — Communicate status update
+
+Post a status update with:
+
+- Confirmation that the freeze is active (`is_paused == true`).
+- Which in-flight operations were cancelled (batch remove proposal, staged
+  WASM, etc.).
+- Revised ETA.
+- Escalation path if ETA slips.
+
+### Step 6 — Remediate
+
+Perform the actual remediation (fix, investigation, upgrade, audit). The
+contract is fully frozen: writes are blocked, reads are live, and no batch
+or upgrade path can advance.
+
+Proving pause blocks mutators: `tests/integration.rs` asserts that `register`,
+`verify`, `remove`, `batch_remove`, and `batch_verify` all return
+`ContractError::Paused` while `is_paused` is `true`. Run:
+
+```bash
+cargo test --test integration paused -- --nocapture
+```
+
+### Step 7 — Resume
+
+After remediation is complete and verified:
+
+```bash
+stellar contract invoke --id "$CONTRACT_ID" --source-account admin \
+  --network "$NETWORK" --send=yes -- set_paused --paused false --reason-code 4
+```
+
+Confirm: `-- is_paused` returns `false` **and** `-- is_emergency_paused`
+returns `false` (they are independent flags; `unpause` does not clear
+`emergency_pause`). If the emergency pause was also set, clear it:
+
+```bash
+stellar contract invoke --id "$CONTRACT_ID" --source-account admin \
+  --network "$NETWORK" --send=yes -- clear_emergency_pause
+```
+
+### Step 8 — Validate recovery
+
+Run a smoke check to confirm normal behavior is restored:
+
+```bash
+# Read check (always available)
+stellar contract invoke --id "$CONTRACT_ID" --network "$NETWORK" -- get_stats
+
+# Write check (requires funded admin or test user identity)
+stellar contract invoke --id "$CONTRACT_ID" --source-account admin \
+  --network "$NETWORK" -- is_paused     # must return false
+```
+
+For a full write-path validation, run the integration smoke test against
+Testnet or Futurenet (see `make futurenet-smoke`).
+
+### Step 9 — Post-incident note
+
+Document and publish:
+
+- Exact timestamps: freeze start, each ladder step, unfreeze.
+- Impacted functions and operations cancelled.
+- Root cause, if known.
+- Follow-up actions and issue references.
+- Link to any CI artifact uploaded during the incident (WASM size report,
+  bench-budget-report, mutants-survived).
 
 ---
 

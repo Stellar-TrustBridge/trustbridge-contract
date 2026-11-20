@@ -19,6 +19,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Double initialization | `AlreadyInitialized` error |
 | Admin storage mutated after init | No public setter writes `ADMIN_KEY` — only `initialize` does, gated by `AlreadyInitialized` (Issue #97) |
 | Malformed or oversized username input | `InvalidUsername` error, checked before auth and before any write |
+| Empty or whitespace-only username after trim (Issue #721) | `is_empty_or_whitespace` guard in `register` / `register_sponsored` returns `InvalidUsername` before `is_valid_github_username` and before any storage write, closing a gap where a space-only string could not corrupt storage but produced a confusing error path |
 | Unicode / homoglyph username spoofing | Byte-wise ASCII validation rejects all non-ASCII bytes; see **Unicode Rejection Policy** section |
 | Registering the zero/burn address (reachable under `mock_all_auths` / sandboxes that skip `require_auth`) | `is_zero_address` guard in `register` / `register_sponsored` / `request_address_rotation` returns `ZeroAddress` before any write — pinned by `tests/zero_address.rs` against current SDK mock-auth APIs; removing the guard fails those tests (Issue #300) |
 | Consecutive-hyphen username bypass | `InvalidUsername` error — consecutive hyphens now enforced on-chain |
@@ -123,6 +124,57 @@ everything else below requires admin) and `tests/auth_matrix.csv`.
 | `propose_multisig_upgrade` / `approve_upgrade` / `execute_upgrade` | ✅ | ❌ | ❌ | Also callable by Upgrader-role holders, subject to proposal rules |
 | `batch_remove` (incl. dual-control propose/execute) | ✅ | ❌ | ❌ | Large removes need admin, never guardian |
 | `pause` / `unpause` | ✅ | ❌ | ❌ | Plain pause is admin-only; guardian path is `emergency_pause` only |
+
+### Staged WASM and governance mutators — auth matrix rows (Issue #748)
+
+The rows below are executed on every CI run by `tests/auth_matrix.rs` reading
+`tests/auth_matrix.csv`. Each row corresponds to a governance entrypoint that
+was specifically added during Wave governance hardening.
+
+#### `stage_wasm` — stage the next upgrade hash
+
+| Row | Actor | Expected | CSV line |
+|-----|-------|----------|----------|
+| SW1 | admin | `Ok` | `stage_wasm,admin,` |
+| SW2 | Upgrader role holder | `Ok` | `stage_wasm,upgrader,` |
+| SW3 | Random address | `NotAuthorized` | `stage_wasm,random,NotAuthorized` |
+
+#### `clear_staged` — retract a staged WASM hash
+
+| Row | Actor | Expected | CSV line |
+|-----|-------|----------|----------|
+| CS1 | admin | `Ok` | `clear_staged,admin,` |
+| CS2 | Upgrader role holder | `NotAuthorized` | `clear_staged,upgrader,NotAuthorized` |
+| CS3 | Random address | `NotAuthorized` | `clear_staged,random,NotAuthorized` |
+
+Clearing is restricted to admin because the ability to retract a staged hash
+is itself a governance action — an Upgrader who could both stage **and** clear
+could covertly substitute a different hash. Separation of clearing to admin
+only prevents this.
+
+#### `set_upgrade_threshold` — configure multisig approval count
+
+| Row | Actor | Expected | CSV line |
+|-----|-------|----------|----------|
+| UT1 | admin | `Ok` | `set_upgrade_threshold,admin,` |
+| UT2 | Upgrader role holder | `NotAuthorized` | `set_upgrade_threshold,upgrader,NotAuthorized` |
+
+Threshold changes alter the governance quorum itself. Restricting them to admin
+ensures an Upgrader cannot reduce the required approval count on their own.
+
+#### `cancel_upgrade_proposal` — cancel a live multisig proposal
+
+| Row | Actor | Expected | CSV line |
+|-----|-------|----------|----------|
+| CU1 | admin | `Ok` | `cancel_upgrade_proposal,admin,` |
+| CU2 | Upgrader role holder | `NotAuthorized` | `cancel_upgrade_proposal,upgrader,NotAuthorized` |
+
+Admin-only cancellation ensures that an Upgrader cannot silently kill another
+Upgrader's legitimate proposal without admin oversight.
+
+Cross-reference: [`tests/auth_matrix.csv`](../tests/auth_matrix.csv) ·
+[`tests/auth_matrix.rs`](../tests/auth_matrix.rs) ·
+[CONTRIBUTING — Authorization matrix](CONTRIBUTING.md#authorization-matrix).
 
 Notes: an expired guardian role behaves like any expired role (treated as
 absent at auth time). Guardian onboarding: [ADMIN_RUNBOOK](ADMIN_RUNBOOK.md#guardian-recipes);
