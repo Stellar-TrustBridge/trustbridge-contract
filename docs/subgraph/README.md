@@ -237,6 +237,17 @@ CONTRACT_ID=C... ONESHOT=1 ./scripts/event_indexer.sh
   }
 }
 ```
+## Topic coverage across docs (Issue #754)
+
+Every published topic appears in exactly one of the two tables in this file:
+the *Event → entity mapping* table or the waiver table below. It also appears
+in the [`EVENT_INDEXING.md` topic table](../EVENT_INDEXING.md#topic-classification),
+whose **Subgraph** column must show the same outcome: the entity name, or
+`waived`. `make subgraph-parity` enforces all of this in CI, including the
+`event_kind` / `category` columns against `TOPIC_TABLE` in
+`scripts/event_indexer.sh`. Operational topics (pause, upgrade, attestation,
+batch, audit config) are waived here and are consumed from the raw indexer.
+
 ## Explicit subgraph event waivers (Issue #600)
 
 The contributor-history subgraph intentionally excludes the operational events

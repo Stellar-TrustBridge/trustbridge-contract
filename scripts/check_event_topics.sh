@@ -14,6 +14,11 @@
 # second pass appends nothing — the resume-idempotency guarantee the indexer's
 # header promises.
 #
+# Coverage beyond the indexer table — the docs/EVENT_INDEXING.md topic table
+# and its Subgraph column (mapped entity or waiver in docs/subgraph/README.md) —
+# is checked by scripts/check_subgraph_parity.py (`make subgraph-parity`,
+# Issue #754). Run both when adding or renaming an event.
+#
 # Usage:  ./scripts/check_event_topics.sh
 
 set -euo pipefail
