@@ -124,6 +124,13 @@ CI compares `docs/ABI.md` with the pull request base revision. Changes to
 public function signature headings require a new versioned `CHANGELOG.md`
 heading, for example `## [1.2.0] - 2026-08-28`, with a description of the
 change. Typo fixes and prose-only ABI edits do not require a changelog entry.
+
+**Required template.** Entries for entrypoint/event/storage-key changes must
+follow the [Entry template](../CHANGELOG.md#entry-template-wave-facing-abi-changes)
+at the top of `CHANGELOG.md` (entrypoint signature, events, storage keys,
+migration notes, docs updated, issue number). Reviewers should reject ABI
+PRs whose changelog entry omits the migration-notes line — Wave integrators
+rely on it to know whether an upgrade is safe to skip.
 The check is intentionally a heuristic: it watches function signature
 headings rather than trying to understand the complete ABI. If a legitimate
 prose edit is reported as an ABI change, add a reason in the changed changelog
