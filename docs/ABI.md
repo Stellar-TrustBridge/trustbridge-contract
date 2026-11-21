@@ -2336,13 +2336,18 @@ a fresh off-chain GitHub identity check after an address change. See
 
 ## Attestation-Required Config (Issue #198)
 
-### `set_attestation_required(required: bool) -> Result<(), ContractError>`
+### `set_attestation_required(caller: Address, required: bool) -> Result<(), ContractError>`
 
 Configures whether a published attestation is mandatory before `upgrade`.
+`caller` must be the contract admin; `required` is the new gate value.
 
 When `required = true`, `upgrade` fails with `AttestationRequired` (code 20)
 if no valid attestation is published. When `required = false` (default),
 unattested upgrades are allowed and provenance notes them as such.
+
+Unauthorized callers (non-admin, including an `Upgrader`-privileged address)
+get `ContractError::NotAuthorized` and the stored flag is left unchanged; see
+`test_non_admin_cannot_set_attestation_required` in `tests/multisig_upgrade.rs`.
 
 | | |
 |---|---|
@@ -2352,9 +2357,13 @@ unattested upgrades are allowed and provenance notes them as such.
 
 **Since:** added in Issue #198. Existing deployments default to `false`.
 
-### `is_attestation_required() -> bool`
+### `get_attestation_required() -> bool`
 
-Returns whether WASM attestation is required before upgrade. Defaults to `false`.
+Returns whether WASM attestation is required before upgrade. Defaults to
+`false`. Calling `clear_attestation` (which only removes a pending
+attestation record) never changes this flag — see
+`test_clear_attestation_does_not_disable_required_flag` in
+`tests/multisig_upgrade.rs`.
 
 | | |
 |---|---|
