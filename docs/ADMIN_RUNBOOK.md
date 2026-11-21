@@ -214,6 +214,56 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 
 > Capability table: [SECURITY.md guardian vs admin](SECURITY.md#guardian-vs-admin-capabilities-issue-635) — guardian can only `emergency_pause`; all upgrade, role-grant, and `batch_remove` paths are admin-only.
 
+#### Guardian rotation during an incident (Issue #779)
+
+`remove_guardian` and `set_guardian` are **single-admin-signature**
+calls — there is no on-chain dual-control for guardian rotation, unlike
+`batch_remove` (see [Dual-Control `batch_remove`](#dual-control-batch_remove-issue-219)).
+Whoever holds the admin key can rotate the guardian unilaterally in one
+transaction. Treat the steps below as an operational checklist, not an
+on-chain guarantee — a compromised admin key defeats this procedure
+entirely, so key custody is the real control here.
+
+Rotate the guardian when: the guardian's signing key is suspected
+compromised, the operator holding it is unreachable during an incident, or
+responsibility is handing off to a different on-call operator.
+
+1. **Confirm the current guardian** before changing anything:
+   ```bash
+   stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" \
+     -- get_guardian
+   ```
+2. **Remove the old guardian first**, rather than overwriting it with
+   `set_guardian` directly, when the old key is suspected compromised —
+   this creates an auditable gap with no guardian at all rather than a
+   single `set_guardian` call that silently replaces one key with another:
+   ```bash
+   stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
+     -- remove_guardian
+   ```
+3. **Verify removal** by confirming `get_guardian` returns no address, and
+   check the transaction's emitted events for `guardian_changed_event`
+   with no guardian topic value (see `tests/remove_guardian_auth.rs` for
+   the exact event-emission contract this locks).
+4. **Set the new guardian** once the replacement's address is confirmed
+   out-of-band (e.g. a second operator reads it back over a separate
+   channel) — do not take a pasted address on faith during a live incident:
+   ```bash
+   stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
+     -- set_guardian --guardian "$NEW_GUARDIAN_ADDRESS"
+   ```
+5. **Confirm the new guardian can pause**: have the new guardian run
+   `emergency_pause` against a non-production or rehearsal contract if one
+   is available, to confirm the key itself works before relying on it live.
+6. **Record the rotation** — old guardian address, new guardian address,
+   admin address that performed the rotation, timestamp, and reason — in
+   the incident log, not only in the on-chain event history.
+
+Since removal and re-set are both single-signature, the only time-critical
+risk during rotation is step 2 → step 4: any `emergency_pause` need that
+arises in that window must be performed by the admin directly, since no
+guardian is set.
+
 ---
 
 ### Role recipes
