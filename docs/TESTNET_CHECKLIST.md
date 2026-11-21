@@ -85,6 +85,79 @@ value is missing, the job fails closed.
 - Confirm no mainnet environment variables (`NETWORK=mainnet`, `ADMIN` with a mainnet G-address) are active in the shell session before running any step above.
 - **Protocol-upgrade rehearsal**: Run `make test-rehearsal` before any testnet or mainnet deployment to verify that all on-chain state survives a simulated WASM upgrade. See the rehearsal test in `tests/integration.rs` (`test_protocol_upgrade_rehearsal`) for what "pass" means. This is a prerequisite for mainnet deployment.
 
+## Post-upgrade verification queries (Issue #780)
+
+After a `migrate` call during a testnet protocol upgrade rehearsal (or a
+real upgrade), run these read-only `stellar contract invoke` queries
+against the upgraded `CONTRACT_ID` before relying on the deployment. Every
+command below maps to a real entrypoint in `src/lib.rs` — check `docs/ABI.md`
+if the signature ever looks different from what is shown here, since ABI
+drift from `src/lib.rs` has happened on this repo before.
+
+1. **Provenance** — confirm the WASM hash and upgrade history recorded on-chain:
+   ```bash
+   stellar contract invoke \
+     --id $CONTRACT_ID --network testnet --source $SOURCE \
+     -- get_provenance
+   ```
+   A `None`/empty result after an upgrade that was supposed to set
+   provenance digests means `set_provenance_digests` was never called —
+   do not proceed to mainnet.
+
+2. **Health** — confirm the contract reports healthy post-upgrade:
+   ```bash
+   stellar contract invoke \
+     --id $CONTRACT_ID --network testnet --source $SOURCE \
+     -- get_health
+   ```
+   and the lower-level probe breakdown:
+   ```bash
+   stellar contract invoke \
+     --id $CONTRACT_ID --network testnet --source $SOURCE \
+     -- get_health_probes
+   ```
+
+3. **Attestation flags** — confirm the upgrade attestation was recorded and,
+   if the registry requires it, that the requirement flag is still set as
+   expected:
+   ```bash
+   stellar contract invoke \
+     --id $CONTRACT_ID --network testnet --source $SOURCE \
+     -- get_attestation
+
+   stellar contract invoke \
+     --id $CONTRACT_ID --network testnet --source $SOURCE \
+     -- get_attestation_required
+   ```
+   If `get_attestation_required` returns `true` but `get_attestation`
+   returns `None`, the upgraded contract is in a state that should block
+   mainnet promotion — see `tests/export_page_layout.rs` and
+   `docs/ABI.md` for the attestation digest contract.
+
+4. **Version** — confirm the reported version matches the WASM you just deployed:
+   ```bash
+   stellar contract invoke \
+     --id $CONTRACT_ID --network testnet --source $SOURCE \
+     -- get_version
+   ```
+
+5. **Sample register/verify round-trip** — confirm core read/write paths
+   still work end to end on the upgraded contract (reuses steps 5–11 of the
+   main checklist above, with a fresh username so it cannot collide with a
+   prior run):
+   ```bash
+   make invoke-register GITHUB_USER=postupgradecheck STELLAR_ADDR=G... SOURCE=deployer CONTRACT_ID=$CONTRACT_ID
+   make invoke-lookup GITHUB_USER=postupgradecheck SOURCE=deployer CONTRACT_ID=$CONTRACT_ID
+   make invoke-verify GITHUB_USER=postupgradecheck SOURCE=admin CONTRACT_ID=$CONTRACT_ID
+   make invoke-stats SOURCE=deployer CONTRACT_ID=$CONTRACT_ID
+   make invoke-remove CALLER=$ADMIN GITHUB_USER=postupgradecheck SOURCE=admin CONTRACT_ID=$CONTRACT_ID
+   ```
+
+If any of these five checks fails or returns an unexpected value, stop —
+do not promote this WASM hash past testnet. File the failure with the
+exact command and output; this is the stage where a broken Wave testnet
+registry is caught before it reaches mainnet.
+
 ## Metadata
 
 Store the contract ID, network passphrase, deployer address, admin address, and commit hash used for the deployment.
