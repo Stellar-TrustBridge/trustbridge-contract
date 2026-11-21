@@ -33,4 +33,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "username_reserved_consistency"
+path = "fuzz_targets/username_reserved_consistency.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
