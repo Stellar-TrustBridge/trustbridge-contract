@@ -45,6 +45,7 @@ build / wasm-size). Every pull request and push to `main` runs these jobs from
 | `quality` | `cargo test --test homoglyph_corpus` (named blocking step), then `make check` (`make fmt`, `make lint`, `make test`, `make docs-check`, plus error-codes / event-topics / abi-check / wasm-size) |
 | `build` | `make build` (`stellar contract build`), `make wasm-size`, `make wasm-hash-pin WASM_HASH_STRICT=1` |
 | `abi-consistency` | `./scripts/check_error_codes.sh` (`make error-codes`) and `./scripts/check_event_topics.sh` (`make event-topics`) — fails on any `ContractError` / event-topic drift |
+| `diff-test` | `make diff-test` (TypeScript differential tests), then `./scripts/check_fixture_pairing.sh origin/main` — fails if Rust XDR/meta fixtures and `ts-differential-tests/` change independently (see [`ts-differential-tests/README.md`](../ts-differential-tests/README.md#ci-entry-point)) |
 | `oracle-proof-tests` | `cargo test --lib oracle_proof` |
 | `cargo-deny` | `cargo deny --config deny.toml check` (see [Supply-chain checks](#supply-chain-checks)) |
 | `mutants` | `cargo mutants --config mutants.toml --file src/utils.rs` — nightly and `workflow_dispatch` only (see [Mutation Testing](#mutation-testing--utilsrs-issue-243)) |

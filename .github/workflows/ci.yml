@@ -77,6 +77,31 @@ jobs:
           python3 scripts/generate_abi_json.py --check
           cargo test --test abi_entrypoints_golden -- --nocapture
 
+  diff-test:
+    name: TypeScript differential tests + fixture pairing
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # check_fixture_pairing.sh diffs against origin/main
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: ts-differential-tests/package-lock.json
+
+      - name: Run TypeScript differential tests
+        run: make diff-test
+
+      # Issue #783: a Rust-side XDR/meta fixture change without a matching
+      # ts-differential-tests/ update (or vice versa) breaks Wave's TS
+      # differential CI once merged; fail fast here instead.
+      - name: Check XDR/meta fixture pairing
+        run: ./scripts/check_fixture_pairing.sh origin/main
+
   oracle-proof-tests:
     name: oracle_proof unit tests
     runs-on: ubuntu-latest
