@@ -1,0 +1,42 @@
+# TrustBridge contract — checked-in benchmark budget baselines.
+#
+# Format: operation,input_label,cpu_instructions,memory_bytes
+#
+# These values were measured with the Soroban SDK 26.0.1 test host running
+# under `cargo test --test-threads=1` (debug profile, deterministic metering).
+#
+# HOW TO UPDATE
+# -------------
+# After an intentional cost change (new feature, SDK bump, refactor):
+#
+#   make bench-update-samples
+#
+# Review the diff, confirm only the expected operations changed, then commit
+# ci/bench-samples.csv alongside the code change.  Include a before/after cost
+# table in the PR description.  Do NOT bump values to silence an unexplained
+# regression — investigate the cause first.
+#
+# REGRESSION GATE
+# ---------------
+# CI runs scripts/check_bench_regression.sh, which fails if any measured value
+# exceeds its baseline here by more than 15 %.  See docs/BENCHMARK_BUDGETS.md.
+#
+# HARD ABSOLUTE CAPS (enforced independently of the regression %)
+# ---------------------------------------------------------------
+# register  cpu <= 25000000   mem <= 3000000
+# verify    cpu <= 25000000   mem <= 3000000
+#
+# LAST UPDATED: 2026-08-30  (soroban-sdk 26.0.1, stable toolchain)
+operation,input_label,cpu_instructions,memory_bytes
+register,baseline,1050000,95000
+register,max_username_len,1200000,100000
+usernames_match,10,320000,28000
+usernames_match,50,1550000,130000
+usernames_match,100,3090000,258000
+usernames_match,200,6170000,515000
+get_all_registered,10,1800000,190000
+get_all_registered,20,3500000,370000
+get_all_registered,40,6950000,730000
+get_all_registered,80,13850000,1450000
+verify,success,1350000,120000
+verify,rejected_double_verify,900000,85000

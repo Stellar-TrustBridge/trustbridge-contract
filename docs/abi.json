@@ -1,0 +1,628 @@
+{
+  "schema_version": 1,
+  "source": "docs/ABI.md",
+  "functions": [
+    {
+      "name": "stage_wasm",
+      "signature": "stage_wasm(caller: Address, wasm_hash: BytesN<32>) -> Result<(), ContractError>"
+    },
+    {
+      "name": "get_staged",
+      "signature": "get_staged() -> Option<StagedWasm>"
+    },
+    {
+      "name": "clear_staged",
+      "signature": "clear_staged(caller: Address) -> Result<(), ContractError>"
+    },
+    {
+      "name": "initialize",
+      "signature": "initialize(admin: Address) -> Result<(), ContractError>"
+    },
+    {
+      "name": "register",
+      "signature": "register(github_username: String, stellar_address: Address, fallback_addresses: Vec<Address>) -> Result<(), ContractError>"
+    },
+    {
+      "name": "register_sponsored",
+      "signature": "register_sponsored(github_username: String, stellar_address: Address, sponsor: Address) -> Result<(), ContractError>"
+    },
+    {
+      "name": "max_username_len",
+      "signature": "max_username_len() -> u32"
+    },
+    {
+      "name": "is_username_valid",
+      "signature": "is_username_valid(github_username: String) -> bool"
+    },
+    {
+      "name": "is_address_zero",
+      "signature": "is_address_zero(address: Address) -> bool"
+    },
+    {
+      "name": "usernames_match",
+      "signature": "usernames_match(a: String, b: String) -> bool"
+    },
+    {
+      "name": "get_address",
+      "signature": "get_address(github_username: String) -> Option<ContributorRecord>"
+    },
+    {
+      "name": "get_address_if_verified",
+      "signature": "get_address_if_verified(github_username: String) -> Result<ContributorRecord, ContractError>"
+    },
+    {
+      "name": "remove",
+      "signature": "remove(caller: Address, github_username: String) -> Result<(), ContractError>"
+    },
+    {
+      "name": "batch_remove",
+      "signature": "batch_remove(caller: Address, usernames: Vec<String>) -> Result<BatchSummary, ContractError>"
+    },
+    {
+      "name": "get_all_registered",
+      "signature": "get_all_registered() -> Result<Vec<(String, Address)>, ContractError>"
+    },
+    {
+      "name": "verify",
+      "signature": "verify(caller: Address, github_username: String) -> Result<(), ContractError>"
+    },
+    {
+      "name": "get_registered_paginated",
+      "signature": "get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>"
+    },
+    {
+      "name": "set_oracle_allowlist",
+      "signature": "set_oracle_allowlist(pubkeys: Vec<BytesN<32>>) -> Result<(), ContractError>"
+    },
+    {
+      "name": "get_oracle_allowlist",
+      "signature": "get_oracle_allowlist() -> Vec<BytesN<32>>"
+    },
+    {
+      "name": "verify_with_oracle_proof",
+      "signature": "verify_with_oracle_proof(github_username: String, proof: OracleProof) -> Result<(), ContractError>"
+    },
+    {
+      "name": "get_pending_reverify",
+      "signature": "get_pending_reverify(offset: u32, limit: u32) -> Result<Vec<String>, ContractError>"
+    },
+    {
+      "name": "get_health_probes",
+      "signature": "get_health_probes() -> HealthProbes"
+    }
+  ],
+  "errors": [
+    {
+      "code": 1,
+      "name": "ContractInitialized",
+      "description": "`initialize` called"
+    },
+    {
+      "code": 2,
+      "name": "UserRegistered",
+      "description": "`register` / `register_sponsored` succeeded"
+    },
+    {
+      "code": 3,
+      "name": "UserRemoved",
+      "description": "`remove` / `batch_remove` removed a record"
+    },
+    {
+      "code": 4,
+      "name": "UserVerified",
+      "description": "`verify` / `batch_verify` verified a record"
+    },
+    {
+      "code": 5,
+      "name": "AdminAction",
+      "description": "Generic admin operation"
+    },
+    {
+      "code": 6,
+      "name": "UnauthorizedAttempt",
+      "description": "Auth check failed; gated on `log_unauthorized`"
+    },
+    {
+      "code": 7,
+      "name": "DataExported",
+      "description": "Paginated export operation"
+    },
+    {
+      "code": 8,
+      "name": "VerificationRevoked",
+      "description": "`revoke_verification` revoked a record"
+    },
+    {
+      "code": 9,
+      "name": "UserRenamed",
+      "description": "`rename` moved a registration"
+    },
+    {
+      "code": 10,
+      "name": "ContractPaused",
+      "description": "`pause` / `emergency_pause` / `set_paused`"
+    },
+    {
+      "code": 11,
+      "name": "ContractUnpaused",
+      "description": "`unpause` / `clear_emergency_pause`"
+    },
+    {
+      "code": 12,
+      "name": "RoleChanged",
+      "description": "`set_role` / `activate_role` granted a role"
+    },
+    {
+      "code": 13,
+      "name": "ContractUpgraded",
+      "description": "`upgrade` replaced the WASM"
+    },
+    {
+      "code": 14,
+      "name": "AuditConfigChanged",
+      "description": "`set_audit_config` mutated the config"
+    },
+    {
+      "code": 1,
+      "name": "AlreadyInitialized",
+      "description": "Contract already has an admin"
+    },
+    {
+      "code": 2,
+      "name": "NotInitialized",
+      "description": "Contract not yet initialized"
+    },
+    {
+      "code": 3,
+      "name": "NotAuthorized",
+      "description": "Caller lacks permission"
+    },
+    {
+      "code": 4,
+      "name": "NotRegistered",
+      "description": "Username not in registry"
+    },
+    {
+      "code": 5,
+      "name": "AlreadyVerified",
+      "description": "Username already verified"
+    },
+    {
+      "code": 6,
+      "name": "NotVerified",
+      "description": "Cannot revoke verification because the username is not verified"
+    },
+    {
+      "code": 7,
+      "name": "Paused",
+      "description": "Contract is paused for maintenance or emergency"
+    },
+    {
+      "code": 8,
+      "name": "CooldownActive",
+      "description": "Upgrade cooldown period has not elapsed"
+    },
+    {
+      "code": 9,
+      "name": "InvalidVersion",
+      "description": "Target version is not higher than current version"
+    },
+    {
+      "code": 10,
+      "name": "InvalidRole",
+      "description": "Invalid or unauthorized role assignment"
+    },
+    {
+      "code": 11,
+      "name": "InvalidUsername",
+      "description": "Username is empty, over `max_username_len`, or contains disallowed characters"
+    },
+    {
+      "code": 12,
+      "name": "AttestationExpired",
+      "description": "Upgrade attestation's `expires_at` has passed"
+    },
+    {
+      "code": 13,
+      "name": "UnattestedWasm",
+      "description": "`upgrade` hash does not match the live attestation"
+    },
+    {
+      "code": 14,
+      "name": "InvalidBatchSize",
+      "description": "Batch call supplied zero items or more than the configured max"
+    },
+    {
+      "code": 15,
+      "name": "InvalidReasonCode",
+      "description": "`revoke_verification` reason_code is not a known `RevokeReason` value"
+    },
+    {
+      "code": 16,
+      "name": "ZeroAddress",
+      "description": "Supplied Stellar address is the well-known zero/burn address"
+    },
+    {
+      "code": 17,
+      "name": "ChallengeAlreadyActive",
+      "description": "`start_challenge` called while a challenge is already open"
+    },
+    {
+      "code": 18,
+      "name": "NoChallengeActive",
+      "description": "`cancel_challenge` or `complete_challenge` called with no active challenge"
+    },
+    {
+      "code": 19,
+      "name": "ChallengeNotResolvable",
+      "description": "`complete_challenge` called before the delay has elapsed"
+    },
+    {
+      "code": 20,
+      "name": "ChallengeActive",
+      "description": "`register` attempted while a challenge is active on the username"
+    },
+    {
+      "code": 21,
+      "name": "InvalidPauseReason",
+      "description": "`pause` / `unpause` / `set_paused` given an unrecognized reason code"
+    },
+    {
+      "code": 22,
+      "name": "AlreadyReserved",
+      "description": "`add_reserved` for a username already on the reserved list"
+    },
+    {
+      "code": 23,
+      "name": "NotReserved",
+      "description": "`remove_reserved` for a username not on the reserved list"
+    },
+    {
+      "code": 24,
+      "name": "UsernameReserved",
+      "description": "`register` for a username on the reserved list"
+    },
+    {
+      "code": 25,
+      "name": "ReservedListFull",
+      "description": "Reserved list has reached its maximum size"
+    },
+    {
+      "code": 26,
+      "name": "AdminTransferPending",
+      "description": "`propose_admin_transfer` while a transfer is already pending"
+    },
+    {
+      "code": 27,
+      "name": "AdminTransferDelayActive",
+      "description": "`execute_admin_transfer` before the delay has elapsed"
+    },
+    {
+      "code": 28,
+      "name": "NoPendingAdminTransfer",
+      "description": "`execute_admin_transfer` with no pending proposal"
+    },
+    {
+      "code": 29,
+      "name": "AttestationRequired",
+      "description": "`upgrade` without an attestation while attestation-required mode is on"
+    },
+    {
+      "code": 30,
+      "name": "NetworkMismatch",
+      "description": "Instance state was initialized on a different network than the one executing (Issue #231 / #401)"
+    },
+    {
+      "code": 31,
+      "name": "VerifierAllowlistFull",
+      "description": "`add_verifier` would exceed the `MAX_VERIFIERS` cap (Issue #293)"
+    },
+    {
+      "code": 32,
+      "name": "VerifierNotAllowlisted",
+      "description": "`remove_verifier` for an address not on the allowlist (Issue #293)"
+    },
+    {
+      "code": 33,
+      "name": "VerifierExpiryInPast",
+      "description": "`add_verifier` given a non-zero `expires_at` not in the future (Issue #293)"
+    },
+    {
+      "code": 34,
+      "name": "NoPendingRoleGrant",
+      "description": "`activate_role` / `cancel_role_grant` with no pending grant (Issue #220)"
+    },
+    {
+      "code": 35,
+      "name": "RoleGrantNotReady",
+      "description": "`activate_role` before the grant's timelock elapsed (Issue #220)"
+    },
+    {
+      "code": 36,
+      "name": "ProvenanceMissing",
+      "description": "`assert_build` / `set_provenance_digests` before any provenance record exists (Issue #225)"
+    },
+    {
+      "code": 37,
+      "name": "ProvenanceMismatch",
+      "description": "`assert_build` given a hash that does not match stored provenance (Issue #225)"
+    },
+    {
+      "code": 39,
+      "name": "StagedWasmMismatch",
+      "description": "`upgrade` / `execute_upgrade` was given a WASM hash that does not match the staged-WASM slot (Issue #300)"
+    },
+    {
+      "code": 40,
+      "name": "UpgradeProposalAlreadyPending",
+      "description": "`propose_multisig_upgrade` was called while a proposal is already live (Issue #301)"
+    },
+    {
+      "code": 41,
+      "name": "NoUpgradeProposalPending",
+      "description": "`approve_upgrade` / `execute_upgrade` / `cancel_upgrade_proposal` was called with no live proposal (or a proposal id that does not match) (Issue #301)"
+    },
+    {
+      "code": 42,
+      "name": "UpgradeProposalAlreadyApproved",
+      "description": "`approve_upgrade` was called by an address that already approved this proposal (Issue #301)"
+    },
+    {
+      "code": 43,
+      "name": "UpgradeProposalDelayActive",
+      "description": "`execute_upgrade` was called before the proposal's delay elapsed (Issue #301)"
+    },
+    {
+      "code": 44,
+      "name": "UpgradeProposalInsufficientApprovals",
+      "description": "`execute_upgrade` was called before the approval threshold was met (Issue #301)"
+    },
+    {
+      "code": 46,
+      "name": "FallbackListFull",
+      "description": "`register` was given more fallback addresses than `MAX_FALLBACK_ADDRESSES`"
+    },
+    {
+      "code": 47,
+      "name": "UsernameTaken",
+      "description": "`rename` was called with a `new_username` that is already registered"
+    },
+    {
+      "code": 48,
+      "name": "RotationRequired",
+      "description": "`register` was asked to change the registered address while the rotation delay is armed (Issue #234) \u2014 use the request/execute rotation flow"
+    },
+    {
+      "code": 49,
+      "name": "RotationPending",
+      "description": "A rotation is already pending for this username (Issue #234)"
+    },
+    {
+      "code": 50,
+      "name": "NoRotationPending",
+      "description": "`execute_address_rotation` / `cancel_address_rotation` was called with no pending rotation (Issue #234)"
+    },
+    {
+      "code": 51,
+      "name": "RotationNotReady",
+      "description": "`execute_address_rotation` was called before the delay has elapsed (Issue #234)"
+    },
+    {
+      "code": 52,
+      "name": "InvalidCursor",
+      "description": "A pagination cursor no longer decodes against the current registry state (Issue #215)"
+    },
+    {
+      "code": 53,
+      "name": "VerifyRateLimited",
+      "description": "A non-admin caller would exceed its per-ledger verify/revoke cap (Issue #292)"
+    },
+    {
+      "code": 54,
+      "name": "DualControlRequired",
+      "description": "`batch_remove` was called with a batch larger than the configured dual-control threshold (Issue #219) \u2014 use `propose_batch_remove` / `execute_batch_remove` instead"
+    },
+    {
+      "code": 55,
+      "name": "BatchRemoveProposalPending",
+      "description": "`propose_batch_remove` was called while a proposal is already pending (Issue #219)"
+    },
+    {
+      "code": 56,
+      "name": "NoPendingBatchRemove",
+      "description": "`execute_batch_remove` / `cancel_batch_remove` was called with no live (or already-expired) proposal (Issue #219)"
+    },
+    {
+      "code": 57,
+      "name": "RoleExpired",
+      "description": "A role-gated privileged invocation was made at or after the role's expiry timestamp"
+    },
+    {
+      "code": 58,
+      "name": "OracleProofBadLayout",
+      "description": "`verify_with_proof`: empty `message` or all-zero `signature` (structurally malformed proof)"
+    },
+    {
+      "code": 59,
+      "name": "OracleProofNotAllowlisted",
+      "description": "`verify_with_proof`: `oracle_pubkey` is not on the oracle allowlist (always, when it is empty)"
+    },
+    {
+      "code": 60,
+      "name": "OracleProofExpired",
+      "description": "`verify_with_proof`: non-zero `expires_at` is earlier than the ledger timestamp"
+    },
+    {
+      "code": 61,
+      "name": "OracleProofBadSignature",
+      "description": "`verify_with_proof`: signature is not a canonical Ed25519 encoding"
+    },
+    {
+      "code": 62,
+      "name": "AddressMismatch",
+      "description": "`verify_with_oracle_proof`: proof message is not bound to the record's current `stellar_address`"
+    }
+  ],
+  "events": [
+    {
+      "name": "RegisteredEvent",
+      "topics": [
+        "\"registered_event\"",
+        "github_username"
+      ],
+      "data": "{ stellar_address, timestamp, sponsor: Option<Address>, domain: EventDomain }"
+    },
+    {
+      "name": "BotStatusChangedEvent",
+      "topics": [
+        "\"bot_status_changed_event\"",
+        "github_username"
+      ],
+      "data": "{ is_bot: bool, actor: Address, timestamp, domain: EventDomain }"
+    },
+    {
+      "name": "RemovedEvent",
+      "topics": [
+        "\"removed_event\"",
+        "github_username"
+      ],
+      "data": "{ stellar_address, timestamp }"
+    },
+    {
+      "name": "VerifiedEvent",
+      "topics": [
+        "\"verified_event\"",
+        "github_username"
+      ],
+      "data": "{ stellar_address, timestamp }"
+    },
+    {
+      "name": "VerificationRevokedEvent",
+      "topics": [
+        "\"verification_revoked_event\"",
+        "github_username"
+      ],
+      "data": "{ stellar_address, timestamp, reason_code }"
+    },
+    {
+      "name": "VerificationConfiguredEvent",
+      "topics": [
+        "\"verification_configured_event\"",
+        "admin"
+      ],
+      "data": "{ attestation, expires_in, threshold, timestamp }"
+    },
+    {
+      "name": "UpgradedEvent",
+      "topics": [
+        "\"upgraded_event\"",
+        "new_wasm_hash"
+      ],
+      "data": "{ version, timestamp }"
+    },
+    {
+      "name": "PausedEvent",
+      "topics": [
+        "\"paused_event\" / \"unpaused_event\"",
+        "admin"
+      ],
+      "data": "{ timestamp }"
+    },
+    {
+      "name": "UnpausedEvent",
+      "topics": [
+        "\"paused_event\" / \"unpaused_event\"",
+        "admin"
+      ],
+      "data": "{ timestamp }"
+    },
+    {
+      "name": "RoleGrantedEvent",
+      "topics": [
+        "\"role_granted_event\"",
+        "address"
+      ],
+      "data": "{ role, admin, timestamp }"
+    },
+    {
+      "name": "RoleRevokedEvent",
+      "topics": [
+        "\"role_revoked_event\"",
+        "address"
+      ],
+      "data": "{ admin, timestamp }"
+    },
+    {
+      "name": "AdminTransferProposedEvent",
+      "topics": [
+        "\"admin_transfer_proposed_event\"",
+        "new_admin"
+      ],
+      "data": "{ proposed_by, executable_at, timestamp }"
+    },
+    {
+      "name": "AdminTransferCancelledEvent",
+      "topics": [
+        "\"admin_transfer_cancelled_event\"",
+        "cancelled_by"
+      ],
+      "data": "{ timestamp }"
+    },
+    {
+      "name": "AdminTransferExecutedEvent",
+      "topics": [
+        "\"admin_transfer_executed_event\"",
+        "new_admin"
+      ],
+      "data": "{ old_admin, timestamp }"
+    },
+    {
+      "name": "WasmStagedEvent",
+      "topics": [
+        "\"wasm_staged_event\"",
+        "wasm_hash"
+      ],
+      "data": "{ staged_by, timestamp }"
+    },
+    {
+      "name": "StagedWasmClearedEvent",
+      "topics": [
+        "\"staged_wasm_cleared_event\"",
+        "wasm_hash"
+      ],
+      "data": "{ cleared_by, timestamp }"
+    },
+    {
+      "name": "UpgradeProposedEvent",
+      "topics": [
+        "\"upgrade_proposed_event\"",
+        "proposal_id"
+      ],
+      "data": "{ wasm_hash, proposed_by, executable_at, timestamp }"
+    },
+    {
+      "name": "UpgradeApprovedEvent",
+      "topics": [
+        "\"upgrade_approved_event\"",
+        "proposal_id"
+      ],
+      "data": "{ approved_by, approval_count, timestamp }"
+    },
+    {
+      "name": "UpgradeProposalExecutedEvent",
+      "topics": [
+        "\"upgrade_proposal_executed_event\"",
+        "proposal_id"
+      ],
+      "data": "{ wasm_hash, executed_by, approval_count, timestamp }"
+    },
+    {
+      "name": "UpgradeProposalCancelledEvent",
+      "topics": [
+        "\"upgrade_proposal_cancelled_event\"",
+        "proposal_id"
+      ],
+      "data": "{ wasm_hash, cancelled_by, timestamp }"
+    }
+  ]
+}

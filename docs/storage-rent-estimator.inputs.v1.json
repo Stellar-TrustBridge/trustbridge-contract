@@ -64,7 +64,7 @@
         { "symbol": "lastupg", "scales_with_n": false },
         { "symbol": "ver", "scales_with_n": false },
         {
-          "symbol": "chunkcnt",
+          "symbol": "chkcnt",
           "scales_with_n": false,
           "note": "Count of chunk entries; value changes with N but entry count is 1"
         }

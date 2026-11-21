@@ -6,10 +6,6 @@
 //! the `version` and `is_compatible` contract functions, which the generated
 //! TypeScript bindings package uses to guard against ABI drift.
 
-// Some items here are staged ahead of their call sites: they are covered by
-// this module's own tests but are not yet wired into `lib.rs`.
-#![allow(dead_code)]
-
 /// Contract version information.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Version {
@@ -20,11 +16,9 @@ pub struct Version {
 
 /// First contract version exposing the `batch_verify` entry point.
 ///
-/// `batch_verify` is additive — it introduces a new function without changing
-/// any existing signature — so it lands as a minor bump. Off-chain callers
-/// (dashboard, indexer, the generated TypeScript bindings) should gate on
-/// `Version::supports_batch_verify` rather than assuming the function exists,
-/// since a contract deployed at 1.0.0 will reject the invocation outright.
+/// `batch_verify` is an additive entry point first included in version 1.1.0.
+/// Clients should check this capability before calling it when they may target
+/// deployments that predate the entry point.
 pub const BATCH_VERIFY_MIN_VERSION: Version = Version::new(1, 1, 0);
 
 /// First contract version whose public read functions (`get_address`,
@@ -139,6 +133,9 @@ impl core::fmt::Display for Version {
 }
 
 /// Contract migration state.
+#[allow(dead_code)]
+// Staged migration-state machine; exercised by the tests in this file,
+// wired into `run_migration_steps` in a follow-up.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MigrationState {
     /// No migration needed
@@ -154,6 +151,9 @@ pub enum MigrationState {
 }
 
 /// Compatibility information between versions.
+#[allow(dead_code)]
+// Staged version-compatibility report; constructed by `for_upgrade` and
+// covered by the tests in this file.
 #[derive(Clone, Copy, Debug)]
 pub struct CompatibilityInfo {
     pub current_version: Version,
@@ -165,6 +165,7 @@ pub struct CompatibilityInfo {
 
 impl CompatibilityInfo {
     /// Create compatibility info for an upgrade.
+    #[allow(dead_code)] // Staged with `CompatibilityInfo`; covered by the tests in this file.
     pub fn for_upgrade(current: Version, target: Version) -> Self {
         let breaking_changes = current.major != target.major;
         let data_migration_required = breaking_changes || current.minor != target.minor;
@@ -205,6 +206,52 @@ mod tests {
 
         assert!(v1_2_0.is_compatible_with(v1_1_5));
         assert!(!v1_1_5.is_compatible_with(v1_2_0));
+    }
+
+    #[test]
+    fn test_is_compatible_semver_policy_table() {
+        let cases = [
+            (Version::new(1, 0, 0), Version::new(1, 0, 0), true),
+            (Version::new(1, 0, 1), Version::new(1, 0, 0), true),
+            (Version::new(1, 1, 0), Version::new(1, 0, 1), true),
+            (Version::new(1, 0, 0), Version::new(1, 0, 1), false),
+            (Version::new(1, 0, 9), Version::new(1, 1, 0), false),
+            (Version::new(2, 0, 0), Version::new(1, 1, 0), true),
+            (Version::new(1, 1, 0), Version::new(2, 0, 0), false),
+        ];
+
+        for (deployed, minimum, expected) in cases {
+            assert_eq!(
+                deployed.is_compatible_with(minimum),
+                expected,
+                "compatibility mismatch: deployed={deployed}, minimum={minimum}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_feature_minimum_versions_match_policy_table() {
+        let policy = [
+            (
+                "batch_verify",
+                BATCH_VERIFY_MIN_VERSION,
+                Version::new(1, 1, 0),
+            ),
+            (
+                "cross_contract_reads",
+                CROSS_CONTRACT_READ_MIN_VERSION,
+                Version::new(1, 0, 0),
+            ),
+        ];
+
+        for (feature, configured, expected) in policy {
+            assert_eq!(configured, expected, "{feature} minimum version drifted");
+        }
+
+        assert!(!Version::new(1, 0, 9).supports_batch_verify());
+        assert!(Version::new(1, 1, 0).supports_batch_verify());
+        assert!(!Version::new(0, 9, 9).supports_cross_contract_reads());
+        assert!(Version::new(1, 0, 0).supports_cross_contract_reads());
     }
 
     #[test]
@@ -337,5 +384,158 @@ mod tests {
         let minimum_required = Version::new(2, 0, 0);
 
         assert!(!deployed.is_compatible_with(minimum_required));
+    }
+
+    #[test]
+    fn test_export_paginated_requires_admin_auth() {
+        use crate::TrustBridgeContract;
+        use soroban_sdk::{testutils::Address as _, Address, Env};
+
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // Mock all auths to let the call succeed
+        env.mock_all_auths();
+
+        env.as_contract(&contract_id, || {
+            let _page =
+                TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
+        });
+
+        // Verify that get_registered_paginated indeed checked the admin's authorization
+        let auths = env.auths();
+        assert_eq!(auths.len(), 1);
+        let (auth_addr, invocation) = auths.first().unwrap();
+        assert_eq!(*auth_addr, admin);
+        match &invocation.function {
+            soroban_sdk::testutils::AuthorizedFunction::Contract((_, name, _)) => assert_eq!(
+                *name,
+                soroban_sdk::Symbol::new(&env, "get_registered_paginated")
+            ),
+            other => panic!("unexpected authorized function: {other:?}"),
+        }
+    }
+
+    // ── Protocol version gate tests for outdated clients ──────────────────────
+    //
+    // These verify that `is_compatible` on the deployed contract correctly
+    // rejects clients that require a version the contract does not satisfy,
+    // and accepts clients whose minimum requirement the contract meets.
+
+    #[test]
+    fn protocol_gate_rejects_client_requiring_higher_minor() {
+        use crate::TrustBridgeContract;
+        use soroban_sdk::{testutils::Address as _, Address, Env};
+
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // CONTRACT_VERSION is 1.1.0; a client requiring 1.2.0 must be rejected.
+        env.as_contract(&contract_id, || {
+            assert!(
+                !TrustBridgeContract::is_compatible(env.clone(), 1, 2, 0),
+                "outdated contract (1.1.0) must not satisfy a client requiring 1.2.0"
+            );
+        });
+    }
+
+    #[test]
+    fn protocol_gate_rejects_client_requiring_higher_major() {
+        use crate::TrustBridgeContract;
+        use soroban_sdk::{testutils::Address as _, Address, Env};
+
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // A client requiring major 2 always signals a breaking ABI change.
+        env.as_contract(&contract_id, || {
+            assert!(
+                !TrustBridgeContract::is_compatible(env.clone(), 2, 0, 0),
+                "contract at major 1 must not satisfy a client requiring major 2"
+            );
+        });
+    }
+
+    #[test]
+    fn protocol_gate_accepts_exact_version() {
+        use crate::TrustBridgeContract;
+        use soroban_sdk::{testutils::Address as _, Address, Env};
+
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // A client whose minimum is exactly the deployed version must succeed.
+        env.as_contract(&contract_id, || {
+            let (major, minor, patch) = TrustBridgeContract::version(env.clone());
+            assert!(
+                TrustBridgeContract::is_compatible(env.clone(), major, minor, patch),
+                "contract must be compatible with its own version"
+            );
+        });
+    }
+
+    #[test]
+    fn protocol_gate_accepts_older_minimum() {
+        use crate::TrustBridgeContract;
+        use soroban_sdk::{testutils::Address as _, Address, Env};
+
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // A client that only requires 1.0.0 must pass against any 1.x deployment.
+        env.as_contract(&contract_id, || {
+            assert!(
+                TrustBridgeContract::is_compatible(env.clone(), 1, 0, 0),
+                "contract at 1.1.0 must satisfy a client requiring only 1.0.0"
+            );
+        });
+    }
+
+    #[test]
+    fn protocol_gate_version_returns_stable_tuple() {
+        use crate::TrustBridgeContract;
+        use soroban_sdk::{testutils::Address as _, Address, Env};
+
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // The stored version must match the CONTRACT_VERSION build constant.
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::version(env.clone()),
+                (1, 1, 0),
+                "version must match build constant"
+            );
+        });
     }
 }

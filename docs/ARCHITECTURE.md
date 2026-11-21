@@ -33,12 +33,114 @@ reference and migration guide from manual probing.
 
 ## Contract Modules
 
+Every `src/*.rs` file on disk is listed here — no more, no fewer
+(`audit.rs`, `batch.rs`, `domain.rs`, `error.rs`, `events.rs`, `lib.rs`,
+`merkle.rs`, `multisig_upgrade.rs`, `oracle_proof.rs`, `staged_wasm.rs`,
+`storage.rs`, `utils.rs`, `version.rs`). `src/lib.rs` owns the public
+contract interface (`TrustBridgeContract`) and all business logic; every
+other module is a helper it composes. Test-only code lives outside `src/`
+(see below) — no `src/` module exists solely for tests.
+
 | Module | Responsibility |
 |--------|----------------|
 | `src/lib.rs` | Public contract interface (`TrustBridgeContract`), business logic, unit tests |
-| `src/storage.rs` | Storage keys, `ContributorRecord` / `Stats` types, persistence helpers |
-| `src/events.rs` | Soroban contract events with topics |
-| `src/error.rs` | Typed error enum (`ContractError`) |
+| `src/storage.rs` | Storage keys, `ContributorRecord` / `Stats` types, persistence helpers, flat/chunked index maintenance, opaque cursor pagination internals (Issue #215) |
+| `src/events.rs` | Soroban contract events with topics (`#[contractevent]` structs) |
+| `src/error.rs` | Typed error enum (`ContractError`) and off-chain retry classification (`ErrorCategory`) |
+| `src/audit.rs` | Append-only audit-log entry type (`AuditLogEntry`, `AuditConfig`, `AuditStats`) and helpers |
+| `src/batch.rs` | Batch verification implementation, configuration, limits, and tests |
+| `src/merkle.rs` | Export-page Merkle leaf/node hashing and root construction (Issue #216) |
+| `src/multisig_upgrade.rs` | M-of-N multisig upgrade proposal flow (Issue #301) |
+| `src/oracle_proof.rs` | Oracle allowlist and signed proof-of-ownership verification |
+| `src/staged_wasm.rs` | Staged-WASM intent slot gating `upgrade` (Issue #300) |
+| `src/domain.rs` | `EventDomain` (contract id, network id, version) attached to every event |
+| `src/utils.rs` | Username validation (incl. case folding) and other pure helpers |
+| `src/version.rs` | Contract version type, compatibility checks, cross-contract read gating |
+
+> There is no separate registry-read module. During a migration window the
+> on-chain registry is the single source of truth and off-chain consumers read
+> it directly through the public read surface (see `docs/ABI.md` §
+> Cross-Contract Read Interface); a `registry_read_stub.rs` trait fixture was
+> staged for this and removed as unused (Issue #297).
+
+### `lib.rs` re-export strategy
+
+Submodules stay private (`mod audit; mod batch; …` in `lib.rs`) and the
+cross-crate surface is re-exported with `pub use`: contract types
+(`AuditConfig`, `AuditLogEntry`, `Role`, `Stats`, `PendingRoleGrant`,
+`ExportPage`, …), all events, `ContractError`, and the `OracleProof` /
+`StagedWasm` / `Version` helpers. External consumers (integration tests, SDK
+bindings) import everything from the crate root
+(`trustbridge_contract::{TrustBridgeContract, Role, …}`) and never address a
+submodule path — so a future module split only touches `lib.rs` imports, not
+downstream callers.
+
+### Module dependencies
+
+```mermaid
+flowchart TD
+    lib[lib.rs<br/>TrustBridgeContract] --> storage
+    lib --> events
+    lib --> error
+    lib --> audit
+    lib --> batch
+    lib --> merkle
+    lib --> multisig_upgrade
+    lib --> oracle_proof
+    lib --> staged_wasm
+    lib --> domain
+    lib --> utils
+    lib --> version
+    storage --> audit
+    storage --> error
+    storage --> utils
+    batch --> storage
+    batch --> utils
+    batch --> audit
+    batch --> error
+    events --> domain
+    merkle --> storage
+    oracle_proof --> storage
+    oracle_proof --> error
+    staged_wasm --> storage
+```
+
+`storage.rs` is the hub: index/counter/cursor/audit persistence plus the key
+constants everything else names. `events.rs` only depends on `domain.rs`
+(the `EventDomain` stamped on each event). Nothing depends on `lib.rs`.
+
+### Test locations by domain
+
+| Domain | Tests |
+|--------|-------|
+| Cursor pagination (Issues #215, #650) | `tests/cursor_pagination.rs`, `fuzz/fuzz_targets/export_cursor.rs`, `tests/fuzz/seeds.txt` |
+| Pagination parity across the three export APIs (Issue #302) | `tests/pagination_parity.rs` |
+| Export page layout golden | `tests/export_page_layout.rs`, `abi/export_page.layout.golden` |
+| Timelocked role grants (Issues #220, #648) | `tests/integration.rs`, `tests/auth_matrix.csv` |
+| Audit reads (Issue #646) | `tests/integration.rs`, `src/lib.rs` unit tests |
+| Dual-control batch_remove (Issue #219) | `tests/batch_remove_dual_control.rs` |
+| Challenge flow (Issue #214) | `tests/challenge.rs` |
+| Merkle proofs (Issue #216) | `tests/merkle_export.rs` |
+| Error-code stability (Issue #402) | `tests/contract_error_codes.rs`, `abi/contract_error_codes.golden` |
+| Bindings golden | `tests/bindings_golden.rs` |
+| Counter model proofs (Issue #241) | `tests/counter_proofs.rs` |
+| Property fuzz suite | `src/lib.rs` unit tests, `tests/fuzz/seeds.txt` — see `docs/REGISTRY_INVARIANTS.md` |
+
+Related docs: [ABI](ABI.md) (entry-point reference, pagination selection
+guide, audit reads) · [REGISTRY_INVARIANTS](REGISTRY_INVARIANTS.md)
+(counter/export invariants I1–I10, fuzzing) ·
+[ADMIN_RUNBOOK](ADMIN_RUNBOOK.md) (operator flows).
+
+### Notes
+
+- The contract crate is `#![no_std]` (`src/lib.rs`): `no_std`-incompatible
+  crates (e.g. `proptest`) cannot be used in-contract, so the property suite
+  uses a small xorshift generator instead (see
+  `docs/REGISTRY_INVARIANTS.md`). Integration tests under `tests/` link std
+  normally.
+- When splitting a module (e.g. a future pagination or governance module),
+  update this table, the sketch above, and the `pub use` list in `lib.rs` in
+  the same PR.
 
 ---
 
@@ -64,16 +166,41 @@ reference and migration guide from manual probing.
 
 ```rust
 pub struct ContributorRecord {
-    pub stellar_address: Address,
-    pub registered_at: u32,   // ledger timestamp (u32 saves 4 bytes/record)
-    pub verified: bool,       // set by admin after off-chain GitHub check
+    pub stellar_address: Address, // identity address that owns the registration
+    pub payout_address: Address,  // where payouts go; defaults to stellar_address
+    pub registered_at: u32,       // ledger timestamp (u32 saves 4 bytes/record)
+    pub verified: bool,           // set by admin or Verifier after an off-chain check
+    pub is_bot: bool,
 }
 ```
 
+> **Org and Team registrations do not exist** (Issue #398). This section
+> previously documented an `entity_type` / `org_name` pair on the record, an
+> `EntityType` enum, and `orgidx` / `tmidx` indexes. None of it was reachable:
+> the record carried no such fields, no entry point wrote either index, and the
+> index helpers only called each other. The types and keys have been removed
+> rather than completed — documenting a registry surface the contract does not
+> have is worse than not having it, because an integrator reads the docs and
+> builds against an ABI that will never answer.
+>
+> If organisation-scoped registration is wanted later, it should be designed
+> against the current record shape rather than resurrected from the removed
+> stubs, which never had a write path to review.
+
 ### Design Notes
 
-- **`idx` index:** Soroban does not support iterating arbitrary storage keys. The username index enables `get_all_registered()` without scanning the entire ledger.
+- **`idx` index:** Soroban does not support iterating arbitrary storage keys. The username index enables `get_all_registered()` without scanning the entire ledger. It is the *only* index — see the note above on the removed org/team indexes.
 - **`vcount` counter:** Maintained incrementally so `get_stats()` is O(1) rather than scanning all records.
+- **Single-record reads are O(1) (Issue #291):** `has_record`, `get_address`,
+  and `get_record_proof` resolve through a direct persistent-key lookup on
+  `(REG_KEY, github_username)`. They never walk the flat `idx` index or the
+  chunked index, so their cost is independent of the number of registrations
+  and the number of chunks — a registry with 10k users across 200 chunks reads
+  a single username in exactly the same number of storage operations as an
+  empty one. The chunked index is only consulted by the explicitly paginated
+  export paths (`get_public_paginated`, `get_registered_page`), never by point
+  lookups. `has_record` additionally skips deserialization and the TTL bump
+  that `get_record` performs.
 - **Re-registration:** Updating an existing username overwrites the record. If the Stellar address changes, `verified` resets to `false` unless the address is unchanged.
 - **Rent / Wave budgeting:** Dashboard UIs that estimate storage rent from N
   users should consume the versioned estimator inputs in
@@ -121,6 +248,66 @@ Soroban contracts cannot inspect the transaction source account without an expli
 2. Check `caller == admin || caller == record.stellar_address`
 
 See [Stellar auth documentation](https://developers.stellar.org/docs/build/smart-contracts/example-contracts/auth) for background.
+
+---
+
+## Public reads vs. pause: conformance matrix (Issue #294)
+
+The pause circuit breaker (`pause` / `set_paused` / `emergency_pause`) stops
+**state mutations only**. Every public (no-auth) read must keep working while
+the contract is paused, so that an indexer, the GitHub Action, and the
+dashboard can keep resolving identities and syncing state through a maintenance
+or security freeze. Issue #3 established this for `get_public_paginated`; a
+later change had accidentally regressed it behind `require_not_paused` — that
+gate has been removed and the whole surface is now locked down by a test.
+
+`test_conformance_public_reads_available_while_paused` in
+`tests/integration.rs` pauses the contract and asserts every row below returns
+`Ok` (or a non-`Paused` domain result such as `None`). Adding a public read
+without adding it to that test — or slipping a `require_not_paused` into one of
+these paths — fails CI.
+
+### Public reads — MUST succeed while `paused == true`
+
+| Read | Returns | Notes |
+|------|---------|-------|
+| `get_address(username)` | `Option<ContributorRecord>` | core identity lookup |
+| `has_record(username)` | `bool` | existence check |
+| `get_record_proof(username)` | `RecordProof` | light-client proof |
+| `get_public_paginated(cursor, limit)` | `Result<ExportPage, _>` | **regression fixed here** — was `Paused`, now only `NotInitialized` can fail it |
+| `get_stats()` | `Stats` | totals |
+| `get_verified_count()` / `get_ever_verified_count()` | `u32` | counters |
+| `get_health()` | `HealthSnapshot` | packed status probe |
+| `version()` / `get_version()` / `is_compatible(...)` | version data | schema reads |
+| `is_paused()` / `is_contract_paused()` / `is_emergency_paused()` | `bool` | pause status itself |
+| `emergency_pause_timestamp()` | `u64` | |
+| `get_pause_reason()` | `PauseReason` | why it was paused |
+| `get_role(addr)` / `get_role_holders(...)` / `get_role_holder_count()` | RBAC reads | |
+| `get_cooldown()` / `get_rotation_delay()` / `get_pending_rotation(username)` | config reads | |
+| `get_guardian()` / `get_attestation()` / `get_provenance()` | governance reads | |
+| `get_verification_config()` / `get_challenge(username)` / `get_reserved_list()` / `is_reserved(username)` | config reads | |
+| `get_network_tag()` | `Option<BytesN<32>>` | |
+| `max_username_len()` / `is_username_valid(u)` / `is_address_zero(a)` / `usernames_match(a, b)` | pure helpers | |
+| `get_audit_logs()` / `get_audit_stats()` | audit reads | |
+
+### Admin-only reads — allowed while paused **but still require admin auth**
+
+These are not gated by pause, but they are gated by `admin.require_auth()`, so
+a non-admin caller gets `NotAuthorized` (pause or not). They are listed
+separately and are **not** part of the "no-auth read" conformance set.
+
+| Read | Auth |
+|------|------|
+| `get_all_registered()` | admin |
+| `get_registered_page(offset, limit)` | admin |
+| `get_registered_paginated(cursor, limit)` | admin |
+
+### Policy
+
+Changing which functions the pause flag blocks is **out of scope** for routine
+PRs. If a genuine bug is found (a public read wrongly gated, or a mutation
+wrongly allowed), fix it *and* update this table and the matrix test in the
+same PR.
 
 ---
 
@@ -334,3 +521,22 @@ sequenceDiagram
         S-->>D: optional address + source registry id
     end
 ```
+
+### Storage Key Namespace
+
+The contract uses two independent storage partitions (instance and persistent).
+Storage keys are carefully designed to prevent collisions:
+
+- **Instance keys** (singleton values): Admin address, pause flag, network ID, counters, etc.
+- **Persistent keys** (per-entry, TTL-managed): Registration records, role assignments, pending operations, etc.
+
+Persistent keys use `(Symbol, Context)` tuples where the Symbol discriminator is encoded first in XDR serialization, preventing collisions even when different namespaces use the same context type.
+
+**New contributors must read [STORAGE_KEYS.md](STORAGE_KEYS.md) § Key Namespace Diagram before adding a new storage key.** The diagram shows how discriminators partition the keyspace and documents the collision-prevention strategy.
+
+Automated tests (`tests/storage_keys_collision.rs`) and a linter script (`scripts/check_storage_keys.sh`) verify:
+1. All Symbol constants are unique.
+2. All persistent discriminators are distinct.
+3. The documentation matches the implementation.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md#storage-key-best-practices) for the workflow when adding a new key.

@@ -52,6 +52,24 @@ make build
 # Output: target/wasm32v1-none/release/trustbridge-contract.wasm
 ```
 
+### WASM size budget
+
+The optimized release WASM must remain at or below **204,800 bytes (200 KiB)**.
+This is the deployment budget enforced by CI and mirrored by the Makefile's
+`WASM_SIZE_LIMIT` value. The check uses the same release artifact produced by
+`stellar contract build`, preferring `wasm32v1-none` and falling back to
+`wasm32-unknown-unknown`.
+
+Inspect the current artifact locally with:
+
+```bash
+make wasm-size
+```
+
+CI runs this check immediately after the release build. A size increase beyond
+the budget fails the job; intentional increases must update the documented
+budget, `WASM_SIZE_LIMIT` in the Makefile, and the CI limit together.
+
 ### 3. Deploy and initialize
 
 ```bash
@@ -97,6 +115,49 @@ Required environment variables:
 
 The checklist covers deploy → initialize → register → verify → export → remove, ending with cleanup. Defaults are safe: `NETWORK` defaults to `testnet`, so a mainnet run requires explicit configuration.
 
+### Optional CI live smoke
+
+Maintainers can opt into the invoke-only live testnet smoke job by setting the
+repository variable `TRUSTBRIDGE_LIVE_TESTNET=true`. Configure the existing
+testnet contract and a funded source account using these values:
+
+- Secret `TRUSTBRIDGE_TESTNET_CONTRACT_ID`: pre-deployed testnet contract ID.
+- Secret `TRUSTBRIDGE_TESTNET_SECRET_KEY`: source account secret key, used only
+  to create an ephemeral CI identity.
+- Variable `TRUSTBRIDGE_TESTNET_USERNAME`: an existing username to query.
+
+The job runs `get_stats` and `get_address` against `testnet`; it does not deploy
+or initialize anything. It is restricted to non-pull-request events in the
+canonical repository, which prevents fork PRs from accessing organization
+secrets. Enabling the variable without all required values fails the job
+immediately rather than silently skipping the smoke.
+
+---
+
+## Futurenet vs Testnet Parameters (Issue #671)
+
+Futurenet and Testnet are separate networks: a contract ID, identity funding,
+or deployment JSON from one is **not valid** on the other. Do not copy
+parameters across. `make network-params NETWORK=<net>` prints the values below
+and exits non-zero for an unknown `NETWORK`.
+
+| Parameter | Testnet | Futurenet |
+|-----------|---------|-----------|
+| `NETWORK` | `testnet` (default) | `futurenet` |
+| RPC URL | `https://soroban-testnet.stellar.org` | `https://rpc-futurenet.stellar.org` (`FUTURENET_RPC_URL`) |
+| Network passphrase | `Test SDF Network ; September 2015` | `Test SDF Future Network ; October 2022` |
+| Friendbot | `https://friendbot.stellar.org` (via `--fund`) | `https://friendbot-futurenet.stellar.org` (`FUTURENET_FRIENDBOT_URL`) |
+| Deploy target | `make deploy-testnet` | `make futurenet-smoke` |
+| Deployment record | `deployments/testnet.json` | `deployments/futurenet.json` |
+| Contract / admin addresses | Per-network; re-deploy and re-record | Per-network; re-deploy and re-record |
+| WASM pin (`wasm-hash.pin`) | Must match before release sign-off | Informational — Futurenet may run a newer protocol; rebuild with the pinned toolchain before comparing |
+| Reset cadence | Periodic resets wipe contracts | More frequent resets; expect redeploys |
+
+A `network passphrase` mismatch error almost always means `NETWORK` or the
+CLI identity points at the other network — see
+[TESTNET_CHECKLIST.md](TESTNET_CHECKLIST.md#testnet-vs-futurenet-failure-modes)
+and [FUTURENET_ONBOARDING.md](FUTURENET_ONBOARDING.md).
+
 ---
 
 ## Mainnet Deployment
@@ -109,7 +170,7 @@ Before every mainnet deploy, complete both confirmation steps:
    ```bash
    make wasm-hash-pin
    # or manually:
-   sha256sum target/wasm32v1-none/release/trustbridge-contract.wasm
+   sha256sum target/wasm32v1-none/release/trustbridge_contract.wasm
    ```
    CI enforces this check automatically via the _Compute and verify WASM hash pin_ step.
    If the hash has intentionally changed (new release), run `make wasm-hash-update`, commit
@@ -251,6 +312,14 @@ Audit log lines are emitted to stdout and written to `--audit-log` file:
 | `make check-export-layout` | Verify an export JSON matches the v1 layout snapshot (`FILE=...`) |
 | `make invoke-verify` | Verify a contributor (admin or verifier role) |
 | `make invoke-revoke-verification` | Revoke verification (admin or verifier role) |
+| `make invoke-remove` | Remove a registration |
+| `make invoke-batch-remove` | Directly remove a batch of registrations |
+| `make invoke-set-batch-remove-threshold` | Set dual-control threshold for batch removal |
+| `make invoke-get-batch-remove-threshold` | Read configured dual-control threshold |
+| `make invoke-propose-batch-remove` | Propose dual-control batch removal (admin) |
+| `make invoke-execute-batch-remove` | Execute pending dual-control batch removal (second admin key) |
+| `make invoke-cancel-batch-remove` | Cancel pending dual-control batch removal (admin) |
+| `make invoke-get-pending-batch-remove` | Read pending dual-control proposal |
 | `make bulk-verify-dry-run` | Dry-run bulk verify from `BULK_VERIFY_FILE` |
 | `make bulk-verify` | Bulk verify with pacing and audit log |
 | `make bulk-revoke-dry-run` | Dry-run bulk revoke from `BULK_REVOKE_FILE` |
@@ -592,10 +661,37 @@ artifact hash does not match the pinned value, preventing silent deploy of a wro
 
 ### How it works
 
-1. CI builds the WASM via `stellar contract build`.
-2. The _Compute and verify WASM hash pin_ CI step runs `sha256sum` on the artifact.
+1. The CI `make check` job builds the WASM via `stellar contract build`.
+2. Its _Compute and verify WASM hash pin_ step runs `make wasm-hash-pin WASM_HASH_STRICT=1`,
+   which runs `sha256sum` on `target/wasm32v1-none/release/trustbridge_contract.wasm`.
 3. The computed hash is compared to the value in `wasm-hash.pin`.
 4. A mismatch fails CI with clear instructions to update the pin.
+5. CI runs the gate with `WASM_HASH_STRICT=1`, so an unpinned `PLACEHOLDER` value also
+   fails. The computed hash is written to the job summary so it can be copied into the pin.
+
+### Reproducible inputs
+
+The hash is only stable across machines when every input that ends up in the
+WASM is pinned. `stellar contract build` embeds the rustc version (`rsver`),
+the soroban-sdk version (`rssdkver`), and the CLI version (`cliver`) as
+contract metadata, so the pin depends on:
+
+- the Rust toolchain in `rust-toolchain.toml` (pinned, not `stable`),
+- Stellar CLI `26.1.0` (the CI `make check` job installs this exact release),
+- the committed `Cargo.lock` (dependency versions).
+
+Changing any of these is a WASM change: re-pin in the same commit. The build
+output does not depend on the checkout path, so a Linux workstation with the
+same three inputs reproduces the CI hash.
+
+### Operator flow for (re)pinning
+
+1. Land the contract change and wait for a green `make build` (locally or in CI).
+2. Run `make wasm-hash-update` on the release commit (or copy the SHA-256 from the CI job
+   summary into `wasm-hash.pin`, replacing the previous hash / `PLACEHOLDER` line).
+3. Run `make wasm-hash-pin WASM_HASH_STRICT=1` — it must print `OK: WASM hash matches pin.`
+4. Commit `wasm-hash.pin` in the same PR as the WASM-changing code and include the
+   before/after hashes in the PR description.
 
 ### Local verification
 
@@ -608,6 +704,62 @@ make wasm-hash-update
 git add wasm-hash.pin
 git commit -m "chore: bump wasm-hash.pin after <feature>"
 ```
+
+### Operator verification before deploy
+
+On the release commit, with the pinned toolchain and Stellar CLI 26.1.0:
+
+```bash
+make wasm-hash-pin WASM_HASH_STRICT=1   # must print "OK: WASM hash matches pin."
+```
+
+After uploading, `stellar contract fetch --id <CONTRACT_ID> --network <NETWORK> --out-file deployed.wasm`
+followed by `sha256sum deployed.wasm` must print the same value as `wasm-hash.pin`.
+
+### Explorer verification
+
+After deploying, verify the uploaded WASM on [Stellar Expert](https://stellar.expert/)
+using the explorer for the same network. Stellar Expert displays the hash of the
+WASM code stored for the contract; compare it with the local **SHA-256** hash.
+
+1. Set the deployed contract ID and choose the network used for the deployment:
+
+  ```bash
+  export CONTRACT_ID=$(jq -r .contract_id deployments/testnet.json)
+  export NETWORK=testnet
+  ```
+
+  For mainnet, use `deployments/mainnet.json` and set `NETWORK=mainnet`.
+
+2. Compute the hash of the exact release artifact that was deployed. Use the
+  `wasm32v1-none` path produced by the recommended Stellar CLI build:
+
+  ```bash
+  WASM=target/wasm32v1-none/release/trustbridge-contract.wasm
+  sha256sum "$WASM"
+  grep -v '^#' wasm-hash.pin | grep -v '^$' | tr -d '[:space:]'
+  ```
+
+  The two SHA-256 values must match. If the legacy target was used, compute
+  the hash from `target/wasm32-unknown-unknown/release/trustbridge-contract.wasm`
+  instead. Do not hash a debug or rebuilt artifact that was not deployed.
+
+3. Open the matching contract page:
+
+  - [Stellar Expert Testnet contract explorer](https://stellar.expert/explorer/testnet/contract/)
+  - [Stellar Expert Mainnet contract explorer](https://stellar.expert/explorer/public/contract/)
+
+  Append `$CONTRACT_ID` to the selected URL, or search for the contract ID in
+  Stellar Expert. Confirm that the contract address and network are correct.
+
+4. Open the contract's **Code** or **WASM** details and compare its displayed
+  SHA-256 hash with the value printed in step 2 and the committed
+  `wasm-hash.pin`. Record the contract ID, network, hash, release commit, and
+  explorer URL in the deployment runbook.
+
+Never compare a testnet contract with the mainnet explorer, or vice versa.
+Explorer availability is a convenience check; CI's pinned hash check and the
+local `make wasm-hash-pin` result remain the authoritative artifact checks.
 
 ### Updating the pin (intentional WASM changes)
 
@@ -685,3 +837,127 @@ If intentional feature growth pushes the binary past 200 KB:
    - `.github/workflows/ci.yml` — the `WASM_SIZE_LIMIT:` env variable
 4. Document the new limit and the feature that required the bump in this table.
 5. Include before/after sizes in the PR description.
+
+### Local wasm-size gate
+
+Before opening a PR, always run the wasm size check locally to catch oversized
+builds early:
+
+```bash
+make wasm-size
+```
+
+This command builds the optimized release WASM and compares its size against
+`WASM_SIZE_LIMIT` in the Makefile. If the build exceeds the budget, the command
+exits with a non-zero status and prints the current size vs. the limit.
+
+**Important**: Always run `make wasm-size` after making changes to the contract
+code, especially when adding new features or dependencies. CI runs this check
+immediately after the release build, so a size increase beyond the budget will
+fail the CI job.
+
+### Intentional limit bump process
+
+If a new feature legitimately requires increasing the WASM size budget, follow
+this process:
+
+1. **Document the reason** in the PR description: explain why the size increase
+   is necessary and reference the relevant benchmark data (see
+   [BENCHMARK_BUDGETS.md](./BENCHMARK_BUDGETS.md)).
+2. **Update the Makefile**: increase `WASM_SIZE_LIMIT` in the Makefile.
+3. **Update CI**: increase the corresponding limit in
+   `.github/workflows/ci.yml`.
+4. **Update documentation**: update this section (DEPLOYMENT.md) to reflect the
+   new budget.
+5. **Get approval**: the PR must be reviewed and approved by maintainers before
+   merging.
+
+**Note**: Debug builds are not compared against the release limit. Only
+optimized release builds are checked.
+
+### Troubleshooting
+
+If `make wasm-size` reports a size that differs from what you expect:
+
+- **Stellar contract build vs. cargo build**: The check uses
+  `stellar contract build` (the same command used for deployment), not plain
+  `cargo build`. If you see a size discrepancy, ensure you're comparing release
+  builds, not debug builds.
+- **Feature flags**: Size can vary based on enabled feature flags. Check the
+  Makefile for any feature flags that affect the build.
+- **wasm-opt**: The release build runs wasm-opt for size optimization. If you're
+  building locally without wasm-opt, the size will be larger.
+- **wasm-hash.pin**: The wasm hash pin is separate from the size check. See the
+  [WASM Hash Verification](#wasm-hash-verification) section for details.
+
+### Related documentation
+
+- [BENCHMARK_BUDGETS.md](./BENCHMARK_BUDGETS.md) — Benchmark data and size
+  budgets for different features
+- [CONTRIBUTING.md](./CONTRIBUTING.md) — Contribution guidelines and quality
+  gates
+- [DEPLOYMENT.md](./DEPLOYMENT.md) — This file (deployment guide)
+
+## Provenance digests: SBOM and source (Issue #224)
+
+`WasmProvenance` carries two digests beyond `wasm_hash`:
+
+| Field | Meaning |
+|-------|---------|
+| `sbom_hash` | SHA-256 of the SBOM generated for this build |
+| `source_hash` | SHA-256 of the source tree the WASM was built from |
+
+Both are `Option<BytesN<32>>`. **Every** provenance write path sets them
+explicitly as `None` — the single-admin `upgrade` and the multisig
+`execute_upgrade_proposal` alike (Issue #400; the multisig path previously
+omitted the fields entirely, which did not default them, it failed to compile).
+The chain cannot know either digest at upgrade time, so the operator backfills
+them right after the upgrade:
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- set_provenance_digests --sbom_hash $SBOM_SHA256 --source_hash $SOURCE_SHA256
+```
+
+Passing `None` for either argument leaves the stored value untouched, so the two
+can be filled in independently.
+
+Both upgrade paths behave identically here, so a multisig-executed upgrade needs
+the same `set_provenance_digests` follow-up as an admin-executed one.
+
+**Migration.** Provenance records written before these fields existed decode with
+both digests absent, which reads as "not recorded" rather than "verified empty".
+The migration is one `set_provenance_digests` call per deployed instance; there is
+no automatic backfill, because only the operator holds the build outputs.
+
+Suggested way to produce the values:
+
+```bash
+sha256sum target/wasm32v1-none/release/trustbridge_contract.wasm   # wasm_hash
+sha256sum sbom.spdx.json                                           # sbom_hash
+git archive --format=tar HEAD | sha256sum                          # source_hash
+```
+
+## Pre-upgrade reproducible-build check (Issue #225)
+
+`assert_build(hash)` compares a locally built hash against the hash in stored
+provenance and fails with a typed error instead of a mismatched deploy:
+
+| Situation | Result |
+|-----------|--------|
+| Hash equals stored provenance | `Ok(())` |
+| No provenance recorded yet (never upgraded) | `ProvenanceMissing` (36) |
+| Hash differs | `ProvenanceMismatch` (37) |
+
+It is a read-only check on **provenance only**. It does not read, require, or
+consume an upgrade attestation — `attest_upgrade` remains a separate, optional
+control over the *next* upgrade, while `assert_build` describes what is deployed
+*now*. On a contract that has never been upgraded there is nothing to compare
+against, and the check fails closed rather than passing.
+
+```bash
+stellar contract build
+HASH=$(sha256sum target/wasm32v1-none/release/trustbridge_contract.wasm | cut -d' ' -f1)
+make assert-build CONTRACT_ID=$CONTRACT_ID WASM_HASH=$HASH
+```

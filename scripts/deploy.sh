@@ -11,6 +11,7 @@
 #   SOURCE    — Stellar CLI identity name (default: default)
 #   ALIAS     — Contract alias for Stellar CLI (default: trustbridge)
 #   INIT      — Run initialize after deploy: true | false (default: true)
+#   RPC_URL   — Futurenet RPC endpoint override (optional)
 
 set -euo pipefail
 
@@ -23,6 +24,7 @@ SOURCE="${SOURCE:-default}"
 ALIAS="${ALIAS:-trustbridge}"
 INIT="${INIT:-true}"
 STELLAR="${STELLAR:-stellar}"
+RPC_URL="${RPC_URL:-}"
 
 WASM_V1="target/wasm32v1-none/release/trustbridge-contract.wasm"
 WASM_LEGACY="target/wasm32-unknown-unknown/release/trustbridge-contract.wasm"
@@ -49,10 +51,16 @@ echo "    Source account : ${SOURCE}"
 echo "    Admin address  : ${ADMIN}"
 echo "    WASM           : ${WASM}"
 
+RPC_ARGS=()
+if [[ -n "$RPC_URL" ]]; then
+  RPC_ARGS+=(--rpc-url "$RPC_URL")
+fi
+
 CONTRACT_ID="$("$STELLAR" contract deploy \
   --wasm "$WASM" \
   --source-account "$SOURCE" \
   --network "$NETWORK" \
+  "${RPC_ARGS[@]}" \
   --alias "$ALIAS")"
 
 echo ""
@@ -64,6 +72,7 @@ if [[ "$INIT" == "true" ]]; then
     --id "$CONTRACT_ID" \
     --source-account "$SOURCE" \
     --network "$NETWORK" \
+    "${RPC_ARGS[@]}" \
     --send=yes \
     -- initialize --admin "$ADMIN"
   echo "==> Initialization complete."

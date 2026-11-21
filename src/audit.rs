@@ -9,6 +9,9 @@ use soroban_sdk::{contracttype, Address, String};
 #[contracttype]
 #[repr(u32)]
 pub enum AuditEventType {
+    // Codes are append-only for the same reason `ContractError`'s are: an
+    // indexer stores the number, so renumbering silently re-labels history it
+    // has already written. Add new variants at the end.
     /// Contract initialization
     ContractInitialized = 1,
     /// User registration
@@ -23,6 +26,20 @@ pub enum AuditEventType {
     UnauthorizedAttempt = 6,
     /// Data export (for dashboard sync)
     DataExported = 7,
+    /// A verification was revoked (Issue #397).
+    VerificationRevoked = 8,
+    /// A registration was moved to a new username (Issue #397).
+    UserRenamed = 9,
+    /// The contract was paused, by `pause`, `set_paused` or `emergency_pause`.
+    ContractPaused = 10,
+    /// The contract was unpaused.
+    ContractUnpaused = 11,
+    /// A role was granted, activated, or changed.
+    RoleChanged = 12,
+    /// The contract WASM was replaced.
+    ContractUpgraded = 13,
+    /// The audit configuration was mutated (Issue #412).
+    AuditConfigChanged = 14,
 }
 
 impl AuditEventType {
@@ -37,6 +54,13 @@ impl AuditEventType {
             AuditEventType::AdminAction => "ADMIN_ACTION",
             AuditEventType::UnauthorizedAttempt => "UNAUTHORIZED_ATTEMPT",
             AuditEventType::DataExported => "DATA_EXPORTED",
+            AuditEventType::VerificationRevoked => "VERIFICATION_REVOKED",
+            AuditEventType::UserRenamed => "USER_RENAMED",
+            AuditEventType::ContractPaused => "CONTRACT_PAUSED",
+            AuditEventType::ContractUnpaused => "CONTRACT_UNPAUSED",
+            AuditEventType::RoleChanged => "ROLE_CHANGED",
+            AuditEventType::ContractUpgraded => "CONTRACT_UPGRADED",
+            AuditEventType::AuditConfigChanged => "AUDIT_CONFIG_CHANGED",
         }
     }
 }
@@ -90,14 +114,33 @@ impl AuditLogEntry {
 }
 
 /// Configuration for audit logging.
+///
+/// # Fields and defaults
+///
+/// The contract stores a single `AuditConfig` instance. When no explicit
+/// configuration has been written, [`AuditConfig::default`] is used:
+///
+/// | Field              | Type   | Default | Meaning                                                        |
+/// |--------------------|--------|---------|----------------------------------------------------------------|
+/// | `enabled`          | `bool` | `true`  | Whether audit logging is enabled.                              |
+/// | `max_events`       | `u32`  | `1000`  | Maximum number of events retained in memory.                   |
+/// | `log_unauthorized` | `bool` | `true`  | Whether unauthorized access attempts are recorded.             |
+///
+/// # Mutation authorization
+///
+/// `AuditConfig` may only be mutated by an authorized admin. Callers must
+/// authenticate as the contract admin (or a role holding the audit-admin
+/// permission) before any field is changed; see [`AuditConfig::assert_can_mutate`].
+/// Unauthorized attempts are rejected and, when `log_unauthorized` is set,
+/// recorded as an [`AuditEventType::UnauthorizedAttempt`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[contracttype]
 pub struct AuditConfig {
-    /// Whether audit logging is enabled
+    /// Whether audit logging is enabled. Default: `true`.
     pub enabled: bool,
-    /// Maximum number of events to retain in memory
+    /// Maximum number of events to retain in memory. Default: `1000`.
     pub max_events: u32,
-    /// Whether to log unauthorized attempts
+    /// Whether to log unauthorized attempts. Default: `true`.
     pub log_unauthorized: bool,
 }
 
@@ -119,6 +162,21 @@ impl AuditConfig {
             enabled,
             max_events,
             log_unauthorized,
+        }
+    }
+
+    /// Enforce that `caller` is authorized to mutate the audit configuration.
+    ///
+    /// Only the contract admin may mutate `AuditConfig`. This must be called
+    /// before any field is changed so that unauthorized callers are rejected
+    /// and cannot weaken the audit trail.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `caller` is not the authorized admin.
+    pub fn assert_can_mutate(caller: &Address, admin: &Address) {
+        if caller != admin {
+            panic!("unauthorized: only admin may mutate AuditConfig");
         }
     }
 }
@@ -163,5 +221,67 @@ impl AuditStats {
             AuditEventType::UnauthorizedAttempt => self.unauthorized_attempts += 1,
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{testutils::Address as _, Env};
+
+    #[test]
+    fn default_config_documents_expected_values() {
+        let config = AuditConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.max_events, 1000);
+        assert!(config.log_unauthorized);
+    }
+
+    #[test]
+    fn admin_can_mutate_config() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        // Should not panic for the authorized admin.
+        AuditConfig::assert_can_mutate(&admin, &admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized")]
+    fn unauthorized_caller_cannot_mutate_config() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        AuditConfig::assert_can_mutate(&attacker, &admin);
+    }
+
+    #[test]
+    fn audit_log_rotates_at_max_capacity() {
+        let env = Env::default();
+        let contract_id = env.register(crate::TrustBridgeContract, ());
+        env.as_contract(&contract_id, || {
+            let cap = crate::storage::MAX_AUDIT_LOG_ENTRIES as usize;
+            for i in 0..(cap as u64 + 5) {
+                crate::storage::push_audit_entry(
+                    &env,
+                    AuditLogEntry::new(AuditEventType::UserRegistered, i, None),
+                );
+            }
+            let logs = crate::storage::get_audit_logs(&env);
+            assert_eq!(logs.len(), cap as u32);
+            // Oldest evicted: first retained entry carries timestamp 5.
+            assert_eq!(logs.get(0).unwrap().timestamp, 5);
+            // Newest retained: last entry carries timestamp cap+4.
+            assert_eq!(logs.get(cap as u32 - 1).unwrap().timestamp, cap as u64 + 4);
+            // Stats counters stay monotonic across eviction.
+            let stats = crate::storage::get_audit_stats(&env);
+            assert_eq!(stats.total_events, cap as u32 + 5);
+            assert_eq!(stats.registrations, cap as u32 + 5);
+            // get_audit_logs returns newest entries in order.
+            let mut prev = logs.get(0).unwrap().timestamp;
+            for entry in logs.iter().skip(1) {
+                assert!(entry.timestamp > prev);
+                prev = entry.timestamp;
+            }
+        });
     }
 }

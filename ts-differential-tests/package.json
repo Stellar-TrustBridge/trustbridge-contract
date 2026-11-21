@@ -1,0 +1,13 @@
+{
+  "name": "trustbridge-differential-tests",
+  "version": "1.0.0",
+  "description": "Differential tests between TypeScript bindings and contract reads",
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "test:fixtures": "node --test fixtures.test.js"
+  },
+  "devDependencies": {
+    "@stellar/stellar-sdk": "^13.0.0"
+  }
+}

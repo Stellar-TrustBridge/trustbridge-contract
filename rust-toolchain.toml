@@ -1,2 +1,7 @@
 [toolchain]
-channel = "stable"
+# Pinned (not "stable"): the release WASM embeds the rustc version, so the
+# hash in wasm-hash.pin is only reproducible with this exact toolchain.
+# Bump it together with a re-pin (see docs/DEPLOYMENT.md#wasm-hash-verification).
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32v1-none"]

@@ -1,8 +1,9 @@
 # Registry Invariants
 
-These invariants help reviewers reason about safe contract changes. Every
-invariant below is enforced by the property fuzzing suite in `src/lib.rs`, so a
-change that breaks one fails CI rather than reaching testnet.
+These invariants help reviewers reason about safe contract changes. The
+invariants below are enforced by the property fuzzing suite in `src/lib.rs` or
+the opt-in scale harness, so a change that breaks one is caught before reaching
+testnet.
 
 Related docs: [ABI](ABI.md) · [ARCHITECTURE](ARCHITECTURE.md) · [SECURITY](SECURITY.md)
 
@@ -34,6 +35,25 @@ Related docs: [ABI](ABI.md) · [ARCHITECTURE](ARCHITECTURE.md) · [SECURITY](SEC
 | I6 | Every username resolves to the address last registered for it, with the expected verification flag | `assert_registry_invariants` |
 | I7 | A rejected operation moves no counter and mutates no record | `test_fuzz_failure_paths_leave_invariants_intact` |
 | I8 | Counters never underflow, including removal attempts against an empty registry | `test_fuzz_counters_never_underflow_on_empty_registry` |
+| I9 | A complete paginated export visits every live username exactly once, with no duplicate, skip, or reorder across chunk boundaries | `test_paginated_export_at_10k_users` |
+| I10 | After remove → compact → re-register of the same names, `count` and `vcount` stay in sync with the live record set and the chunked index stays hole-free | `test_issue306_remove_compact_reregister_counter_parity` |
+| I11 | After mixed `batch_verify` / `batch_remove` calls (duplicates, unregistered names), `get_stats().total` equals the enumerable index length and `verified` equals live verified records | `tests/counter_proofs.rs::proof_counters_match_index_under_mixed_batches` |
+| I12 | A rejected batch (`InvalidBatchSize`) moves no counter and leaves the index untouched | `tests/counter_proofs.rs::proof_rejected_batch_moves_no_counter` |
+| I13 | A pagination cursor decodes only against the `INDEX_GEN` it was issued under; a cursor from any other generation (older, newer, or across the `u32::MAX` wrap) returns `InvalidCursor` on both `get_public_paginated` and `get_registered_paginated` | `test_public_paginated_rejects_cursor_from_any_other_generation`, `test_generation_wraps_at_u32_max_and_still_invalidates_cursors` |
+
+### Cursors from other index generations (Issue #693)
+
+Every cursor embeds the `INDEX_GEN` (`idx_gen` instance key) current when it
+was issued; `remove` bumps the generation because it shifts every later
+position. `decode_cursor` (`src/storage.rs`) rejects any mismatch — not only
+older generations — so a stale or forged cursor can never resume at a drifted
+offset and leak or skip records. The bump **wraps** at `u32::MAX` instead of
+saturating: a saturating counter would freeze at `u32::MAX`, and every later
+removal would leave outstanding cursors valid against a shifted index.
+
+Recovery for clients is unchanged: on `InvalidCursor`, restart from
+`cursor = None` (see [DASHBOARD_SYNC.md](DASHBOARD_SYNC.md)). Covered by the
+I13 tests in `tests/cursor_pagination.rs`.
 
 ### `get_verified_count()` / `get_stats().verified` parity (Issue #90)
 
@@ -53,6 +73,42 @@ to unverified and decrements the verified count. The fuzz model mirrors this
 rule directly, so a change to the carry-over logic surfaces as an I2 or I6
 failure.
 
+### Remove → compact → re-register parity (Issue #306)
+
+`remove` then `compact_index` then a re-register of the same names is the
+combination most likely to let the flat index, the chunked index, and the
+`count`/`vcount` counters drift apart. `test_issue306_remove_compact_reregister_counter_parity`
+in `tests/integration.rs` exercises it at a scale that fills several `CHUNK_SIZE`
+chunks: it fills 400 records (8 chunks), removes a middle band to leave holes,
+compacts, re-registers the exact same names at new addresses, then asserts
+`get_stats().total`, `get_verified_count()`, the chunked index, and a full
+paginated walk all agree with the live record set (I10).
+
+### Challenge-period operations preserve count invariants (Issue #214)
+
+The squatter-challenge flow (`start_challenge`, `cancel_challenge`,
+`complete_challenge`, `get_challenge`) sits **outside** the registry counters:
+
+- `start_challenge` and `cancel_challenge` write only the per-username
+  `(chllng, username)` challenge record. They never touch `COUNT_KEY`,
+  `VCOUNT_KEY`, the flat/chunked index, or any `ContributorRecord`, so I1–I6
+  are unaffected by them and no fuzz arm is needed for them.
+- `complete_challenge` removes a live record and decrements the counters
+  through exactly the same code paths `remove` uses (`remove_record` +
+  `remove_from_index` + saturating decrements), so I1, I2, and I5 hold after a
+  completed challenge exactly as they do after a `remove` — and the `remove`
+  path itself *is* fuzz-covered, so the count-affecting branch needs no
+  separate arm.
+- A registrant's self-`remove` during the challenge window clears the
+  challenge atomically (`remove` calls `remove_challenge` on success) and
+  follows the ordinary `remove` counter path.
+- Every rejected challenge call — `ChallengeAlreadyActive`,
+  `ChallengeNotResolvable`, `NoChallengeActive`, `NotAuthorized`, `Paused` —
+  returns before any state write, so I7 (rejected operations mutate nothing)
+  applies unchanged.
+
+End-to-end coverage for all of the above lives in `tests/challenge.rs`.
+
 ---
 
 ## How the Fuzzing Works
@@ -63,9 +119,11 @@ The suite lives alongside the unit tests in `src/lib.rs` under the
 - **No external fuzzing crate.** The contract is `#![no_std]`, which rules out
   `proptest` and `arbitrary`. The suite uses a small xorshift64 generator
   (`Prng`) instead.
-- **Deterministic seeds.** Seeds are fixed constants (`FUZZ_SEEDS`). A CI
-  failure reproduces locally by rerunning the same test, with no flakes and no
-  seed corpus to store.
+- **Deterministic seeds.** Seeds come from the checked-in corpus
+  `tests/fuzz/seeds.txt` (Issue #331), loaded via `fuzz_seeds()`. Setting the
+  `FUZZ_SEEDS` env var (comma-separated hex or decimal, at least 4) overrides
+  the corpus for exploration. A CI failure reproduces locally by rerunning the
+  same test; append any seed that finds a bug to the corpus.
 - **Shadow model.** `Shadow` mirrors the registry outside contract storage.
   Every assertion compares contract state against that independent model, so a
   bug in the contract's own counters cannot mask itself.
@@ -81,15 +139,59 @@ The suite lives alongside the unit tests in `src/lib.rs` under the
 ```bash
 cargo test fuzz              # invariant suite only
 cargo test                   # full suite
-make fuzz                    # same as cargo test fuzz (Makefile target)
+make fuzz                    # cargo test --lib fuzz; fails if 0 tests ran (CI runs this)
+make fuzz FUZZ_SEEDS=0x1,0x2,0x3,0x4   # explore with custom seeds
+make fuzz-parser                 # dedicated export-cursor libFuzzer smoke (1000 runs)
+make fuzz-parser FUZZ_RUNS=0     # keep fuzzing locally until interrupted
 make check                   # fmt + clippy + test + build
 ```
+
+The dedicated `fuzz/export_cursor` target calls the public paginated export
+with arbitrary 8-byte cursors and bounded page limits. It checks that valid
+offsets return bounded pages and malformed generations or out-of-range
+offsets return `InvalidCursor`, without traps or unbounded allocation. Its
+binary seeds live in `fuzz/corpus/export_cursor/`. Install `cargo-fuzz` and
+the Rust nightly toolchain before running `make fuzz-parser`; CI can use the
+default finite run count. Reproduce any crash from the saved artifact with
+`cargo +nightly fuzz run export_cursor fuzz/artifacts/export_cursor/<file>`
+and keep a minimized reproducer in the corpus. This parser target complements
+the deterministic registry-state invariant suite above.
+
+The same decode contract is replayed deterministically by the soak property
+tests in `tests/cursor_pagination.rs` (`test_soak_valid_cursor_prologue`,
+`test_soak_export_cursor_decode_never_panics`,
+`test_soak_generation_bump_invalidates_old_cursors`, Issue #650): fixed seeds
+from `tests/fuzz/seeds.txt` drive thousands of forged-cursor permutations
+through the public export path and assert adversarial bytes return
+`InvalidCursor` without ever panicking, and that a generation bump (any
+removal) invalidates previously valid cursors (I9). Default budget is 512
+iterations per seed for CI; override with `CURSOR_SOAK_ITERATIONS`, or run
+`make soak-cursor` (`CURSOR_SOAK_ITERATIONS=20000`) for a long local soak.
+
+### 10k-user pagination scale test
+
+The host-side integration harness `test_paginated_export_at_10k_users` inserts
+10,000 deterministic usernames, which fills 200 `CHUNK_SIZE`-50 chunks. It
+walks both the admin and public cursor-based exports with 100-record pages and
+asserts the total, page sizes, cursor progression, and exact username sequence.
+The test disables Soroban test-environment resource limits because registration
+and the full host-side walk are intentionally larger than a single mainnet
+invocation. It is feature-gated and excluded from the default fast suite.
+
+Run it with:
+
+```bash
+make test-scale
+```
+
+This is a local or scheduled load check; it does not represent a mainnet
+transaction or deployment test.
 
 ### Coverage profile
 
 | Test | Steps | Purpose |
 |------|-------|---------|
-| `test_fuzz_invariants_hold_across_random_operation_sequences` | 4 seeds × 64 | Broad operation mixing |
+| `test_fuzz_invariants_hold_across_random_operation_sequences` | every corpus seed × 64 | Broad operation mixing |
 | `test_fuzz_invariants_hold_at_contributor_scale` | 256 | Repeated churn on 16-username pool (stresses chunk boundaries) |
 | `test_fuzz_failure_paths_leave_invariants_intact` | 48 | Rejected operations are side-effect free (I7) |
 | `test_fuzz_counters_never_underflow_on_empty_registry` | 32 | Saturating-arithmetic guard (I8) |
@@ -102,4 +204,82 @@ When adding a contract function that mutates state:
 2. Update `Shadow` so the model predicts the new state transition.
 3. Add the resulting invariant to the table above.
 
-A new mutating function with no fuzz arm is a review blocker.
+A new mutating function with no fuzz arm is a review blocker. The lone
+documented exception is the challenge-period flow (Issue #214): its mutators
+either never touch registry counters (`start_challenge` / `cancel_challenge`)
+or remove a record through the already-fuzzed `remove` counter path
+(`complete_challenge`) — see *Challenge-period operations preserve count
+invariants* above. Any other registry-mutating function must be modelled and
+fuzzed.
+
+---
+
+## Bounded Model-Check Proofs for Counter Invariants (Issue #241)
+
+### Why bounded model checking instead of Kani
+
+[Kani](https://model-checking.github.io/kani/) provides LLVM-level symbolic
+execution, but requires a separate LLVM toolchain and adds significant time to
+every CI run. The issue allows a smaller checker as long as it is
+machine-checked and not merely prose.
+
+The harnesses in `tests/counter_proofs.rs` use **exhaustive enumeration over
+small, bounded domains**: they cover every reachable state up to a bounded
+number of operations. For counter arithmetic with no unbounded loops this is
+equivalent to bounded model checking — a pass is a machine-verified proof for
+the bounded domain, not a probabilistic sample.
+
+### Proved invariants
+
+| ID | Invariant | Harness | Bounded domain |
+|----|-----------|---------|----------------|
+| P1 | `verify` increments `verified_count` by exactly 1 | `proof_verify_increments_verified_count` | 1 register + 1 verify |
+| P1b | Verifying N records increments by exactly N | `proof_verify_increments_count_by_n` | N ∈ {2, 4, 8} |
+| P2 | `remove` of verified record decrements `verified_count` by 1 | `proof_remove_decrements_verified_count` | 1 register + 1 verify + 1 remove |
+| P3 | `remove` of unverified record does NOT touch `verified_count` | `proof_remove_does_not_decrement_count_for_unverified` | 1 register + 1 remove |
+| P4 | `verify` is idempotent — second call does NOT double-increment | `proof_verify_is_idempotent_on_verified_count` | 1 register + 2 verify |
+| P5 | `verified <= total` after every operation | `proof_verified_never_exceeds_total_exhaustive` | N ∈ {1, 2, 3, 4} × all phases |
+| P6 | Counters never underflow (saturating-arithmetic guard) | `proof_counters_never_underflow` | 32 remove-spam attempts; 4 register + partial verify + full remove |
+| P7 | `revoke_verification` decrements and is idempotent | `proof_revoke_decrements_and_is_idempotent` | 1 register + 1 verify + 2 revoke |
+
+### Running the proof harness
+
+```bash
+# Run all proof harnesses
+cargo test --test counter_proofs
+
+# Run with output (shows the bounded domain being exercised)
+cargo test --test counter_proofs -- --nocapture
+```
+
+CI runs these in the dedicated `counter-invariant-proofs` job
+(see `.github/workflows/ci.yml`). The job is also indirectly run by the main
+`quality` job via `cargo test` so every PR is covered.
+
+### Saturating vs wrapping counters
+
+The proofs in P6 specifically guard against the `saturating_sub` vs
+`wrapping_sub` distinction. The contract uses saturating arithmetic
+(`saturating_sub`) for all counter decrements, so an attempted underflow
+saturates to 0 rather than wrapping to `u32::MAX`. P6 asserts both that:
+
+1. Failed `remove` calls return `ContractError::NotRegistered` and leave
+   counters at 0 (no side effects on invalid input).
+2. After removing all records from a partially-verified registry, both
+   `total` and `verified` reach 0 and neither counter ever equals `u32::MAX`.
+
+### Unregistered-verify guard
+
+P3 documents the "unregistered verify" edge case: the contract returns
+`ContractError::NotRegistered` before touching any counter, so a verify
+call on a non-existent username cannot inflate `verified_count`. This is
+covered by the property-fuzzing suite (I7) and confirmed by P3 and P6.
+
+### Extending the proof suite
+
+When adding a contract function that mutates `total` or `verified`:
+
+1. Add a `proof_*` test in `tests/counter_proofs.rs`.
+2. Add a row to the table above with the bounded domain.
+3. Ensure the harness asserts the parity invariant (`stats().verified ==
+   get_verified_count()`) after every mutating step.

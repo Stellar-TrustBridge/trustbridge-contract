@@ -1,23 +1,20 @@
 # Futurenet Contributor Onboarding
 
-End-to-end guide for new contributors to interact with **trustbridge-contract** on Futurenet:
-faucet → deploy → register → verify, with expected on-chain events at each step.
+End-to-end guide for new contributors to interact with trustbridge-contract on Futurenet: faucet → deploy → register → verify, with expected on-chain events at each step.
 
 No mainnet keys are required for the happy path.
 
-Related docs: [DEPLOYMENT](DEPLOYMENT.md) · [ABI](ABI.md) · [ADMIN_RUNBOOK](ADMIN_RUNBOOK.md) · [EVENT_INDEXING](EVENT_INDEXING.md)
+Related docs: [DEPLOYMENT](./DEPLOYMENT.md) · [ABI](./ABI.md) · [ADMIN_RUNBOOK](./ADMIN_RUNBOOK.md) · [EVENT_INDEXING](./EVENT_INDEXING.md)
 
 ---
 
 ## Prerequisites
 
 | Tool | Minimum version | Install |
-|------|----------------|---------|
+|------|-----------------|---------|
 | Rust | 1.84 | `rustup update stable` |
-| `wasm32v1-none` target | — | `rustup target add wasm32v1-none` |
+| wasm32v1-none target | — | `rustup target add wasm32v1-none` |
 | Stellar CLI | 26.x | `cargo install --locked stellar-cli@26.1.0` |
-
----
 
 ## Environment variables
 
@@ -29,9 +26,65 @@ export SOURCE=contributor          # Stellar CLI identity name
 export ADMIN=$SOURCE               # for single-identity testing; use a separate admin in production
 ```
 
-All commands below assume these variables are set.
+All commands below assume these variables are set. Futurenet RPC, passphrase,
+and Friendbot differ from Testnet — run `make network-params NETWORK=futurenet`
+or see [DEPLOYMENT.md](DEPLOYMENT.md#futurenet-vs-testnet-parameters-issue-671).
 
 ---
+
+## Makefile Targets
+
+The repository provides several Makefile targets for common operations. Run `make help` to see all available targets.
+
+### Deploy Targets
+
+| Target | Description | Required Variables |
+|--------|-------------|---------------------|
+| `build` | Build optimized WASM via Stellar CLI | None |
+| `build-legacy` | Build with cargo directly (wasm32-unknown-unknown) | None |
+| `deploy-testnet` | Deploy contract to testnet | `SOURCE`, `ADMIN`, `CONTRACT` |
+| `deploy-mainnet` | Deploy contract to mainnet | `SOURCE`, `ADMIN`, `CONTRACT` |
+| `futurenet-smoke` | Run complete deploy and read-only smoke workflow | `SOURCE`, `ADMIN`, `IDENTITY` |
+
+### Invoke Targets
+
+| Target | Description | Required Variables |
+|--------|-------------|---------------------|
+| `invoke-register` | Register GitHub username to Stellar address | `CONTRACT_ID`, `GITHUB_USER`, `STELLAR_ADDR`, `SOURCE`, `NETWORK` |
+| `invoke-lookup` | Look up Stellar address by GitHub username | `CONTRACT_ID`, `GITHUB_USER`, `SOURCE`, `NETWORK` |
+| `invoke-init` | Initialize contract (admin only) | `CONTRACT_ID`, `ADMIN`, `SOURCE`, `NETWORK` |
+| `invoke-stats` | Get contract stats (total, verified) | `CONTRACT_ID`, `SOURCE`, `NETWORK` |
+| `invoke-verify` | Verify a user (admin/verifier only) | `CONTRACT_ID`, `STELLAR_ADDR`, `SOURCE`, `NETWORK` |
+| `invoke-revoke-verification` | Revoke verification (admin only) | `CONTRACT_ID`, `STELLAR_ADDR`, `SOURCE`, `NETWORK` |
+| `invoke-get-all-registered` | Get all registered users (admin only) | `CONTRACT_ID`, `SOURCE`, `NETWORK` |
+| `invoke-export-paginated` | Export registries with pagination | `CONTRACT_ID`, `SOURCE`, `NETWORK` |
+| `invoke-public-paginated` | Public paginated read (no admin) | `CONTRACT_ID`, `SOURCE`, `NETWORK` |
+| `invoke-remove` | Remove a user (self or admin) | `CONTRACT_ID`, `STELLAR_ADDR`, `SOURCE`, `NETWORK` |
+| `invoke-set-paused` | Pause/unpause contract (admin only) | `CONTRACT_ID`, `PAUSED`, `SOURCE`, `NETWORK` |
+| `invoke-extend-ttl` | Extend contract TTL | `CONTRACT_ID`, `SOURCE`, `NETWORK` |
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NETWORK` | `testnet` | Stellar network (testnet/futurenet/mainnet) |
+| `SOURCE` | `default` | Stellar CLI identity name |
+| `ADMIN` | `$(stellar keys address $(SOURCE))` | Admin address |
+| `CONTRACT_ID` | `$(CONTRACT)` | Contract ID (alias for `CONTRACT`) |
+| `CONTRACT` | — | Contract ID |
+| `GITHUB_USER` | — | GitHub username |
+| `STELLAR_ADDR` | — | Stellar G-address |
+| `FUTURENET_RPC_URL` | `https://rpc-futurenet.stellar.org` | Futurenet RPC endpoint |
+| `FUTURENET_FRIENDBOT_URL` | `https://friendbot-futurenet.stellar.org` | Futurenet Friendbot endpoint |
+| `FUTURENET_DRY_RUN` | `false` | Set to `true` to print commands without executing |
+
+---
+
+The repository pins the Futurenet RPC and Friendbot endpoints in the Makefile. Use the smoke target to print the complete workflow without requiring a funded account or contract credentials:
+
+```bash
+make futurenet-smoke FUTURENET_DRY_RUN=true
+```
 
 ## Step 1 — Faucet: fund your Futurenet account
 
@@ -44,9 +97,9 @@ stellar keys address contributor
 # Expected: a G... address
 ```
 
-**Expected outcome:** Account exists on Futurenet with enough XLM to cover deploy + invoke fees.
+The equivalent pinned Friendbot endpoint is `https://friendbot-futurenet.stellar.org`. The smoke target does not fund an account automatically; run the command above first to respect Friendbot rate limits and avoid silently funding the wrong identity.
 
-**No on-chain contract event at this step** (account funding is a Horizon operation, not a contract event).
+**Expected outcome:** Account exists on Futurenet with enough XLM to cover deploy + invoke fees.
 
 ### Faucet rate limits and workarounds
 
@@ -109,6 +162,7 @@ the deploy phase and prints the remediation above instead of an opaque deploy
 failure. See [DEPLOYMENT.md § Futurenet smoke test](DEPLOYMENT.md#futurenet-smoke-test).
 
 ---
+*No on-chain contract event at this step (account funding is a Horizon operation, not a contract event).*
 
 ## Step 2 — Build the contract
 
@@ -119,8 +173,6 @@ make build
 
 The WASM is built with LTO and optimised for size. The output file is ~85 KB.
 
----
-
 ## Step 3 — Deploy to Futurenet
 
 ```bash
@@ -128,30 +180,31 @@ export ADMIN=$(stellar keys address contributor)
 NETWORK=futurenet ADMIN=$ADMIN SOURCE=contributor ./scripts/deploy.sh
 ```
 
-The deploy script:
+Or run the complete deploy and read-only smoke workflow through Make:
 
-1. Builds the WASM if missing.
-2. Runs `stellar contract deploy` and writes `deployments/futurenet.json`.
-3. Calls `initialize(admin)`.
+```bash
+make futurenet-smoke   ADMIN=$ADMIN SOURCE=contributor IDENTITY=contributor
+```
+
+Override `FUTURENET_RPC_URL` or `FUTURENET_FRIENDBOT_URL` only when using a known compatible Futurenet service. `make -n futurenet-smoke` prints the resolved command without requiring secrets or contacting the network.
+
+The deploy script:
+- Builds the WASM if missing.
+- Runs `stellar contract deploy` and writes `deployments/futurenet.json`.
+- Calls `initialize(admin)`.
 
 ```bash
 export CONTRACT_ID=$(cat deployments/futurenet.json | python3 -c "import sys,json; print(json.load(sys.stdin)['contract_id'])")
 ```
 
-**No user-visible contract event** — `initialize` does not emit an event in the current ABI.
+*No user-visible contract event — `initialize` does not emit an event in the current ABI.*
 
-Post-deploy check:
+**Post-deploy check:**
 
 ```bash
-stellar contract invoke \
-  --id $CONTRACT_ID \
-  --source-account contributor \
-  --network futurenet \
-  -- get_stats
+stellar contract invoke   --id $CONTRACT_ID   --source-account contributor   --network futurenet   -- get_stats
 # Expected: {"total":0,"verified":0}
 ```
-
----
 
 ## Step 4 — Register your GitHub username
 
@@ -159,14 +212,7 @@ stellar contract invoke \
 export GITHUB_USER=your-github-username
 export STELLAR_ADDR=$(stellar keys address contributor)
 
-stellar contract invoke \
-  --id $CONTRACT_ID \
-  --source-account contributor \
-  --network futurenet \
-  --send=yes \
-  -- register \
-  --github-username $GITHUB_USER \
-  --stellar-address $STELLAR_ADDR
+stellar contract invoke   --id $CONTRACT_ID   --source-account contributor   --network futurenet   --send=yes   -- register   --github-username $GITHUB_USER   --stellar-address $STELLAR_ADDR
 ```
 
 Or use the Make target:
@@ -340,3 +386,4 @@ for the full onboarding path.
 
 To graduate to testnet, replace `NETWORK=futurenet` with `NETWORK=testnet` and re-run
 from Step 1. Testnet also provides free XLM via Friendbot.
+make invoke-register   CONTRACT_ID=$CONTRACT_ID   GITHUB_USER=$GITHUB_USER   STELLAR_ADDR=$STELLAR_ADDR

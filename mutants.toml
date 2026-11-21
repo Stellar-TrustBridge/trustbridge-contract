@@ -1,0 +1,79 @@
+# cargo-mutants configuration — Issue #243, error.rs exclusion rationale #434
+#
+# Scope: src/utils.rs only. Username validation is a security boundary
+# (homoglyph rejection, hyphen rules, consecutive-hyphen guard) that a
+# weakened check — e.g. a commented-out branch — could silently pass
+# normal unit tests. Mutation testing makes surviving mutants a CI failure.
+#
+# Out of scope: src/lib.rs and the rest of the crate are intentionally
+# excluded — they are too large to mutate in bounded CI time and are covered
+# by the property-fuzzing suite instead (see REGISTRY_INVARIANTS.md).
+#
+# Explicitly out of scope: src/error.rs (Issue #434). Its body is an
+# exhaustive numeric-discriminant table (`code()` / `from_code()`), a
+# total retry-classification match (`category()` / `is_retryable()`), and
+# derived impls. Mutants there are brittle noise, not signal:
+# discriminant swaps and reordered `from_code` arms either fail to compile
+# or are semantically identical, while a `category()` re-label that the
+# suite did catch is already pinned by `tests/contract_error_codes.rs` and
+# the `scripts/check_error_codes.sh` golden gate (enum ↔ from_code ↔
+# abi/contract_error_codes.golden ↔ docs/ABI.md). Covering that mapping a
+# second time via mutation slows the mutation job without adding coverage
+# of storage or business logic.
+#
+# Run locally:
+#   cargo install --locked cargo-mutants@27.1.0
+#   cargo mutants --config mutants.toml --file src/utils.rs
+#
+# `--config` is required: cargo-mutants only reads .cargo/mutants.toml on its
+# own.
+#
+# The command above mutates only src/utils.rs and runs the test suite against
+# each mutant. Survived mutants are printed at the end and listed in
+# mutants.out/missed.txt (cargo-mutants calls them "missed"); each is a gap
+# in the test suite's ability to catch a weakened check.
+#
+# Skipped mutants (timeout/unviable) are not failures — they happen when a
+# mutant causes a compile error or an infinite loop in a no_std context.
+
+# Restrict mutations to the validation module.
+examine_globs = ["src/utils.rs"]
+
+# Exclude the test-only helpers — mutating test code creates false signals.
+# The error.rs patterns below are belt-and-braces: examine_globs already keeps
+# src/error.rs out of scope, but if the scope is ever widened these keep the
+# brittle discriminant/category boilerplate excluded while storage and
+# business-logic mutants keep running.
+exclude_re = [
+  '#\[cfg\(test\)\]',
+  'mod tests',
+  'src/error\.rs',
+  'fn code\b',
+  'fn from_code\b',
+  'fn category\b',
+  'fn is_retryable\b',
+  # Equivalent mutant: the timestamp is shifted into the high 32 bits and the
+  # nonce fits in the low 32, so `|` and `^` produce identical IDs and no test
+  # can distinguish them.
+  'replace \| with \^ in generate_event_id',
+]
+
+# Tests run against each mutant: the `utils::` unit tests plus every test in
+# tests/homoglyph_corpus.rs (the filters below match all of its test names).
+# Keeping the selection here means local runs and the CI job agree, and the
+# baseline is not blocked by unrelated failing tests elsewhere in the crate.
+additional_cargo_test_args = [
+  "--lib",
+  "--test", "homoglyph_corpus",
+  "--",
+  "utils::",
+  "bidirectional", "fullwidth", "homoglyph", "invisible",
+  "mathematical", "mixed_script", "superscript",
+]
+
+# Per-mutant timeout in seconds. The full test suite takes <30 s on GitHub
+# Actions; 120 s gives generous headroom for slow runners.
+minimum_test_timeout = 120
+
+# The unmutated baseline always runs first (cargo-mutants default), so a
+# broken baseline fails fast before any mutant is tested.

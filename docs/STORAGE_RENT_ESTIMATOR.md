@@ -25,6 +25,35 @@ policy constants change in `src/storage.rs`.
 | `estimator_inputs_version` | `1` | Storage key layout, `CHUNK_SIZE`, or TTL constants change |
 | `derived_from` | Wave #7 TTL policy + Issue #2 chunked index + instance keys in `src/storage.rs` | Always cite the commit / PR that changed layout |
 
+## CI golden check
+
+CI (`abi-consistency` job) runs `make storage-rent-estimator`, which is
+`scripts/test_storage_rent_estimator.sh`. It:
+
+1. compares `python3 scripts/storage_rent_estimator.py --users 250 --roles 3 --lastact 100`
+   against `scripts/testdata/storage-rent-estimator.golden.txt`
+2. verifies the `CHUNK_SIZE` mismatch warning against `src/storage.rs`
+3. verifies that invalid inputs fail with the stable errors below
+
+If an intentional change causes drift, follow the refresh procedure in
+[CONTRIBUTING.md → Storage rent estimator golden refresh](CONTRIBUTING.md#storage-rent-estimator-golden-refresh)
+(`make storage-rent-estimator-golden`). Never hand-edit the golden file.
+
+### Estimator errors (stable)
+
+Invalid inputs exit with status **2** and one of these messages on stderr. Scripts
+and dashboards may match on the prefix.
+
+| Condition | Message |
+|---|---|
+| `--inputs` path does not exist | `inputs file not found: <path>` |
+| File is not JSON, or the top level is not an object | `inputs file is not valid JSON: <detail>` |
+| `estimator_inputs_version` is not `1` | `unsupported estimator_inputs_version <v>; expected 1` |
+| `on_chain.layout.chunk_size` or `on_chain.layout.instance_keys` missing | `inputs JSON is missing required field: <dotted.path>` |
+| Negative contributor count | `--users must be >= 0` |
+
+A `CHUNK_SIZE` mismatch is a **warning** (exit 0) printed to stderr, not an error.
+
 ### Re-computation checklist (layout change)
 
 1. Diff `src/storage.rs` for new/removed keys, `CHUNK_SIZE`, `TTL_THRESHOLD`,
@@ -66,7 +95,7 @@ documented alongside `src/storage.rs`. Label anything else as an assumption.
 | `LEDGERS_PER_DAY` | `17_280` | ≈ 5 s ledger close |
 | `TTL_THRESHOLD` | `LEDGERS_PER_DAY * 30` (= `518_400`) | Extend when remaining TTL drops below ~30 days |
 | `TTL_BUMP` | `LEDGERS_PER_DAY * 90` (= `1_555_200`) | Restore TTL to ~90 days from current ledger |
-| `CHUNK_SIZE` | `100` | Usernames per persistent index chunk (Issue #2 / DASHBOARD_SYNC) |
+| `CHUNK_SIZE` | `50` | Usernames per persistent index chunk (`src/storage.rs`; measured in [STORAGE_FOOTPRINT.md](STORAGE_FOOTPRINT.md#measured-footprint-budget-ci-check)) |
 | `DEFAULT_PAGE_LIMIT` | `20` or `50` (see notes) | Export default when `limit == 0` — **not a rent driver** |
 | `MAX_PAGE_LIMIT` | `100` | Export page cap — **not a rent driver** |
 
@@ -82,8 +111,9 @@ permissionless keeper `extend_registry_ttl(usernames)`.
 | Keeper path | Off-chain job supplies username lists; contract extends without deserializing full export |
 | Cadence (ops) | Schedule keeper runs so cold records are bumped before archival — see [DEPLOYMENT.md](DEPLOYMENT.md) / [SECURITY.md](SECURITY.md#storage-ttl) |
 
-**Assumption (ops, not encoded on-chain):** operators run a keeper at least
-every ~25–30 days for cold usernames so entries do not approach archival.
+**Ops cadence:** run the keeper at least every `KEEPER_INTERVAL`
+(~20 days, two-thirds of `TTL_THRESHOLD`) — the step-by-step procedure is the
+[operator playbook](STORAGE_RENT.md#operator-playbook-ttl-extension-issue-660).
 
 ---
 
@@ -104,7 +134,7 @@ Let `N` = number of live registered contributors (`count`).
 | Driver | Formula | Notes |
 |--------|---------|-------|
 | Chunk entries | `ceil(N / CHUNK_SIZE)` | Key `(Symbol("chunk"), chunk_idx)` |
-| Chunk count key | `1` instance entry | `chunkcnt` / chunk-count symbol |
+| Chunk count key | `1` instance entry | `chkcnt` (`CHUNK_CNT_KEY`) |
 
 Dual-write note: registration also maintains the legacy instance `idx`
 `Vec<String>` (full username list). That is **instance** overhead that grows
@@ -147,6 +177,11 @@ from the current Stellar protocol (write fee, rent rate, TTL). Those prices are
 Machine-readable copy:
 [`docs/storage-rent-estimator.inputs.v1.json`](storage-rent-estimator.inputs.v1.json).
 
+CLI: [`scripts/storage_rent_estimator.py`](../scripts/storage_rent_estimator.py)
+consumes the v1 JSON and prints entry counts for a given contributor count
+(`python3 scripts/storage_rent_estimator.py --users 250`). It warns if
+`chunk_size` in the JSON drifts from `CHUNK_SIZE` in `src/storage.rs`.
+
 Logical schema:
 
 ```json
@@ -165,7 +200,7 @@ Logical schema:
       "per_user_persistent_keys": ["reg"],
       "optional_per_user_persistent_keys": ["lastact"],
       "per_address_persistent_keys": ["role"],
-      "instance_keys": ["admin", "count", "vcount", "idx", "pause", "cdown", "lastupg", "ver", "chunkcnt"]
+      "instance_keys": ["admin", "count", "vcount", "idx", "pause", "cdown", "lastupg", "ver", "chkcnt"]
     },
     "cost_drivers": {
       "reg_entries": "N",

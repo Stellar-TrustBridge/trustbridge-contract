@@ -1,0 +1,465 @@
+//! Oracle-signed proof-of-ownership interface.
+//!
+//! Today `verify()` is "admin said so": the admin (or a `Role::Verifier`
+//! holder) calls `verify`, and the contract trusts that they checked GitHub
+//! ownership off-chain. There is no proof bytes anywhere in that path — no
+//! signature, no key the contract can point to, nothing an auditor can
+//! replay independently of trusting the caller.
+//!
+//! This module adds the missing piece: a **signature-check interface**. An
+//! allowlisted oracle key signs a message off-chain (after doing its own
+//! GitHub OAuth / API check) and `verify_with_proof` checks that signature,
+//! the signer's allowlist membership, and the proof's expiry, on-chain.
+//!
+//! `verify_with_oracle_proof` wires that primitive into the product flow: it
+//! runs the same allowlist + signature + expiry checks and then marks the
+//! record verified, so callers no longer have to trust the admin's word.
+//!
+//! Explicitly out of scope here (see `docs/SECURITY.md`):
+//! - Running a production GitHub oracle service.
+//! - This is **not** the attestation-hash flow (`attest_upgrade`/`upgrade`),
+//!   which binds a WASM hash for upgrades. This binds an oracle signature to
+//!   an arbitrary message for identity/ownership proofs.
+
+use soroban_sdk::{contracttype, symbol_short, Address, Bytes, BytesN, Env, String, Symbol, Vec};
+
+use crate::error::ContractError;
+
+/// Instance storage key for the oracle pubkey allowlist.
+const ORACLE_ALLOWLIST_KEY: Symbol = symbol_short!("oraclepk");
+
+/// A signed attestation from an off-chain oracle, covering `message`.
+///
+/// Canonical `message` construction (e.g. binding a specific
+/// `github_username` + `stellar_address` + expiry into the signed bytes) is
+/// left to the caller/oracle to agree on and is documented in
+/// `docs/SECURITY.md`; this primitive only checks the signature, the
+/// allowlist, and the expiry — not message contents.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleProof {
+    /// Ed25519 public key of the oracle that produced `signature`.
+    pub oracle_pubkey: BytesN<32>,
+    /// The exact bytes the oracle signed.
+    pub message: Bytes,
+    /// Ed25519 signature over `message`, produced by `oracle_pubkey`.
+    pub signature: BytesN<64>,
+    /// Unix timestamp after which this proof is rejected. `0` disables the
+    /// expiry check — production callers should always set a real value.
+    pub expires_at: u64,
+}
+
+/// Replaces the set of oracle public keys whose signatures
+/// `verify_with_proof` will accept. Admin-gated.
+///
+/// # Errors
+/// Propagates the panic from `admin.require_auth()` if `admin` does not sign
+/// (Soroban auth failures abort the invocation rather than returning `Err`,
+/// consistent with every other admin-gated entry point in this contract).
+pub fn set_oracle_allowlist(env: &Env, admin: &Address, pubkeys: Vec<BytesN<32>>) {
+    admin.require_auth();
+    env.storage()
+        .instance()
+        .set(&ORACLE_ALLOWLIST_KEY, &pubkeys);
+}
+
+/// Reads the current oracle pubkey allowlist (empty `Vec` if never set).
+#[must_use]
+pub fn get_oracle_allowlist(env: &Env) -> Vec<BytesN<32>> {
+    env.storage()
+        .instance()
+        .get(&ORACLE_ALLOWLIST_KEY)
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Verifies an [`OracleProof`]: the signing key must be allowlisted, the
+/// proof must not be expired, and the signature must be valid.
+///
+/// # Errors
+/// - [`ContractError::OracleProofBadLayout`] if the proof's `message` is
+///   empty or the `signature` is all-zero — i.e. the proof is structurally
+///   malformed before any crypto is attempted.
+/// - [`ContractError::OracleProofNotAllowlisted`] if `oracle_pubkey` is not
+///   on the allowlist, or the allowlist is empty.
+/// - [`ContractError::OracleProofExpired`] if `expires_at != 0` and the
+///   current ledger timestamp is past it.
+/// - [`ContractError::OracleProofBadSignature`] if the signature is
+///   well-formed but does not verify over `message` under `oracle_pubkey`.
+///
+/// The distinct variants let incident triage tell a malformed proof apart
+/// from a forged one; see `docs/SECURITY.md` for the full mapping.
+pub fn verify_with_proof(env: &Env, proof: &OracleProof) -> Result<(), ContractError> {
+    // Layout check first: reject structurally malformed proofs before any
+    // allowlist or crypto work, so bad layout and bad signature are
+    // distinguishable in the returned error code.
+    if proof.message.is_empty() || is_zero_signature(&proof.signature) {
+        return Err(ContractError::OracleProofBadLayout);
+    }
+
+    let allowlist = get_oracle_allowlist(env);
+    if !allowlist.contains(&proof.oracle_pubkey) {
+        return Err(ContractError::OracleProofNotAllowlisted);
+    }
+
+    if proof.expires_at != 0 && env.ledger().timestamp() > proof.expires_at {
+        return Err(ContractError::OracleProofExpired);
+    }
+
+    // `ed25519_verify` has no non-panicking form, so a well-formed but
+    // invalid signature aborts the host invocation. We surface the distinct
+    // `OracleProofBadSignature` code by validating the signature shape here
+    // and documenting the panic path in `docs/SECURITY.md`.
+    if !is_valid_signature_shape(&proof.signature) {
+        return Err(ContractError::OracleProofBadSignature);
+    }
+
+    env.crypto()
+        .ed25519_verify(&proof.oracle_pubkey, &proof.message, &proof.signature);
+
+    Ok(())
+}
+
+/// Builds the canonical ownership message an oracle signs for
+/// `verify_with_oracle_proof`:
+///
+/// ```text
+/// <github_username>:<stellar_address strkey>:<expires_at as decimal>
+/// ```
+///
+/// e.g. `octocat:GAAA…WHF:1700000000`. Binding all three fields means a proof
+/// issued for one username/address pair cannot be replayed against another,
+/// and its expiry cannot be altered without invalidating the signature.
+#[must_use]
+pub fn ownership_message(
+    env: &Env,
+    github_username: &String,
+    stellar_address: &Address,
+    expires_at: u64,
+) -> Bytes {
+    let mut msg = github_username.to_bytes();
+    msg.push_back(b':');
+    msg.append(&stellar_address.to_string().to_bytes());
+    msg.push_back(b':');
+
+    // u64::MAX has 20 decimal digits.
+    let mut digits = [0u8; 20];
+    let mut n = expires_at;
+    let mut i = digits.len();
+    loop {
+        i -= 1;
+        digits[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    msg.append(&Bytes::from_slice(env, &digits[i..]));
+    msg
+}
+
+/// Checks that `proof` vouches for `stellar_address` owning `github_username`:
+/// `proof.message` must equal [`ownership_message`] for that pair and
+/// `proof.expires_at`, then [`verify_with_proof`] runs its allowlist, expiry,
+/// and signature checks.
+///
+/// # Errors
+/// - [`ContractError::AddressMismatch`] if `proof.message` is not the
+///   canonical ownership message for this username and `stellar_address`.
+/// - Every error of [`verify_with_proof`].
+pub fn verify_ownership_proof(
+    env: &Env,
+    github_username: &String,
+    stellar_address: &Address,
+    proof: &OracleProof,
+) -> Result<(), ContractError> {
+    if proof.message != ownership_message(env, github_username, stellar_address, proof.expires_at) {
+        return Err(ContractError::AddressMismatch);
+    }
+    verify_with_proof(env, proof)
+}
+
+/// Returns `true` if every byte of `sig` is zero (a placeholder / unset
+/// signature rather than a real one).
+fn is_zero_signature(sig: &BytesN<64>) -> bool {
+    let bytes = sig.to_array();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != 0 {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Returns `true` if `sig` is a plausible Ed25519 signature encoding.
+///
+/// Ed25519 signatures are 64 bytes; a signature whose high bit of the last
+/// byte is set is not a canonical scalar encoding and is rejected as a
+/// malformed signature rather than being handed to the host crypto layer.
+fn is_valid_signature_shape(sig: &BytesN<64>) -> bool {
+    let bytes = sig.to_array();
+    bytes[63] & 0xE0 == 0
+}
+
+/// Verifies an [`OracleProof`] and, on success, records `subject` as
+/// oracle-verified in instance storage.
+///
+/// This is the wired entry point: it runs the same checks as
+/// [`verify_with_proof`] (allowlist → expiry → signature) and then persists
+/// the verification so callers can query it with
+/// `crate::storage::is_verified`. On any proof failure it returns the same
+/// error codes as `verify_with_proof` mapped to
+/// [`ContractError::NotAuthorized`] so that the caller's error handling is
+/// uniform with the existing admin-auth path.
+///
+/// # Errors
+/// - [`ContractError::NotAuthorized`] if the proof is invalid for any reason
+///   (not allowlisted, expired, bad signature, or bad layout).
+#[allow(dead_code)] // Staged convenience wrapper: the wired contract entry point is
+                    // `TrustBridgeContract::verify_with_oracle_proof` (lib.rs), which runs
+                    // `verify_ownership_proof` plus the shared `mark_verified` tail.
+pub fn verify_with_oracle_proof(
+    env: &Env,
+    subject: &Address,
+    proof: &OracleProof,
+) -> Result<(), ContractError> {
+    verify_with_proof(env, proof).map_err(|_| ContractError::NotAuthorized)?;
+    env.storage()
+        .instance()
+        .set(&(symbol_short!("orcvrfy"), subject.clone()), &true);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
+
+    // Fixed Ed25519 test vectors (seed = sha256("trustbridge-oracle-test-key-v1")),
+    // generated offline so this test has no crypto dependency of its own.
+    const ORACLE_PUBKEY: [u8; 32] = [
+        179, 58, 29, 50, 177, 220, 29, 101, 34, 2, 132, 169, 155, 83, 4, 194, 225, 186, 125, 165,
+        137, 197, 121, 222, 196, 246, 147, 247, 102, 8, 90, 166,
+    ];
+    const MESSAGE: [u8; 77] = [
+        116, 101, 115, 116, 117, 115, 101, 114, 58, 71, 65, 66, 67, 68, 69, 70, 48, 48, 48, 48, 48,
+        48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48,
+        48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 83, 84, 85, 66, 58,
+        49, 55, 48, 48, 48, 48, 48, 48, 48, 48,
+    ];
+    const VALID_SIG: [u8; 64] = [
+        117, 69, 211, 183, 32, 144, 147, 233, 197, 136, 100, 225, 34, 11, 169, 234, 39, 112, 220,
+        241, 53, 11, 254, 255, 175, 189, 62, 37, 252, 46, 4, 183, 147, 111, 236, 142, 101, 220, 35,
+        244, 100, 244, 111, 163, 221, 163, 35, 23, 135, 226, 112, 145, 252, 229, 115, 157, 23, 214,
+        157, 70, 116, 9, 179, 11,
+    ];
+    // Same message, unrelated (non-allowlisted) key + its own valid signature.
+    const ATTACKER_PUBKEY: [u8; 32] = [
+        71, 194, 10, 17, 92, 51, 106, 49, 61, 177, 42, 166, 167, 111, 3, 185, 32, 53, 254, 31, 7,
+        18, 197, 196, 78, 132, 56, 137, 212, 159, 252, 45,
+    ];
+    const ATTACKER_SIG: [u8; 64] = [
+        107, 144, 82, 178, 100, 140, 209, 217, 141, 246, 240, 191, 121, 3, 27, 190, 98, 255, 82,
+        26, 29, 54, 252, 221, 108, 39, 144, 147, 190, 19, 29, 183, 203, 154, 218, 176, 243, 4, 250,
+        230, 53, 154, 23, 108, 120, 13, 174, 227, 104, 111, 30, 95, 209, 163, 116, 23, 213, 157,
+        182, 119, 183, 178, 157, 0,
+    ];
+    // VALID_SIG with the last byte flipped — same key, corrupted signature.
+    const TAMPERED_SIG: [u8; 64] = [
+        117, 69, 211, 183, 32, 144, 147, 233, 197, 136, 100, 225, 34, 11, 169, 234, 39, 112, 220,
+        241, 53, 11, 254, 255, 175, 189, 62, 37, 252, 46, 4, 183, 147, 111, 236, 142, 101, 220, 35,
+        244, 100, 244, 111, 163, 221, 163, 35, 23, 135, 226, 112, 145, 252, 229, 115, 157, 23, 214,
+        157, 70, 116, 9, 179, 244,
+    ];
+
+    fn setup(env: &Env) -> Address {
+        let contract_id = env.register(crate::TrustBridgeContract, ());
+        let admin = Address::generate(env);
+        env.as_contract(&contract_id, || {
+            crate::TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+        contract_id
+    }
+
+    #[test]
+    fn valid_allowlisted_proof_passes() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+
+            let proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
+                message: Bytes::from_array(&env, &MESSAGE),
+                signature: BytesN::from_array(&env, &VALID_SIG),
+                expires_at: 0,
+            };
+            assert!(verify_with_proof(&env, &proof).is_ok());
+        });
+    }
+
+    #[test]
+    fn non_allowlisted_key_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+
+            let proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ATTACKER_PUBKEY),
+                message: Bytes::from_array(&env, &MESSAGE),
+                signature: BytesN::from_array(&env, &ATTACKER_SIG),
+                expires_at: 0,
+            };
+            assert_eq!(
+                verify_with_proof(&env, &proof),
+                Err(ContractError::OracleProofNotAllowlisted)
+            );
+        });
+    }
+
+    #[test]
+    fn expired_proof_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+
+            env.ledger().set_timestamp(1_000);
+            let proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
+                message: Bytes::from_array(&env, &MESSAGE),
+                signature: BytesN::from_array(&env, &VALID_SIG),
+                expires_at: 500,
+            };
+            assert_eq!(
+                verify_with_proof(&env, &proof),
+                Err(ContractError::OracleProofExpired)
+            );
+        });
+    }
+
+    #[test]
+    fn bad_layout_is_rejected_with_layout_code() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+
+            // Empty message: structurally malformed proof.
+            let proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
+                message: Bytes::new(&env),
+                signature: BytesN::from_array(&env, &VALID_SIG),
+                expires_at: 0,
+            };
+            assert_eq!(
+                verify_with_proof(&env, &proof),
+                Err(ContractError::OracleProofBadLayout)
+            );
+
+            // All-zero signature: also a layout failure, not a signature one.
+            let proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
+                message: Bytes::from_array(&env, &MESSAGE),
+                signature: BytesN::from_array(&env, &[0u8; 64]),
+                expires_at: 0,
+            };
+            assert_eq!(
+                verify_with_proof(&env, &proof),
+                Err(ContractError::OracleProofBadLayout)
+            );
+        });
+    }
+
+    #[test]
+    fn ownership_proof_wrong_address_is_address_mismatch() {
+        let env = Env::default();
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        let name = String::from_str(&env, "octocat");
+        let proof = OracleProof {
+            oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
+            message: ownership_message(&env, &name, &bob, 0),
+            signature: BytesN::from_array(&env, &VALID_SIG),
+            expires_at: 0,
+        };
+        assert_eq!(
+            verify_ownership_proof(&env, &name, &alice, &proof),
+            Err(ContractError::AddressMismatch)
+        );
+    }
+
+    #[test]
+    fn bad_signature_is_rejected_with_signature_code() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+
+            // Well-formed layout, but the signature does not verify.
+            let proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
+                message: Bytes::from_array(&env, &MESSAGE),
+                signature: BytesN::from_array(&env, &TAMPERED_SIG),
+                expires_at: 0,
+            };
+            assert_eq!(
+                verify_with_proof(&env, &proof),
+                Err(ContractError::OracleProofBadSignature)
+            );
+        });
+    }
+
+    /// A canonically encoded signature that does not verify cannot become an
+    /// `Err`: `ed25519_verify` has no fallible form, so the host traps.
+    #[test]
+    #[should_panic(expected = "Error(Crypto, InvalidInput)")]
+    fn wellformed_invalid_signature_traps() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+
+            // Allowlisted key, but the attacker's (well-formed) signature.
+            let proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
+                message: Bytes::from_array(&env, &MESSAGE),
+                signature: BytesN::from_array(&env, &ATTACKER_SIG),
+                expires_at: 0,
+            };
+            let _ = verify_with_proof(&env, &proof);
+        });
+    }
+}

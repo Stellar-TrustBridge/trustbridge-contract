@@ -20,12 +20,25 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Admin storage mutated after init | No public setter writes `ADMIN_KEY` — only `initialize` does, gated by `AlreadyInitialized` (Issue #97) |
 | Malformed or oversized username input | `InvalidUsername` error, checked before auth and before any write |
 | Unicode / homoglyph username spoofing | Byte-wise ASCII validation rejects all non-ASCII bytes; see **Unicode Rejection Policy** section |
+| Registering the zero/burn address (reachable under `mock_all_auths` / sandboxes that skip `require_auth`) | `is_zero_address` guard in `register` / `register_sponsored` / `request_address_rotation` returns `ZeroAddress` before any write — pinned by `tests/zero_address.rs` against current SDK mock-auth APIs; removing the guard fails those tests (Issue #300) |
 | Consecutive-hyphen username bypass | `InvalidUsername` error — consecutive hyphens now enforced on-chain |
 | Counter drift from rejected calls | Invariant property fuzzing, see [REGISTRY_INVARIANTS](REGISTRY_INVARIANTS.md) |
 | Stale trust surviving a remove → re-register cycle (a new registrant inheriting the previous owner's verified status or address binding) | `remove` unconditionally clears the stored record; `register` on a removed username always starts a fresh, unverified record — see [Re-registration After Remove](#re-registration-after-remove) (Issue #93) |
 | Compromised or unpinned RPC client dependency | Crate validation checklist below |
 | Compromised Verifier key silently revoking payout eligibility | `Role::Verifier` and `Role::Revoker` are distinct — Issue #212 |
 | Admin force-removing a name without a grace period | Challenge flow enforces on-chain `resolve_after` delay — Issue #214 |
+| Off-boarded contractor or bot key lingering as a live `Verifier`/`Revoker` forever | Optional per-grant expiry via `set_role_with_expiry`, checked lazily by `get_role` — see [Role Expiry](#role-expiry-issue-221) |
+| Stolen or transferred GitHub account staying `verified` (and payout-eligible) indefinitely | `config_verification`'s `expires_in` now drives an actual expiry, checked via `is_verification_active` — see [Time-Bounded Verification](#time-bounded-verification-issue-218) |
+| Single compromised admin key wiping a large slice of the registry in one `batch_remove` call | Above a configurable size threshold, `batch_remove` requires a second, distinct admin-equivalent signature — see [Dual-Control batch_remove](#dual-control-batch_remove-issue-219) |
+| Auditor trusting an unbound, unsigned `export_registry.sh` JSON dump | `export_attestation` binds a page to a SHA-256 digest, version, and ledger for offline comparison — see [Signed Export Attestation](#signed-export-attestation-issue-223) |
+
+### Export record binding (Issue #672)
+
+Every `ExportPage.merkle_root` binds each exported record's username, Stellar
+address, verified flag, and page position. Altering any of these fields,
+reordering rows, or dropping a row after export produces a different root, so
+a consumer recomputing the root with `merkle_leaf_hash` detects the tamper.
+Locked by `tests/record_proof.rs::test_export_binding_rejects_tampered_records`.
 
 ### Out of Scope (handled off-chain)
 
@@ -38,7 +51,82 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 
 ---
 
+## Cross-Contract Callers and Admin Exports
+
+A sibling contract (for example, a payout contract) may call this registry
+cross-contract. `src/version.rs` exposes `CROSS_CONTRACT_READ_MIN_VERSION` /
+`Version::supports_cross_contract_reads()` so such a caller can assert
+compatibility the same way it does for `batch_verify`.
+
+### Read surface exposed to a contract caller (Issue #149)
+
+These functions are read-only (no `.set` / `.remove`) and require **no
+authorization** beyond the standard pause guard where noted, so a calling
+contract can invoke them with no signature from the registry admin or any
+registrant:
+
+| Function | Notes |
+|---|---|
+| `get_address(github_username)` | Core identity lookup |
+| `has_record(github_username)` | Cheap existence check |
+| `get_record_proof(github_username)` | Light-client existence proof |
+| `get_public_paginated(cursor, limit)` | Paginated read; returns `Paused` while the registry is paused |
+| `get_stats()` | `{ total, verified, ever_verified }` |
+| `get_verified_count()` / `get_ever_verified_count()` | Live / monotonic counts |
+| `get_role(address)` | RBAC lookup, e.g. to gate a payout on `Role::Verifier` |
+| `is_paused()` / `is_contract_paused()` | Pause-state check |
+| `is_registration_in_cooldown(github_username)` | Cooldown-window check |
+| `version()` / `is_compatible(major, minor, patch)` | Version handshake |
+| `max_username_len()` / `is_username_valid(...)` / `usernames_match(...)` | Pure validation helpers |
+
+The canonical copy of this list lives in `docs/ABI.md` §
+*Cross-Contract Read Interface*; keep the two in sync.
+
+### Admin exports are **not** part of that surface
+
+`get_all_registered`, `get_registered_page`, and `get_registered_paginated`
+each call `admin.require_auth()` before touching storage. A cross-contract
+invocation executes in the **calling** contract's authorization context — it
+cannot supply the registry admin's signature — so these calls fail auth when
+invoked from another contract, regardless of the caller's identity or how the
+test environment mocks auth. This is deliberate: the registry has no
+"trusted contract" allowlist, so a widened export surface would let *any*
+deployed contract exfiltrate the entire registry, not just an intended
+consumer. A sibling contract that needs a bulk export must go through the
+admin's own off-chain tooling.
+
+This is enforced by tests, not left as a comment:
+`tests/integration.rs::cross_contract_caller_cannot_run_get_registered_paginated`,
+`…_get_registered_page`, `…_get_all_registered`, and
+`cross_contract_public_read_surface_is_reachable` (the positive control), plus
+`src/version.rs::test_export_paginated_requires_admin_auth`.
+
+---
+
 ## Admin Key Management
+
+### Guardian vs admin capabilities (Issue #635)
+
+Guardian is a narrowly-scoped circuit-breaker key, not a second admin. Source
+of truth is `src/lib.rs` (`emergency_pause` allows admin **or** guardian;
+everything else below requires admin) and `tests/auth_matrix.csv`.
+
+| Entrypoint | Admin | Guardian | Verifier | Notes |
+|---|---|---|---|---|
+| `emergency_pause` | ✅ | ✅ (exclusive non-admin path) | ❌ | Only entrypoint the guardian can call; matches `emergency_pause,guardian` allow row |
+| `clear_emergency_pause` | ✅ | ❌ (`NotAuthorized`) | ❌ | Guardian deliberately cannot clear; admin review required |
+| `set_guardian` / `remove_guardian` | ✅ | ❌ | ❌ | Guardian onboarding is admin-only; see [ADMIN_RUNBOOK guardian recipes](ADMIN_RUNBOOK.md#guardian-recipes) |
+| `set_role` / `remove_role` / `set_role_with_expiry` / `activate_role` | ✅ | ❌ | ❌ | Guardian cannot grant roles, even to itself, unless it also holds admin |
+| `upgrade` / `attest_upgrade` / `clear_staged` | ✅ | ❌ | ❌ | Admin-only upgrade and staged-slot clearing; `clear_staged` is idempotent |
+| `stage_wasm` | ✅ | ❌ | ❌ | Admin or Upgrader-role holder; guardian/verifier alone cannot stage |
+| `get_staged` | ✅ | ✅ | ✅ | Public read, no auth (also available to unauthenticated callers) |
+| `propose_multisig_upgrade` / `approve_upgrade` / `execute_upgrade` | ✅ | ❌ | ❌ | Also callable by Upgrader-role holders, subject to proposal rules |
+| `batch_remove` (incl. dual-control propose/execute) | ✅ | ❌ | ❌ | Large removes need admin, never guardian |
+| `pause` / `unpause` | ✅ | ❌ | ❌ | Plain pause is admin-only; guardian path is `emergency_pause` only |
+
+Notes: an expired guardian role behaves like any expired role (treated as
+absent at auth time). Guardian onboarding: [ADMIN_RUNBOOK](ADMIN_RUNBOOK.md#guardian-recipes);
+incident freeze flow: [ADMIN_RUNBOOK freeze during an incident](ADMIN_RUNBOOK.md#freeze-during-an-incident).
 
 The admin address is **immutable** after `initialize` unless rotated via the
 two-step admin transfer flow introduced in Issue #195.
@@ -110,6 +198,54 @@ The `is_attestation_required()` read exposes the current config for monitoring a
 - *Attacker publishes a forged attestation*: They still need admin auth on `attest_upgrade`, so a compromise of the admin key is the prerequisite — the same threat as before, but now visible before the swap.
 - *Attestation expired before upgrade*: `AttestationExpired` is returned; the stale record is cleared. The admin must re-attest with a new `expires_at`.
 
+### Staged WASM slot (Issue #300)
+
+`stage_wasm(caller, hash)` writes the intended next binary to the on-chain
+staged slot before the upgrade transaction is submitted.  Any observer can
+call `get_staged()` (no auth) to confirm what is coming.
+
+When a hash is staged, `upgrade` and `execute_upgrade` both reject a
+mismatching hash with `StagedWasmMismatch` (code 34).  With nothing staged,
+both paths are unaffected.
+
+**How this differs from attestation:**
+
+| | Attestation (`attest_upgrade`) | Staged slot (`stage_wasm`) |
+|---|---|---|
+| Expiry | Yes (`expires_at`) | No (permanent until cleared or consumed) |
+| Required flag | Optional (`set_attestation_required`) | Advisory — never blocks if absent |
+| Error on mismatch | `UnattestedWasm` (code 13) | `StagedWasmMismatch` (code 34) |
+| Who reads it | Anyone | Anyone |
+
+Use both together for maximum transparency: stage the hash first (public
+notice, no expiry), then attest it (time-bounded, optionally required).
+
+### On-chain M-of-N multisig upgrade (Issue #301)
+
+The `propose_multisig_upgrade` → `approve_upgrade` (×N) → `execute_upgrade`
+flow adds on-chain multi-party authorisation for WASM upgrades.
+
+**Properties:**
+
+- `get_upgrade_threshold()` is the required number of distinct approvals
+  (default `1` — existing single-admin behavior, no breaking change).
+- The proposer counts as one approval; additional `approve_upgrade` calls add
+  to the total.
+- `execute_upgrade` is blocked until the delay elapses **and** approvals ≥
+  threshold.
+- An attacker who steals one key cannot execute an upgrade if `threshold ≥ 2`
+  — they would need to compromise M distinct key-holders simultaneously.
+- Any admin may `cancel_upgrade_proposal` at any time, including while paused.
+- At most one proposal is live at a time.
+
+**Scope:** This flow covers upgrade proposals only.  Other admin functions
+remain single-admin at the contract level.  For full multi-party admin
+governance, use a Stellar multisig account as the admin address (recommended
+in any case — see [Admin Key Management](#admin-key-management)).
+
+See [ADMIN_RUNBOOK.md — Multisig Upgrade Flow](ADMIN_RUNBOOK.md#multisig-upgrade-flow-issue-301)
+for paste-ready CLI recipes and the complete error reference.
+
 
 
 When pause mode is active, guarded entry points fail with
@@ -127,22 +263,31 @@ Paused function matrix:
 | `upgrade` | Rejected with `Paused` |
 | `migrate` | Rejected with `Paused` |
 | `set_role` / `remove_role` | Rejected with `Paused` |
-| `get_public_paginated` | Rejected with `Paused` |
 
 Allowed while paused:
 
 | Function | Behavior while paused |
 |---------|------------------------|
-| `get_address`, `has_record`, `get_stats` | Allowed read-only lookups |
-| `get_all_registered`, `get_registered_page`, `get_registered_paginated` | Allowed for admin/export workflows |
-| `is_paused`, `is_contract_paused`, `version`, `is_compatible` | Allowed status and compatibility reads |
+| `get_address`, `has_record`, `get_record_proof`, `get_stats`, `get_verified_count`, `get_ever_verified_count` | Allowed read-only lookups |
+| `get_public_paginated` | **Allowed (Issue #294).** Public read — an indexer/dashboard must keep syncing during a pause. The `require_not_paused` gate that used to sit here was removed. |
+| `get_all_registered`, `get_registered_page`, `get_registered_paginated` | Allowed, but **require admin auth** — see the conformance matrix in [ARCHITECTURE.md](ARCHITECTURE.md#public-reads-vs-pause-conformance-matrix-issue-294) |
+| `get_health`, `is_paused`, `is_contract_paused`, `get_pause_reason`, `version`, `get_version`, `is_compatible` | Allowed status and compatibility reads |
 | `pause`, `unpause`, `set_paused` | Allowed admin controls for freeze lifecycle |
+
+The full, test-enforced list of public reads that must succeed while paused is
+the conformance matrix in
+[ARCHITECTURE.md](ARCHITECTURE.md#public-reads-vs-pause-conformance-matrix-issue-294),
+checked by `test_conformance_public_reads_available_while_paused` in
+`tests/integration.rs`.
 
 ---
 
 ## Registration Integrity
 
 - Registering a username requires the Stellar address owner to sign
+- Sponsored registration via `register_sponsored` requires both the sponsor's signature (`sponsor.require_auth()`) and the registrant's signature (`stellar_address.require_auth()`).
+  > [!IMPORTANT]
+  > **Why the sponsor cannot skip address auth:** If a sponsor could register a username on behalf of a Stellar address without that address owner's signature, a malicious sponsor could link a victim's GitHub username to a different Stellar address they control, hijacking their future rewards/payouts. Requiring the registrant's signature ensures self-auth protection is never bypassed.
 - Re-registration with a new address resets verification status
 - There is no on-chain proof of GitHub ownership at registration time — verification is a separate admin step
 - Wave #49 locks the address-update invariant: after a verified username is
@@ -156,8 +301,57 @@ The contract enforces per-username action rate-limiting during `register()`:
 
 - When `cooldown` is non-zero, `register()` checks whether `is_in_cooldown()` is true for `github_username`.
 - If the configured cooldown window has not elapsed since the username's last mutating action, `register()` fails with `CooldownActive` (code 8).
-- Upon a successful `register()`, the username's last action timestamp is updated via `set_last_action()`.
+- Upon a successful `register()`, the username's last action timestamp is updated via `set_last_action()`. `verify()` and the username/address-change paths stamp it the same way.
 - First-time registrations have no recorded prior action timestamp (0), allowing initial registration to succeed immediately.
+
+**Enforcement is inline and automatic.** There is no public `record_action`
+entry point. An earlier build exported an unauthenticated
+`record_action(github_username)` timestamp setter; because it required no auth,
+any caller could push an arbitrary username into cooldown and block its
+registration. It was removed in Issue #296. `is_registration_in_cooldown()`
+remains as the read-only view of the enforced state.
+
+### Bot Account Registration and Flagging (Issue #644)
+
+Bot/CI accounts are **not denied at registration time**. A bot account
+registers like any other contributor; the mitigation is a post-registration
+flag, `is_bot`, set through `set_bot_status` (Issue #236) by the contract
+admin or the registrant itself. This is deliberate: legitimate CI bots
+(e.g. release automation, Wave tooling) must be able to register when policy
+allows, and a username-pattern deny list at `register` would either block
+those accounts or chase an endless stream of novel bot names.
+
+Every deny path that *does* exist on the bot-flag surface returns a
+documented, stable `ContractError` code so dashboard and bot-mitigation
+pipelines can classify failures without parsing messages:
+
+| Path | Condition | Error | Code |
+|------|-----------|-------|------|
+| `set_bot_status` | Caller is neither the admin nor the record's registrant | `NotAuthorized` | 3 |
+| `set_bot_status` | `github_username` is not registered | `NotRegistered` | 4 |
+| `set_bot_status` | Contract is paused (checked before any bot logic) | `Paused` | 7 |
+| `register` / `register_sponsored` | Contract is paused | `Paused` | 7 |
+| `register` / `register_sponsored` | Username fails GitHub shape validation | `InvalidUsername` | 11 |
+
+Additional invariants:
+
+- **The flag survives re-registration.** `register` copies `is_bot` from the
+  existing record; a bot cannot shed its flag by re-registering, and a
+  legitimate CI bot keeps its flag across an address refresh.
+- **Unauthorized `set_bot_status` attempts are audit-logged.** The
+  `NotAuthorized` path calls `record_unauthorized_attempt` (Issue #412), so
+  probing against the bot-flag surface appears in `get_audit_logs` and bumps
+  `AuditStats.unauthorized_attempts`.
+- **`BotStatusChangedEvent`** is emitted on every successful flag change so
+  dashboards can exclude `is_bot == true` records from human contributor
+  stats (see [DASHBOARD_SYNC.md](DASHBOARD_SYNC.md)).
+
+Covered by `tests/integration.rs`
+(`test_set_bot_status_unauthorized_returns_stable_code`,
+`test_set_bot_status_unregistered_returns_stable_code`,
+`test_set_bot_status_paused_fails_before_bot_logic`,
+`test_bot_flag_preserved_across_reregistration`) and the unit tests in
+`src/lib.rs` (`test_bot_set_by_unauthorized_fails`, …).
 
 ---
 
@@ -188,6 +382,77 @@ If a rightful owner discovers that their GitHub username has been squatted on-ch
 - **Will they receive my payouts?** No. Payouts require the record to be verified. The squatter cannot pass the admin verification check.
 - **How do I reclaim my username?** Open a support ticket / dispute with the TrustBridge administrators. They will remove the squatter's record so you can register your address.
 - **Does the contract verify my GitHub handle automatically?** No. There is **no on-chain verification proof** of GitHub identity at registration time. Verification is entirely off-chain/administrative.
+
+### 5. Username Case-Folding (Issue #194)
+
+GitHub logins are case-insensitive: `Alice` and `alice` are the same GitHub
+account. Before this fix, persistent storage keys were built from the raw
+input string, so registering `alice` and later `Alice` created **two
+independent records** — a squatter could register a case variant of an
+already-registered, already-verified username and siphon future payouts sent
+to that variant, since the contract had no way to know the two strings named
+the same account.
+
+**The fold.** Every persistent key namespaced by a username —
+`(reg, username)`, `(chllng, username)`, `(pend_rev, username)`,
+`(lastact, username)`, `(pendrot, username)`, and the flat/chunked enumeration
+index — is built from `utils::canonicalize_username`, which ASCII-lowercases
+the input (`crate::storage`'s private `canon` helper wraps it at the point
+every key is constructed). The fold is byte-wise and ASCII-only: only
+`b'A'..=b'Z'` bytes are lowered, so it can never change the byte length of an
+already-ASCII-validated username, and it never attempts a Unicode-aware case
+fold. `register` already rejects non-ASCII usernames outright
+(`is_valid_github_username`), so every key this fold ever runs on is pure
+ASCII by construction.
+
+**What this closes.** `Alice`, `ALICE`, and `alice` all resolve to the same
+underlying record: registering any case variant of an existing login updates
+that same record rather than creating a new one, so the existing
+double-auth transfer protection (`old.stellar_address.require_auth()`) applies
+to a case-variant "takeover" attempt exactly as it would to a same-case
+re-registration. Lookups (`get_address`, `has_record`, `remove`, `verify`,
+`revoke_verification`, …) resolve the same way regardless of the casing the
+caller passes in.
+
+**Canonical vs raw.** Storage, the enumeration index, and every paginated
+export (`get_registered_paginated`, `get_public_paginated`,
+`get_all_registered`) all report the **canonical (lowercased)** form of a
+username, since that is what the storage key actually is. Domain events
+(`RegisteredEvent`, `VerifiedEvent`, …) still carry the **raw** string exactly
+as the caller submitted it in that call, for display/audit fidelity —
+indexers that need to correlate an event against export/lookup data should
+fold the event's username themselves before comparing.
+
+**Explicitly out of scope** (tracked as separate work): Unicode case folding
+(`IDNA`/`UTS46`-style normalization) and homoglyph detection (e.g. Cyrillic
+`а` vs ASCII `a`) — see **Unicode Rejection Policy** below, which already
+rejects all non-ASCII bytes outright, so homoglyph substitution cannot reach
+the storage layer in the first place.
+
+**Migration note for a deployment with existing mixed-case keys.** This
+contract has not been deployed to mainnet (see **Audit Status** below), so no
+runtime migration function ships with this fix. If a future deployment ever
+needs to reconcile pre-existing `Alice`/`alice`-style duplicate records, the
+recommended procedure is fully off-chain and uses tooling that already
+exists:
+
+1. Walk the full registry with `get_registered_paginated` (admin-gated) or
+   `get_public_paginated`, paging until `has_more == false`.
+2. Group the exported `(github_username, ContributorRecord)` pairs by
+   `canonicalize_username`-equivalent key (i.e. ASCII-lowercased) off-chain.
+   Any group with more than one entry is a pre-fix duplicate.
+3. For each duplicate group, an operator decides the surviving record —
+   typically the `verified` one, or the one with the earliest
+   `registered_at` if none is verified — following the existing dispute
+   process in **Username Squatting Mitigations** above.
+4. `remove` every losing entry in the group (admin-authorized; `batch_remove`
+   for more than a handful), then confirm via `has_record` that only the
+   canonical key remains before re-verifying the survivor if needed.
+
+Because canonicalization happens inside `set_record`/`get_record` themselves,
+once a deployment is running this fix a fresh registration can never
+recreate a duplicate — the reconciliation above is a one-time cleanup for
+data written before the fix, not an ongoing concern.
 
 ---
 
@@ -290,6 +555,39 @@ The following are all rejected (see comprehensive tests in `src/utils.rs`):
 These tests confirm that every form of non-ASCII input — whether a visually
 distinct character like an emoji or a deceptive homoglyph like Cyrillic 'а' —
 is caught and rejected, while every valid ASCII username shape remains accepted.
+
+### Extended homoglyph corpus (Issue #299)
+
+Beyond the baseline homoglyph tests in `src/utils.rs`, `tests/homoglyph_corpus.rs`
+provides an exhaustive test corpus covering additional confusable attack vectors:
+
+**Comprehensive lookalike coverage:**
+- **Cyrillic**: 23 homoglyphs including а, е, о, р, с, х, у (U+0430–U+0443)
+- **Greek**: 20 homoglyphs including α, ο, ν, ρ, τ (U+03B1–U+03C7)
+- **Latin extended**: 16 diacritic variants (á, é, ñ, ü, ç, etc.)
+
+**Invisible characters:**
+- Zero-width joiner (U+200D), zero-width non-joiner (U+200C)
+- Zero-width space (U+200B), word joiner (U+2060)
+- Soft hyphen (U+00AD), invisible operators (U+2061–U+2063)
+
+**Bidirectional text attacks:**
+- Left-to-right / right-to-left marks (U+200E, U+200F)
+- Bidi embedding and override controls (U+202A–U+202E)
+- Directional isolates (U+2066–U+2069)
+
+**Advanced confusables:**
+- Full-width Latin forms (U+FF21–U+FF5A, used in Japanese text)
+- Mathematical alphanumeric symbols (U+1D400–U+1D7FF, bold/italic/script variants)
+- Superscripts, subscripts, and modifier letters
+
+**Documented guarantee:** "We reject all non-ASCII." Every codepoint above U+007F
+is blocked before it reaches storage, regardless of how it renders. The corpus
+tests validate this property against 78+ known confusable characters and ensure
+no bypass path exists at the `register()` entry point.
+
+Run the full corpus: `cargo test homoglyph` or `cargo test unicode`
+(CI: the `homoglyph_corpus` job runs `cargo test --test homoglyph_corpus` on every pull request).
 
 ### Performance
 
@@ -501,6 +799,95 @@ To prevent a malicious or erroneous caller from exhausting the network CPU/memor
 
 ---
 
+## Dual-Control `batch_remove` Auth Negative Matrix (Issue #219)
+
+Dashboard operators and auditors need the full failure surface of the dual-control
+`batch_remove` entrypoints spelled out. The matrix below covers every unauthorized and
+invalid state transition across all six entrypoints. Each cell maps to a test in
+`tests/batch_remove_dual_control.rs`.
+
+Cross-reference: [`tests/auth_matrix.csv`](../tests/auth_matrix.csv) (every row is
+executed by [`tests/auth_matrix.rs`](../tests/auth_matrix.rs); see
+[CONTRIBUTING — Authorization matrix](CONTRIBUTING.md#authorization-matrix)) ·
+[ABI reference](ABI.md) · [ADMIN_RUNBOOK.md — Dual-Control batch_remove](ADMIN_RUNBOOK.md)
+
+Auth rules in brief:
+
+```
+propose_batch_remove:
+  caller == contract admin          →  allowed (subject to pause and pending-proposal checks)
+  caller holds Role::Admin          →  NotAuthorized (only the contract admin may propose)
+  any other caller                  →  NotAuthorized
+
+execute_batch_remove:
+  caller == contract admin OR holds Role::Admin  →  allowed …
+  … but caller == proposed_by                    →  NotAuthorized (one signature is never enough)
+  no live proposal (or expired)                  →  NoPendingBatchRemove
+  any other caller                               →  NotAuthorized
+
+Records stay registered until the second distinct approval succeeds
+(`test_dual_control_batch_remove_requires_both_approvals`, Issue #439).
+
+cancel_batch_remove:
+  caller == contract admin          →  allowed (works even while paused)
+  any other caller                  →  NotAuthorized
+  no live proposal                  →  NoPendingBatchRemove
+
+get_pending_batch_remove:           public read — no auth, works while paused
+
+set_batch_remove_threshold:
+  caller == contract admin          →  allowed
+  any other caller                  →  NotAuthorized
+
+get_batch_remove_threshold:         public read — no auth, works while paused
+```
+
+### `propose_batch_remove` — auth matrix
+
+| # | Scenario | Expected error | Code | Test |
+|---|----------|----------------|------|------|
+| PB1 | Contract admin proposes a batch above threshold | `Ok(())` | — | `test_propose_then_execute_by_a_second_key` |
+| PB2 | `Role::Admin` holder (not contract admin) proposes | `NotAuthorized` | 3 | `test_second_proposal_rejected_while_pending` |
+| PB3 | Random address proposes | `NotAuthorized` | 3 | `test_random_cannot_propose` |
+| PB4 | Contract is paused | `Paused` | 7 | `test_pause_blocks_propose_and_execute_but_not_cancel` |
+| PB5 | A proposal is already pending | `BatchRemoveProposalPending` | 55 | `test_second_proposal_rejected_while_pending` |
+
+### `execute_batch_remove` — auth matrix
+
+| # | Scenario | Expected error | Code | Test |
+|---|----------|----------------|------|------|
+| EB1 | `Role::Admin` holder (not the proposer) executes | `Ok(())` | — | `test_propose_then_execute_by_a_second_key` |
+| EB2 | Contract admin executes their own proposal | `NotAuthorized` | 3 | `test_execute_by_same_proposer_rejected` |
+| EB3 | Random address (no admin role) executes | `NotAuthorized` | 3 | `test_execute_by_non_admin_rejected` |
+| EB4 | Contract is paused | `Paused` | 7 | `test_pause_blocks_propose_and_execute_but_not_cancel` |
+| EB5 | No proposal is pending | `NoPendingBatchRemove` | 56 | `test_execute_with_no_pending_proposal_fails` |
+| EB6 | Proposal TTL has elapsed (24 h) | `NoPendingBatchRemove` | 56 | `test_execute_after_proposal_ttl_elapsed_rejected` |
+| EB7 | One approver only: records still present; second distinct key completes removal | `Ok(BatchSummary)` after two keys | — | `test_dual_control_batch_remove_requires_both_approvals` |
+
+### `cancel_batch_remove` — auth matrix
+
+| # | Scenario | Expected error | Code | Test |
+|---|----------|----------------|------|------|
+| CB1 | Contract admin cancels a live proposal | `Ok(())` | — | `test_cancel_clears_proposal_and_allows_a_new_one` |
+| CB2 | Random address tries to cancel | `NotAuthorized` | 3 | `test_cancel_by_non_admin_or_without_proposal_fails` |
+| CB3 | No proposal is pending | `NoPendingBatchRemove` | 56 | `test_cancel_by_non_admin_or_without_proposal_fails` |
+| CB4 | Contract is paused (cancel still works) | `Ok(())` | — | `test_pause_blocks_propose_and_execute_but_not_cancel` |
+
+### `set_batch_remove_threshold` — auth matrix
+
+| # | Scenario | Expected error | Code | Test |
+|---|----------|----------------|------|------|
+| ST1 | Contract admin sets threshold | `Ok(())` | — | `test_threshold_above_forces_the_propose_path` |
+| ST2 | Random address sets threshold | `NotAuthorized` | 3 | `test_auth_matrix_set_batch_remove_threshold_random` |
+
+### Public reads — `get_pending_batch_remove` and `get_batch_remove_threshold`
+
+Both functions are read-only, require no authorization, and remain accessible while
+the contract is paused. `get_pending_batch_remove` returns `None` when nothing is
+pending or after a proposal has expired, regardless of caller identity.
+
+---
+
 ## Verify and Revoke_Verification Auth Negative Matrix
 
 Dashboard operators and auditors need the full failure surface of `verify` and `revoke_verification` spelled out.
@@ -532,30 +919,239 @@ Cross-reference: [remove auth negative matrix](#remove-auth-negative-matrix) (Is
 | R4 | Caller has no role | `NotAuthorized` | 3 | `test_revoke_negative_no_role_caller` |
 | R5 | `Role::Upgrader` holder | `NotAuthorized` | 3 | `test_revoke_negative_upgrader_cannot_revoke` |
 | R6 | **Admin caller** _(happy path)_ | `Ok(())` | — | `test_revoke_positive_admin_can_revoke` |
-| R7 | **`Role::Verifier` holder** _(happy path)_ | `Ok(())` | — | `test_revoke_positive_verifier_role_can_revoke` |
-| R8 | Contract is paused | `Paused` | 7 | `test_revoke_negative_paused` |
+| R7 | **`Role::Revoker` holder** _(happy path)_ | `Ok(())` | — | `test_revoke_positive_revoker_role_can_revoke` |
+| R8 | `Role::Verifier` holder | `NotAuthorized` | 3 | `test_revoke_negative_verifier_cannot_revoke` |
+| R9 | Contract is paused | `Paused` | 7 | `test_revoke_negative_paused` |
 
 ### Auth rules for `verify` and `revoke_verification`
 
 ```
+For verify:
 caller == admin                   →  allowed
 caller has Role::Verifier         →  allowed
+caller has Role::Revoker          →  NotAuthorized (code 3)
+
+For revoke_verification:
+caller == admin                   →  allowed
+caller has Role::Revoker          →  allowed
+caller has Role::Verifier         →  NotAuthorized (code 3)
+
 caller has Role::Upgrader         →  NotAuthorized (code 3)
 caller has no role                →  NotAuthorized (code 3)
 ```
 
 Both functions require a `caller: Address` argument so the contract can call
 `caller.require_auth()` and enforce the role check in a single auditable step.
-Only the admin and any address granted `Role::Verifier` via `set_role` may
-call these functions.
+Only the admin, an address granted `Role::Verifier` (for verification), or an address granted `Role::Revoker` (for revocation) may call these functions.
+
 
 The `verify` function additionally guards against illegal state transitions:
 - Verifying an unregistered username → `NotRegistered` (code 4)
 - Re-verifying an already-verified username → `AlreadyVerified` (code 5)
 
+### Address binding on verification (Issue #634)
+
+Verification is an attestation about the **stored** `ContributorRecord.stellar_address`
+for a GitHub username. The contract never takes a caller-supplied address to
+attach to a successful verify:
+
+| Path | Bound identity | Mismatch behaviour |
+|------|----------------|--------------------|
+| `verify` / `batch_verify` | Record's current `stellar_address` | Caller must be admin or an active Verifier (`NotAuthorized` otherwise). A record bound to the zero/burn address is rejected (`ZeroAddress`) / counted as a **failed** batch item and never increments success counters or emits `VerifiedEvent`. Events and audit rows always copy the stored address. |
+| `verify_with_oracle_proof` | Record's current `stellar_address` **and** the oracle proof's canonical message `<github_username>:<stellar_address>:<expires_at>` | The record owner must `require_auth`. A proof for a different address returns `AddressMismatch` (code 62) **before** verification state, counters, or success events are written. A valid signature cannot skip this comparison. |
+
+**Pending address rotation.** Until `execute_address_rotation` runs, the bound
+address remains the current `stellar_address`. The pending `new_address` is not
+used for verification, events, or oracle-message checks. After execution the
+record is unverified and bound to the new address (existing rotation rules).
+
+**Zero address.** `register` / `register_sponsored` / `request_address_rotation`
+already reject the burn address. `verify` and `batch_verify` still refuse a
+zero-bound record if one is present (for example after a storage repair).
+
 The `revoke_verification` function guards:
 - Revoking from an unregistered username → `NotRegistered` (code 4)
 - Revoking from a username that was never verified → `NotVerified` (code 6)
+
+---
+
+## Verifier Rate Limiting (Issue #292)
+
+### Threat
+
+A Verifier or Revoker key — legitimately issued, or compromised — can call
+`verify`, `revoke_verification`, and `batch_verify` as fast as it can submit
+transactions. During a Wave this bloats the contract event stream and consumes
+instruction budget for every other caller. Before this control, `pause` was the
+only brake, and `batch_verify` made the problem *worse* because one call could
+touch up to `MAX_WRITE_BATCH` records.
+
+### Control
+
+An on-chain counter caps the number of **verify/revoke units** a single
+non-admin actor may spend per ledger:
+
+| Path | Units charged |
+|------|---------------|
+| `verify` | 1 (charged after auth, before any state read — junk usernames still count) |
+| `revoke_verification` | 1 |
+| `batch_verify` | `usernames.len()` — the **requested** size, before dedup/skip, charged atomically |
+
+- **Key:** `(Symbol("vfyrate"), actor_address)` in persistent storage, value
+  `(ledger_seq, units_spent)`.
+- **Ledger rollover:** the first call in a new ledger observes a stale
+  `ledger_seq` and resets `units_spent` to 0. There is no cross-ledger carry and
+  no unbounded growth — a single entry per actor, overwritten in place.
+- **Exceed → reject whole, write nothing:** the charge is computed before the
+  write; if it would push this ledger's spend past the cap, the call returns
+  `VerifyRateLimited` (code 30) having mutated no state (no record, no counter,
+  no event).
+- **Configurable:** `set_verify_limit(limit)` (admin-only). `limit == 0`
+  disables the check. With no configured value the contract uses
+  `DEFAULT_VERIFIES_PER_LEDGER` (20). `get_verify_limit()` is a public read.
+
+### Admin bypass (documented and intentional)
+
+The **admin is never rate-limited.** Callers check `is_admin_caller` first and
+the admin path never reaches `charge_verify_rate`. Incident response — mass
+revoke after a detected fraud, mass verify to clear a backlog — must not be
+throttled by the same mechanism that throttles a griefer. An admin key is
+already the maximum-trust key in the system; adding a rate limit to it would
+only create a denial-of-service against recovery.
+
+### Not covered
+
+- **Reads are never rate-limited.** Only the mutating verify/revoke paths carry
+  the counter.
+- Off-chain / RPC-level rate limiting is out of scope for the contract.
+
+## Verifier Allowlist Management (Issue #293 / #638)
+
+The campaign verifier allowlist is managed **exclusively through the public
+entrypoints `add_verifier` and `remove_verifier`** (admin-only). The
+`set_verifier_allowlist` helper in `src/storage.rs` is an **internal
+implementation detail** — it is not exported from `src/lib.rs`, has no
+on-chain entrypoint, and cannot be invoked by any caller. There is
+correspondingly no row for it in `tests/auth_matrix.csv`; the matrix
+covers only the public surface (`add_verifier`, `remove_verifier`).
+
+State-changing allowlist surface, all admin-gated:
+
+| Entrypoint | Purpose | Key errors |
+|---|---|---|
+| `add_verifier(verifier, expires_at)` | Add or refresh an entry; also grants `Role::Verifier` | `VerifierExpiryInPast` (33), `VerifierAllowlistFull` (31) |
+| `remove_verifier(verifier)` | Drop an entry; also revokes `Role::Verifier` | `VerifierNotAllowlisted` (32) |
+| `prune_expired_verifiers()` | Drop expired entries (permissionless) | — |
+
+Read-only surface (no auth): `get_verifiers()`, `is_active_verifier(addr)`,
+`verifier_slots_remaining()`.
+
+Semantics (full detail in `docs/ABI.md`):
+
+- At most `MAX_VERIFIERS` (10) concurrently active members; expired entries
+  are pruned before the cap check, so a lapsed member never blocks a new one.
+- `expires_at` is a ledger timestamp; `0` means no expiry. A non-zero value
+  must be strictly in the future.
+- Once the allowlist has been populated at least once, `verify` /
+  `batch_verify` require the caller to be an *active* allowlist member — a
+  bare `set_role(Verifier)` grant is no longer sufficient.
+
+Integration coverage for the public surface lives in `tests/integration.rs`
+(`test_verifier_allowlist_public_api_round_trip`,
+`test_remove_verifier_not_listed_returns_stable_code`,
+`test_add_verifier_expiry_in_past_returns_stable_code`,
+`test_add_verifier_cap_returns_stable_code`,
+`test_verifier_allowlist_expiry_blocks_and_prunes`).
+
+---
+
+## Oracle-Signed Proof Interface (Signature Check)
+
+`verify()` and `revoke_verification()` are, today, "admin said so": the admin
+or a `Role::Verifier` holder calls `verify`, and the contract trusts that they
+checked GitHub ownership off-chain. There are no proof bytes anywhere in that
+path. (This is distinct from the attestation-hash flow in
+[Two-step WASM upgrade](#two-step-wasm-upgrade-issue-198), which binds a WASM
+hash for upgrades, not an identity claim.)
+
+`src/oracle_proof.rs` adds the missing signature-check primitive:
+
+- `set_oracle_allowlist(env, admin, pubkeys)` — admin-gated; replaces the set
+  of Ed25519 public keys whose signatures are accepted.
+- `get_oracle_allowlist(env)` — public read of the current allowlist.
+- `OracleProof { oracle_pubkey, message, signature, expires_at }` — a signed
+  attestation from an off-chain oracle.
+- `verify_with_proof(env, proof)` — checks, in order: the proof is
+  structurally well-formed (`OracleProofBadLayout`, 58: empty `message` or
+  all-zero `signature`), the signing key is on the allowlist
+  (`OracleProofNotAllowlisted`, 59, including an empty allowlist), the proof
+  has not expired (`OracleProofExpired`, 60; `expires_at == 0` disables the
+  check — production callers should always set a real value), the signature
+  is a canonical encoding (`OracleProofBadSignature`, 61), and finally that
+  `signature` is a valid Ed25519 signature over `message` under
+  `oracle_pubkey`.
+
+`verify_with_oracle_proof` additionally requires `proof.message` to be the
+canonical ownership message for the **record's** `stellar_address`. A proof
+issued for a different address returns `AddressMismatch` (62) and does not
+update verification state.
+
+**Invalid proof fails.** Each rejection above returns its own `Err` code. An
+allowlisted key with a canonically encoded signature that does not verify
+traps the host invocation (`Error(Crypto, InvalidInput)`) instead of
+returning `Err` — `soroban_sdk`'s `Env::crypto().ed25519_verify` has no
+non-panicking form, so this fails the exact same way an invalid
+`require_auth()` signature already does everywhere else in this contract.
+Tests in `src/oracle_proof.rs` cover every path with a fixed test keypair
+(`valid_allowlisted_proof_passes`, `bad_layout_is_rejected_with_layout_code`,
+`non_allowlisted_key_is_rejected`, `expired_proof_is_rejected`,
+`bad_signature_is_rejected_with_signature_code`,
+`wellformed_invalid_signature_traps`); run them with
+`cargo test oracle_proof`.
+
+**This is a signature-check interface, not GitHub verification.** The
+contract has no way to talk to the GitHub API and this change does not give
+it one — see **Out of Scope** above, which still applies unchanged. How the
+oracle confirms ownership before signing is an off-chain contract between the
+oracle operator and the admin who allowlists its key.
+
+**Explicitly out of scope:**
+
+- Accepting oracle proofs in `batch_verify()`.
+- Running a production GitHub oracle service that produces these proofs.
+
+---
+
+## Cross-Contract `register` Is Denied (No Nonce)
+
+`register()` carries no replay nonce. That is only a gap if a sibling
+contract can call `register` cross-contract (C2C) on a caller's behalf —
+without a nonce, a captured call could be replayed. Today that path does not
+exist, deliberately:
+
+- `register` requires `stellar_address.require_auth()`.
+- A cross-contract invocation runs in the **calling** contract's
+  authorization context (the same rule documented above for the admin export
+  functions in [Cross-Contract Callers and Admin Exports](#cross-contract-callers-and-admin-exports)).
+  A calling contract cannot produce a signature for an address it does not
+  control, so it cannot satisfy `stellar_address.require_auth()` for anyone
+  but itself.
+- A relayed C2C `register` therefore fails closed at the host authorization
+  layer — the invocation aborts before any state read or write.
+
+This is enforced by test, not left as a comment:
+`tests/cross_contract_register_deny.rs::cross_contract_register_on_behalf_of_another_address_is_denied`
+(expects a panic — missing auth), with
+`direct_register_by_the_address_owner_still_works` as the positive control
+proving the same call path succeeds for a real, self-signing registrant.
+
+**ABI statement:** `register` is not part of the cross-contract read surface
+documented in [ABI.md § Cross-Contract Read Interface](ABI.md#cross-contract-read-interface)
+and must not be added to it without also adding a replay nonce. Per this
+project's "don't half-open C2C" policy, no C2C registration surface is
+introduced here — this section documents and tests the current, intentional
+denial only. If C2C `register` is ever built, it must ship a nonce (or
+equivalent replay protection) in the same change, not after.
 
 ---
 
@@ -659,22 +1255,236 @@ and emits both `RemovedEvent` and `ChallengeCompletedEvent`.
 `cancel_challenge` is the escape hatch: if the registrant proves ownership off-chain
 during the window, the admin cancels the challenge and the registration is preserved.
 
+The full lifecycle — happy path, cancel path, `ChallengeAlreadyActive`,
+`ChallengeNotResolvable`, `NoChallengeActive`, `NotAuthorized`, `Paused`, and the
+count invariants across all four entry points — is enforced by tests, not left as a
+comment: `tests/challenge.rs`.
+
+---
+
+## Address Rotation Delay (Issue #234)
+
+`register` accepts an address change when both the outgoing and incoming
+addresses sign. Dual auth proves both keys were available *at that moment* — it
+does not prove the holder intended the change. An attacker who phishes a
+GitHub session and a wallet signature together holds both keys at once, and the
+swap lands instantly, redirecting every future payout before the real holder
+sees anything.
+
+The delay window closes that. With `set_rotation_delay(seconds)` armed:
+
+| Step | Entry point | Effect |
+|---|---|---|
+| Request | `request_address_rotation(username, new_address)` | Records the pending address, emits `RotationRequestedEvent`. **Nothing moves.** |
+| Wait | — | `executable_at = requested_at + delay` |
+| Execute | `execute_address_rotation(username)` | Applies the change, emits `RotationExecutedEvent` |
+| Stop | `cancel_address_rotation(caller, username)` | Holder or admin cancels, emits `RotationCancelledEvent` |
+
+Both addresses still `require_auth` on the request, exactly as before. What
+changes is that the authorisation buys a *queued* rotation rather than an
+immediate one, and the queue is visible: the request event gives indexers and
+the holder a window to notice a rotation nobody asked for, and
+`cancel_address_rotation` is how they stop it.
+
+While a rotation is pending:
+
+- **Reads return the current address.** `get_address`, `has_record`, and
+  `get_record_proof` all keep reporting the outgoing address until the rotation
+  executes. A pending rotation is a proposal, not a fact.
+- `get_pending_rotation(username)` exposes the queued address and its
+  `executable_at`, and works while paused so a holder can always see what is
+  queued against their name.
+- `verify` still operates on the record as it stands, against the current
+  address.
+- `register` refuses a direct address change with `RotationRequired`, so the
+  window cannot be stepped around.
+- A second request is refused with `RotationPending`; cancel first.
+- A rotation cannot be requested while a challenge is open on the username —
+  a challenge is an unresolved question about ownership, and queuing a rotation
+  underneath it would let the answer change mid-flight.
+
+Executing a rotation clears the verified flag and marks the username pending
+re-verify, the same policy a direct address change already applied: the
+verification vouched for the address, and the address has changed.
+
+**The delay defaults to 0, which disables all of the above** and preserves the
+direct dual-auth swap. This matches the existing `set_cooldown` convention.
+Operators handling real payouts should set it — 24h (`86400`) gives a holder a
+day to notice and cancel.
+
 ---
 
 ## On-Chain Audit Logging
 
-The contract records structured audit log entries into contract storage upon state mutations (`initialize`, `register`, `remove`, `verify`, `batch_verify`, `pause`, `unpause`, `config_verification`, `set_role`).
+The contract records structured `AuditLogEntry` values into instance storage on
+state mutations. Issue #397 widened the coverage: the event type used to
+collapse several distinct admin actions into one `ADMIN_ACTION`, and three of
+them were not recorded at all.
+
+### Event types
+
+| Code | `as_str()` | Written by |
+|------|------------|------------|
+| 1 | `CONTRACT_INITIALIZED` | `initialize` |
+| 2 | `USER_REGISTERED` | `register`, `batch_register` |
+| 3 | `USER_REMOVED` | `remove`, `batch_remove` |
+| 4 | `USER_VERIFIED` | `verify`, `batch_verify` |
+| 5 | `ADMIN_ACTION` | `config_verification` and other admin config changes |
+| 6 | `UNAUTHORIZED_ATTEMPT` | rejected authorization checks |
+| 7 | `DATA_EXPORTED` | `export_registry` |
+| 8 | `VERIFICATION_REVOKED` | `revoke_verification` |
+| 9 | `USER_RENAMED` | `rename` |
+| 10 | `CONTRACT_PAUSED` | `pause`, `emergency_pause`, `set_paused(true)` |
+| 11 | `CONTRACT_UNPAUSED` | `unpause`, `clear_emergency_pause`, `set_paused(false)` |
+| 12 | `ROLE_CHANGED` | `set_role`, `activate_role` |
+| 13 | `CONTRACT_UPGRADED` | `upgrade`, `execute_upgrade` (multisig path) |
+| 14 | `AUDIT_CONFIG_CHANGED` | `set_audit_config` |
+
+`AdminAction` entries are also written for the multisig upgrade governance
+paths: `set_upgrade_threshold`, `propose_multisig_upgrade`,
+`approve_upgrade`, and `cancel_upgrade_proposal` each record an
+`AuditEventType::AdminAction` entry with a `details` field naming the
+function, so an audit reader can distinguish governance configuration from
+other admin actions. `execute_upgrade` records `ContractUpgraded` (code 13)
+because the WASM was actually swapped, matching the single-admin `upgrade`
+path for indexer consistency.
+
+Codes and strings are **append-only**, for the same reason `ContractError`'s
+are: an indexer stores them, so renumbering or renaming silently re-labels
+history it has already written.
+
+Three of these fixed real gaps rather than just relabelling:
+
+- `revoke_verification` wrote **no** audit entry. The contract event existed,
+  but events are not retained on-chain, so losing verification left nothing a
+  reader querying the contract could see.
+- `upgrade` wrote none either — the single entry that matters most, since an
+  upgrade replaces the code every other entry was produced by.
+- `rename` wrote `USER_REGISTERED`, so a rename read back as a new
+  registration: registrations were double-counted and renames were invisible.
+  It now records the new name in `target_username` and the old one in
+  `details`, so the entry is findable from the name the record used to have.
+
+`CONTRACT_PAUSED` / `CONTRACT_UNPAUSED` replace `ADMIN_ACTION` on the whole
+pause family. Direction matters more than the fact an admin acted: an auditor
+reading `ADMIN_ACTION` had to correlate with the preceding entry to learn
+whether the contract had gone down or come back up.
 
 ### What IS an On-Chain Audit Log
 
-- **Structured compliance record**: An on-chain log entry (`AuditLogEntry`) persisted in instance storage recording event type (`AuditEventType`), timestamp, actor address, target username/address, and details.
-- **Operator query surface**: Callable on-chain via `get_audit_logs()` and `get_audit_stats()`.
-- **Bounded ring buffer**: Maintained up to a maximum cap (100 entries) per contract instance to stay within Soroban memory and footprint boundaries.
+- **Structured compliance record**: an entry persisted in instance storage with
+  event type, timestamp, actor address, target username/address, and details.
+- **Operator query surface**: readable on-chain via `get_audit_logs()` and
+  `get_audit_stats()`.
+- **Bounded ring buffer**: capped at `MAX_AUDIT_LOG_ENTRIES` (100) per contract
+  instance to stay inside Soroban's memory and footprint budget. `push_audit_entry`
+  evicts the oldest entry when full, so the new event types above cannot grow
+  storage — they change which entries are written, not how many are retained.
 
 ### What IS NOT an On-Chain Audit Log
 
-- **Domain events replacement**: Audit log entries complement, but do not replace, Soroban domain events (`RegisteredEvent`, `VerifiedEvent`, `RemovedEvent`, etc.). Off-chain indexers still rely on domain events for event stream monitoring.
-- **Unbounded historical store**: Audit entries are capped on-chain. Complete long-term history across all ledgers should be collected by off-chain indexers from event topics or block archives.
+- **A replacement for domain events**: entries complement `RegisteredEvent`,
+  `VerifiedEvent`, `RemovedEvent` and friends. Off-chain indexers still consume
+  the event stream.
+- **An unbounded historical store**: with a 100-entry cap, long-term history is
+  the indexer's job. On a busy contract the on-chain log is a recent window,
+  not an archive — do not design a compliance process that assumes otherwise.
+
+---
+
+## Unauthorized Attempt Logging (Issue #412)
+
+Every role-gated entry point that returns `ContractError::NotAuthorized` now
+calls the internal `record_unauthorized_attempt` helper before returning.  This
+appends an `AuditEventType::UnauthorizedAttempt` (code 6) entry to the audit
+log, recording the actor address and the name of the operation they attempted.
+
+### Why this matters
+
+Forensics needs a structured, queryable record of probing activity that
+**never** resulted in a successful state mutation.  Without these entries the
+audit log only tells an operator what succeeded — a gap that makes it
+impossible to detect a credential-stuffing campaign or a compromised key that
+is being tested before it is used.
+
+### Design choices
+
+| Property | Decision |
+|---|---|
+| **Gated on `AuditConfig.log_unauthorized`** | Operators can suppress entries during a spam campaign without redeploying. The `AuditStats.unauthorized_attempts` counter still increments regardless. |
+| **Uses the pre-call config** | An attacker calling `set_audit_config` to disable logging would itself require admin auth; the very failure to pass that check is logged under the current config before the call returns. |
+| **Non-recursive** | `record_unauthorized_attempt` calls `push_audit_entry` directly — no auth check, no re-entry into any role-gated path. |
+| **No reentrant loop** | The helper reads config and appends; it cannot trigger another auth check. |
+| **Storage spam guard** | The ring buffer evicts the oldest entry when full (cap = 100). A bot flooding `emergency_pause` or `verify` cannot grow storage beyond that bound. |
+
+### Covered entry points
+
+All public entry points that return `NotAuthorized` are covered:
+
+`emergency_pause`, `stage_wasm`, `clear_staged`, `set_upgrade_threshold`,
+`propose_multisig_upgrade`, `approve_upgrade`, `execute_upgrade`,
+`cancel_upgrade_proposal`, `config_verification`, `set_audit_config`,
+`batch_remove`, `propose_batch_remove`, `execute_batch_remove`,
+`cancel_batch_remove`, `verify`, `revoke_verification`,
+`start_challenge`, `cancel_challenge`, `complete_challenge`,
+`cancel_address_rotation`, `set_bot_status`, `remove`, `rename`.
+
+The private `require_remove_auth` helper (used by `remove` and `rename`) has
+no `&Env`, so logging is done at the call site rather than inside the helper.
+Admin-gated functions that call `admin.require_auth()` directly (e.g. `pause`,
+`set_role`, `upgrade`) do not need this hook because Soroban's own
+`require_auth` traps the transaction if the signature is missing — there is no
+`NotAuthorized` error path in those functions.
+
+### Reading the log
+
+```bash
+stellar contract invoke --id $CONTRACT_ID --network testnet \
+  -- get_audit_stats
+# Look at unauthorized_attempts field
+
+stellar contract invoke --id $CONTRACT_ID --network testnet \
+  -- get_audit_logs
+# Filter entries where event_type == 6 (UNAUTHORIZED_ATTEMPT)
+```
+
+---
+
+## Audit Configuration (Issue #412)
+
+The on-chain audit trail is configurable via `set_audit_config` (admin-only)
+and readable by anyone via `get_audit_config`.
+
+### AuditConfig fields
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `enabled` | `bool` | `true` | Global switch for audit logging |
+| `max_events` | `u32` | `1000` | Ring-buffer capacity |
+| `log_unauthorized` | `bool` | `true` | Record `UnauthorizedAttempt` entries |
+
+When no config has been stored, `AuditConfig::default()` is used — all
+defaults apply automatically without an explicit `set_audit_config` call.
+
+### Authorization
+
+Only the contract admin may call `set_audit_config`. A non-admin caller
+receives `NotAuthorized` and the stored config is not modified.
+The failed attempt is itself logged as an `UnauthorizedAttempt` entry using
+the **current** config, preventing a disable-then-probe attack.
+
+### Config changes while paused
+
+`set_audit_config` does not call `require_not_paused` — operators need to
+be able to adjust audit settings during an incident freeze without first
+unpausing (which may be undesirable while a security review is underway).
+
+### Event
+
+Every successful `set_audit_config` emits an `AuditConfigChangedEvent` with
+topics `[admin]` and body fields `enabled`, `max_events`, `log_unauthorized`,
+`timestamp`. The change is also appended to the audit log as an
+`AuditConfigChanged` (code 14) entry.
 
 ---
 
@@ -689,26 +1499,61 @@ For production deployments, consider:
 - Staged rollout on testnet/futurenet first
 
 
-### What IS an On-Chain Audit Log
-
-- **Structured compliance record**: An on-chain log entry (`AuditLogEntry`) persisted in instance storage recording event type (`AuditEventType`), timestamp, actor address, target username/address, and details.
-- **Operator query surface**: Callable on-chain via `get_audit_logs()` and `get_audit_stats()`.
-- **Bounded ring buffer**: Maintained up to a maximum cap (100 entries) per contract instance to stay within Soroban memory and footprint boundaries.
-
-### What IS NOT an On-Chain Audit Log
-
-- **Domain events replacement**: Audit log entries complement, but do not replace, Soroban domain events (`RegisteredEvent`, `VerifiedEvent`, `RemovedEvent`, etc.). Off-chain indexers still rely on domain events for event stream monitoring.
-- **Unbounded historical store**: Audit entries are capped on-chain. Complete long-term history across all ledgers should be collected by off-chain indexers from event topics or block archives.
-
 ---
 
-## Audit Status
+### Index Repair (`repair_index`)
 
-This contract has **not** been formally audited. Use at your own risk on mainnet until an audit is completed.
+`count` and `verified` are maintained incrementally by every mutating call
+(`register`, `remove`, `verify`, `revoke_verification`, batch operations,
+…). Under normal operation they never need correcting — the property fuzz
+suite (see [REGISTRY_INVARIANTS.md](REGISTRY_INVARIANTS.md)) exercises long
+random operation sequences precisely to catch a code change that would make
+them drift, before it ever reaches testnet or mainnet.
 
-For production deployments, consider:
+That fuzz coverage does not extend to state that reaches storage by some
+path other than these public entry points — a bug in a future migration
+step, a hand-crafted storage write during an incident, or an upgrade that
+changes the counters' encoding. Nothing on-chain currently detects that
+class of drift.
 
-- Independent security audit
-- Bug bounty program
-- Staged rollout on testnet/futurenet first
+`repair_index(apply: bool)` (admin-only) recomputes `count` and `verified`
+by walking the chunked username index and checking each entry's stored
+record, independent of the counters themselves, and returns a
+`RepairReport` with both the stored and recomputed values.
 
+**When to use it:**
+
+- After any incident that involved a manual/scripted storage write, a
+  migration, or a WASM upgrade you are not fully confident preserved the
+  counters.
+- Whenever `get_stats()` or `get_health()` looks implausible relative to
+  what an off-chain indexer's own tally of `Registered`/`Removed`/`Verified`
+  events says it should be.
+- As a routine post-upgrade sanity check, called once with `apply = false`.
+
+**How to use it:**
+
+1. Call with `apply = false` first. This is a pure read — it writes
+   nothing — and returns whether `drifted` is `true` along with the stored
+   vs. recomputed values for both counters.
+2. Only if `drifted` is `true` and the recomputed values have been reviewed,
+   call again with `apply = true` to write the corrected values. A call
+   that finds no drift never writes, even with `apply = true`.
+
+**What it deliberately does not do:** `repair_index` is never invoked
+automatically by any other entry point — a silent repair on every call
+would mask the very drift this operation exists to surface, and would let
+an issue in one counter path go unnoticed behind an automatic fix on
+another. Every repair is an explicit, auditable admin transaction.
+
+Covered by `tests/repair_index.rs`, which drifts the counters against a
+known-good fixture and checks both the dry-run report and the corrected
+on-chain state after `apply = true`.
+
+## Cross-network misuse (Issue #666)
+
+`initialize` records the executing network id, and every gated entrypoint
+re-checks it via `require_initialized`. State initialized on pubnet and
+executed on testnet — or the reverse — fails closed with `NetworkMismatch`
+(code 30) before any write, so a rejected call leaves no partial state.
+Covered by the pubnet/testnet cases in `tests/network_mismatch.rs`.

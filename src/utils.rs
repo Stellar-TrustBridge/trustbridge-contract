@@ -5,9 +5,9 @@
 //! here works on a fixed stack buffer: the contract is `#![no_std]` and must
 //! not allocate on the validation path.
 
-// Some helpers here are staged ahead of their call sites: they are covered by
-// this module's own tests but are not yet wired into `lib.rs`.
-#![allow(dead_code)]
+// NOTE: The crate-level #![allow(dead_code)] has been removed (Issue #248).
+// Each helper that is not yet wired into a call site carries its own per-item
+// allow with an explanation below.
 
 use soroban_sdk::{Address, Env, String};
 
@@ -34,7 +34,6 @@ pub fn is_zero_address(env: &Env, address: &Address) -> bool {
 /// Stack buffer size for username copies. Sized above `MAX_USERNAME_LEN`, so
 /// an over-long username is rejected on length before it is ever read.
 const USERNAME_BUF: usize = 64;
-const USERNAME_BUF_LEN: usize = USERNAME_BUF;
 
 /// Copies a username into a fixed stack buffer.
 ///
@@ -50,11 +49,19 @@ fn copy_into_buf(s: &String, buf: &mut [u8; USERNAME_BUF]) -> Option<usize> {
 }
 
 /// Check if a string is empty.
+///
+/// Staged: not yet wired into a call site in `lib.rs` — kept so future
+/// validation layers can use it without re-introducing the logic.
+#[allow(dead_code)] // Issue #248: covered by tests; staged for future input-guard call sites.
 pub fn is_empty(s: &String) -> bool {
     s.is_empty()
 }
 
 /// Check if a string is empty or contains only ASCII whitespace.
+///
+/// Staged: not yet wired into a call site in `lib.rs` — intended for a
+/// display-name validation layer that is tracked but not yet shipped.
+#[allow(dead_code)] // Issue #248: covered by tests; staged for display-name validation.
 pub fn is_empty_or_whitespace(s: &String) -> bool {
     let len = s.len() as usize;
     if len == 0 {
@@ -171,15 +178,71 @@ pub fn eq_ignore_ascii_case(a: &String, b: &String) -> bool {
         .all(|(x, y)| x.eq_ignore_ascii_case(y))
 }
 
-/// Calculate the percentage of verified contributors out of total.
+/// Folds a GitHub username to its canonical storage-key form.
+///
+/// GitHub logins are case-insensitive, so `Alice` and `alice` name the same
+/// account. Every persistent storage key keyed by a username is built from
+/// this canonical form (ASCII-lowercased), so a case variant of an existing
+/// login can never create a second, independent record — see
+/// `docs/SECURITY.md#username-case-folding`.
+///
+/// The fold is byte-wise ASCII-only: only bytes in `b'A'..=b'Z'` are lowered.
+/// Any byte `>= 0x80` (part of a multi-byte UTF-8 sequence) is left
+/// untouched, so this never changes the byte length of its input and never
+/// performs a Unicode-aware case fold — GitHub usernames are ASCII-only
+/// (`is_valid_github_username`), and this function does not attempt to
+/// canonicalize non-ASCII input beyond leaving it as-is. Homoglyph
+/// normalization is explicitly out of scope (tracked separately).
+///
+/// A username too long for the fixed stack buffer (longer than
+/// `MAX_USERNAME_LEN` could ever be, since registration already rejects
+/// those) is returned unchanged rather than folded, since it can never be a
+/// valid registration key anyway.
+#[must_use]
+pub fn canonicalize_username(env: &Env, s: &String) -> String {
+    let len = s.len() as usize;
+    if len == 0 || len > USERNAME_BUF {
+        return s.clone();
+    }
+
+    let mut buf = [0u8; USERNAME_BUF];
+    s.copy_into_slice(&mut buf[..len]);
+    buf[..len].make_ascii_lowercase();
+
+    match core::str::from_utf8(&buf[..len]) {
+        Ok(lowered) => String::from_str(env, lowered),
+        // Unreachable for any input that was valid UTF-8 going in: lowercasing
+        // ASCII bytes in place can never break UTF-8 validity. Kept as a safe
+        // fallback rather than a panic on the no_std validation path.
+        Err(_) => s.clone(),
+    }
+}
+
+/// Calculate the percentage of verified contributors out of total using standard
+/// half-up rounding: `(verified * 100 + total / 2) / total`.
+///
+/// - Returns 0 if `total == 0` or `verified == 0`.
+/// - Returns 100 if `verified >= total` (clamped).
+/// - Rounds fractional ratios to the nearest whole percentage with round-half-up
+///   semantics (e.g. 1/3 = 33%, 2/3 = 67%, 1/6 = 17%, 5/6 = 83%).
+#[allow(dead_code)] // Issue #248: covered by tests; used by BatchSummary and staged for Stats percentage.
 pub fn calculate_verification_percentage(verified: u32, total: u32) -> u32 {
-    if total == 0 {
+    if total == 0 || verified == 0 {
         return 0;
     }
-    ((verified as u64 * 100) / (total as u64)) as u32
+    if verified >= total {
+        return 100;
+    }
+    let verified = verified as u64;
+    let total = total as u64;
+    ((verified * 100 + (total / 2)) / total) as u32
 }
 
 /// Generate a timestamped event ID for audit trails.
+///
+/// Staged: not yet wired into a call site — intended for a deduplicated
+/// audit-log path that assigns unique IDs to emitted events.
+#[allow(dead_code)] // Issue #248: covered by tests; staged for audit-log event-ID assignment.
 pub fn generate_event_id(env: &Env, nonce: u32) -> u64 {
     let timestamp = env.ledger().timestamp();
     (timestamp << 32) | (nonce as u64)
@@ -188,6 +251,7 @@ pub fn generate_event_id(env: &Env, nonce: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Ledger as _;
     use soroban_sdk::Env;
 
     fn s(env: &Env, value: &str) -> String {
@@ -210,6 +274,54 @@ mod tests {
         assert!(is_empty_or_whitespace(&s(&env, "")));
         assert!(is_empty_or_whitespace(&s(&env, "   ")));
         assert!(!is_empty_or_whitespace(&s(&env, "hello")));
+    }
+
+    // ── Stack-buffer boundaries (mutation-testing gaps, Issue #574) ──────────
+    //
+    // `USERNAME_BUF` (64) is the largest input copied onto the stack; one
+    // byte more must take the "too long" branch instead of overrunning it.
+
+    #[test]
+    fn test_is_empty_or_whitespace_at_buffer_boundary() {
+        let env = Env::default();
+        assert!(is_empty_or_whitespace(&s(&env, &" ".repeat(USERNAME_BUF))));
+        assert!(!is_empty_or_whitespace(&s(
+            &env,
+            &" ".repeat(USERNAME_BUF + 1)
+        )));
+    }
+
+    #[test]
+    fn test_eq_ignore_ascii_case_at_buffer_boundary() {
+        let env = Env::default();
+        let fits = s(&env, &"a".repeat(USERNAME_BUF));
+        let fits_upper = s(&env, &"A".repeat(USERNAME_BUF));
+        assert!(eq_ignore_ascii_case(&fits, &fits_upper));
+        let over = s(&env, &"a".repeat(USERNAME_BUF + 1));
+        assert!(!eq_ignore_ascii_case(&over, &over.clone()));
+    }
+
+    #[test]
+    fn test_canonicalize_username_at_buffer_boundary() {
+        let env = Env::default();
+        assert_eq!(
+            canonicalize_username(&env, &s(&env, &"A".repeat(USERNAME_BUF))),
+            s(&env, &"a".repeat(USERNAME_BUF))
+        );
+        // Too long to fold: returned unchanged.
+        let over = s(&env, &"A".repeat(USERNAME_BUF + 1));
+        assert_eq!(canonicalize_username(&env, &over), over);
+    }
+
+    #[test]
+    fn test_is_zero_address() {
+        use soroban_sdk::testutils::Address as _;
+        let env = Env::default();
+        assert!(is_zero_address(
+            &env,
+            &Address::from_str(&env, ZERO_ADDRESS_STRKEY)
+        ));
+        assert!(!is_zero_address(&env, &Address::generate(&env)));
     }
 
     // ── Valid username acceptance ─────────────────────────────────────────────
@@ -506,19 +618,150 @@ mod tests {
         assert!(!eq_ignore_ascii_case(&s(&env, "alice"), &s(&env, "alice1")));
     }
 
+    // ── Username case-folding (Issue #194) ────────────────────────────────────
+
+    #[test]
+    fn test_canonicalize_username_lowercases() {
+        let env = Env::default();
+        assert_eq!(
+            canonicalize_username(&env, &s(&env, "Alice")),
+            s(&env, "alice")
+        );
+        assert_eq!(
+            canonicalize_username(&env, &s(&env, "OCTOCAT")),
+            s(&env, "octocat")
+        );
+        assert_eq!(
+            canonicalize_username(&env, &s(&env, "Bob-Smith_42")),
+            s(&env, "bob-smith_42")
+        );
+    }
+
+    #[test]
+    fn test_canonicalize_username_already_lower_is_unchanged() {
+        let env = Env::default();
+        assert_eq!(
+            canonicalize_username(&env, &s(&env, "octocat")),
+            s(&env, "octocat")
+        );
+    }
+
+    #[test]
+    fn test_canonicalize_username_idempotent() {
+        let env = Env::default();
+        let once = canonicalize_username(&env, &s(&env, "MixedCase"));
+        let twice = canonicalize_username(&env, &once);
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn test_canonicalize_username_case_variants_collide() {
+        let env = Env::default();
+        let variants = ["alice", "Alice", "ALICE", "aLiCe"];
+        let canonical = canonicalize_username(&env, &s(&env, variants[0]));
+        for v in &variants {
+            assert_eq!(
+                canonicalize_username(&env, &s(&env, v)),
+                canonical,
+                "{v} must fold to the same canonical key as {}",
+                variants[0]
+            );
+        }
+    }
+
+    #[test]
+    fn test_canonicalize_username_never_changes_byte_length() {
+        let env = Env::default();
+        for name in ["a", "Z", "MixedCase123", "foo-BAR_baz", "OCTOCAT"] {
+            let original = s(&env, name);
+            let folded = canonicalize_username(&env, &original);
+            assert_eq!(
+                folded.len(),
+                original.len(),
+                "ASCII case-folding must never change byte length ({name})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_canonicalize_username_empty_is_unchanged() {
+        let env = Env::default();
+        assert_eq!(canonicalize_username(&env, &s(&env, "")), s(&env, ""));
+    }
+
     // ── Percentage helper ─────────────────────────────────────────────────────
 
     #[test]
-    fn test_calculate_verification_percentage() {
+    fn test_calculate_verification_percentage_boundaries() {
+        // Zero cases
+        assert_eq!(calculate_verification_percentage(0, 0), 0);
+        assert_eq!(calculate_verification_percentage(0, 1), 0);
         assert_eq!(calculate_verification_percentage(0, 100), 0);
-        assert_eq!(calculate_verification_percentage(50, 100), 50);
-        assert_eq!(calculate_verification_percentage(100, 100), 100);
-        assert_eq!(calculate_verification_percentage(1, 3), 33);
         assert_eq!(calculate_verification_percentage(10, 0), 0);
+
+        // 100% boundary & clamping
+        assert_eq!(calculate_verification_percentage(1, 1), 100);
+        assert_eq!(calculate_verification_percentage(50, 50), 100);
+        assert_eq!(calculate_verification_percentage(100, 100), 100);
+        assert_eq!(calculate_verification_percentage(150, 100), 100);
+    }
+
+    #[test]
+    fn test_calculate_verification_percentage_fractional_rounding() {
+        // Half cases
+        assert_eq!(calculate_verification_percentage(1, 2), 50);
+
+        // Thirds (1/3 = 33.333% -> 33, 2/3 = 66.666% -> 67)
+        assert_eq!(calculate_verification_percentage(1, 3), 33);
+        assert_eq!(calculate_verification_percentage(2, 3), 67);
+
+        // Sixths (1/6 = 16.666% -> 17, 5/6 = 83.333% -> 83)
+        assert_eq!(calculate_verification_percentage(1, 6), 17);
+        assert_eq!(calculate_verification_percentage(5, 6), 83);
+
+        // Eighths (1/8 = 12.5% -> 13, 3/8 = 37.5% -> 38, 5/8 = 62.5% -> 63, 7/8 = 87.5% -> 88)
+        assert_eq!(calculate_verification_percentage(1, 8), 13);
+        assert_eq!(calculate_verification_percentage(3, 8), 38);
+        assert_eq!(calculate_verification_percentage(5, 8), 63);
+        assert_eq!(calculate_verification_percentage(7, 8), 88);
     }
 
     #[test]
     fn test_percentage_does_not_overflow_at_u32_max() {
         assert_eq!(calculate_verification_percentage(u32::MAX, u32::MAX), 100);
+        assert_eq!(
+            calculate_verification_percentage(u32::MAX / 2, u32::MAX),
+            50
+        );
+    }
+
+    // ── Event ID helper ───────────────────────────────────────────────────────
+
+    /// `generate_event_id` packs the ledger timestamp into the high 32 bits and
+    /// the nonce into the low 32 bits.
+    #[test]
+    fn test_generate_event_id_encodes_timestamp_and_nonce() {
+        let env = Env::default();
+        env.ledger().set_timestamp(42);
+        let id = generate_event_id(&env, 7);
+        assert_eq!(id >> 32, 42, "high 32 bits must be the ledger timestamp");
+        assert_eq!(id & 0xFFFF_FFFF, 7, "low 32 bits must be the nonce");
+    }
+
+    #[test]
+    fn test_generate_event_id_nonce_zero() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000_000);
+        let id = generate_event_id(&env, 0);
+        assert_eq!(id, 1_000_000u64 << 32);
+    }
+
+    #[test]
+    fn test_generate_event_id_different_nonces_differ() {
+        let env = Env::default();
+        env.ledger().set_timestamp(100);
+        let id_a = generate_event_id(&env, 1);
+        let id_b = generate_event_id(&env, 2);
+        assert_ne!(id_a, id_b);
     }
 }

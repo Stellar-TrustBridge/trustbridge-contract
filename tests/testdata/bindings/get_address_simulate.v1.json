@@ -1,0 +1,27 @@
+{
+  "fixture": "get_address_simulate",
+  "version": 1,
+  "encoding": "base64 XDR of ScVal (simulateTransaction results[0].xdr / retval)",
+  "function": "get_address",
+  "return_type": "Option<ContributorRecord>",
+  "cases": [
+    {
+      "name": "registered",
+      "args": { "github_username": "octocat" },
+      "retval_xdr": "AAAAEQAAAAEAAAAFAAAADwAAAAZpc19ib3QAAAAAAAAAAAAAAAAADwAAAA5wYXlvdXRfYWRkcmVzcwAAAAAAEgAAAAAAAAAAAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIAAAAPAAAADXJlZ2lzdGVyZWRfYXQAAAAAAAADZVPxAAAAAA8AAAAPc3RlbGxhcl9hZGRyZXNzAAAAABIAAAAAAAAAAAICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAAAADwAAAAh2ZXJpZmllZAAAAAAAAAAA",
+      "decoded": {
+        "stellar_address": "GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA",
+        "payout_address": "GABAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIBAEJXA",
+        "registered_at": 1700000000,
+        "verified": false,
+        "is_bot": false
+      }
+    },
+    {
+      "name": "not_registered",
+      "args": { "github_username": "nobody" },
+      "retval_xdr": "AAAAAQ==",
+      "decoded": null
+    }
+  ]
+}

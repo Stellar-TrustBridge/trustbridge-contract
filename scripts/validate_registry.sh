@@ -94,7 +94,7 @@ verified_mismatch=0
 missing_from_export=0
 record_count="$(jq '.records | length' "$EXPORT_FILE")"
 
-for i in $(seq 0 $((record_count - 1))); do
+for ((i = 0; i < record_count; i++)); do
   username="$(jq -r ".records[$i].github_username" "$EXPORT_FILE")"
   exp_address="$(jq -r ".records[$i].stellar_address" "$EXPORT_FILE")"
   exp_verified="$(jq -r ".records[$i].verified" "$EXPORT_FILE")"

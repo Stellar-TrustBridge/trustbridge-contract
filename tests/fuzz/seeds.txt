@@ -1,0 +1,19 @@
+# Fuzz seed corpus (Issue #331). One u64 per line, hex (0x...) or decimal.
+# Blank lines and '#' comments are ignored. Must hold at least 4 seeds:
+# seeds [0], [2], [3] are pinned by specific tests (see REGISTRY_INVARIANTS.md).
+# Append a seed here when a failure is found so it reproduces forever.
+0xDEADBEEF12345678
+0xCAFEBABEFEEDFACE
+0x01010101ABCDEF01
+0x9999888877776666
+0x0000000000000001
+0x7FFFFFFFFFFFFFFF
+0xA5A5A5A55A5A5A5A
+0x123456789ABCDEF0
+# Username fuzz edge seeds (Issue #624): max-length boundary (39/40 chars) and
+# invalid UTF-8 / null-byte edge bytes expressed as u64 patterns.
+0x0000000000000000
+0xFFFFFFFFFFFFFFFF
+0x8080808080808080
+0xEDA080EDA080EDA0
+0x0000000000000027

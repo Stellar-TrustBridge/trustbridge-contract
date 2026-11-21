@@ -1,8 +1,148 @@
-# Contract ABI Reference
+# ABI Notes
 
-Complete interface reference for **trustbridge-contract**.
+This document tracks the stable ABI surface exposed by the TrustBridge contract,
+including storage layout versions and field ordering that external consumers
+(notably dashboard export consumers) depend on.
 
-Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPLOYMENT](DEPLOYMENT.md)
+## Staged WASM entrypoints (Issue #594)
+
+The **canonical exported Soroban function names** are defined by the
+`#[contractimpl]` on `TrustBridgeContract` in [`src/lib.rs`](../src/lib.rs).
+Use these exact names after `--` in `stellar contract invoke` and in
+[`tests/auth_matrix.csv`](../tests/auth_matrix.csv):
+
+| Exported function | Rust signature (excluding `env: Env`) | Authorization |
+|---|---|---|
+| `stage_wasm` | `stage_wasm(caller: Address, wasm_hash: BytesN<32>) -> Result<(), ContractError>` | Admin or `Role::Upgrader`; caller must sign |
+| `get_staged` | `get_staged() -> Option<StagedWasm>` | Public read; no auth |
+| `clear_staged` | `clear_staged(caller: Address) -> Result<(), ContractError>` | Admin only; caller must sign |
+
+`StagedWasm` contains `wasm_hash: BytesN<32>`, `staged_by: Address`,
+and `staged_at: u64`. A new `stage_wasm` replaces the slot; `clear_staged`
+succeeds even when the slot is empty. While a hash is staged,
+`execute_upgrade` rejects a different hash with `StagedWasmMismatch`.
+See the [operator commands](ADMIN_RUNBOOK.md#staged-wasm-cli-recipes)
+and [security rules](SECURITY.md#staged-wasm-slot-issue-300).
+
+**Names that are not ABI entrypoints:** `get_staged_wasm`,
+`set_staged_wasm`, and `clear_staged_wasm` are internal storage
+helpers in [`src/staged_wasm.rs`](../src/staged_wasm.rs), not CLI
+functions. `commit_staged_wasm` is **not exported** and has no
+backward-compatibility alias; clients using that old name must migrate
+to the documented staging/upgrade flow. Do not substitute
+`clear_staged_wasm` for `clear_staged` in a contract invocation.
+
+## export_page layout
+
+The `export_page` storage encoding is versioned and pinned by a golden layout
+file at `trustbridge-contract/abi/export_page.layout.golden`. The golden file is
+the source of truth for the encoded field order and types; the contract's
+`src/storage.rs` must encode `export_page` to match it exactly.
+
+- **Layout version:** `1`
+- **Fields (in encoding order):**
+  1. `page_id`
+  2. `owner`
+  3. `entries`
+  4. `updated_at`
+
+### Drift enforcement
+
+The test suite in `trustbridge-contract/tests/export_page_layout.rs` validates
+the current `export_page` storage encoding against
+`abi/export_page.layout.golden`. Any change to the encoding that is not reflected
+in the golden file causes these tests to fail, so CI fails on layout drift.
+
+When the layout intentionally changes, bump the layout version above, update
+`abi/export_page.layout.golden`, and update the expectations in
+`tests/export_page_layout.rs` in the same change.
+
+## AuditConfig
+
+`AuditConfig` controls on-chain audit behavior. Its fields, types, and default
+values are part of the stable ABI surface and are documented here so external
+consumers can reason about audit trails without reading the contract source.
+
+- **Fields (in encoding order):**
+  1. `enabled` (`bool`) — whether audit event recording is active. **Default:** `true`
+  2. `max_events` (`u32`) — ring-buffer size: maximum number of audit events retained
+     in instance storage before the oldest is evicted. **Default:** `1000`
+  3. `log_unauthorized` (`bool`) — whether failed authorization attempts are recorded
+     as `AuditEventType::UnauthorizedAttempt` (code 6). Set to `false` to suppress
+     spam from probing bots; `AuditStats.unauthorized_attempts` still increments.
+     **Default:** `true`
+
+> **ABI note:** Earlier drafts of this document listed `retention_epochs`,
+> `max_events_per_epoch`, and `require_actor`. Those fields **do not exist** in
+> the implementation. The canonical field list above matches `src/audit.rs`
+> exactly. Codes are append-only — do not renumber existing fields.
+
+### Defaults
+
+When no `AuditConfig` has been explicitly stored (i.e. `set_audit_config` has
+never been called), the contract behaves as if the defaults above are in effect
+via `AuditConfig::default()`. Defaults are chosen to keep audit trails on by
+default and to bound storage growth; disabling auditing or lowering retention is
+an explicit, authorized action.
+
+### Entry points
+
+| Function | Auth | Notes |
+|---|---|---|
+| `get_audit_config() -> AuditConfig` | None | Returns stored config or default |
+| `set_audit_config(caller, enabled, max_events, log_unauthorized)` | Admin only | Persists config, emits `AuditConfigChangedEvent`, appends `AuditConfigChanged` log entry |
+
+### Mutation authorization
+
+`AuditConfig` may only be mutated by the contract admin. Unauthorized callers are
+rejected with `NotAuthorized` (code 3) and the stored configuration remains
+unchanged. The authorization check is enforced in `src/lib.rs` and covered by
+tests asserting unauthorized mutation attempts are rejected and themselves logged
+as `UnauthorizedAttempt` entries (using the pre-change config so an
+attacker cannot suppress their own trace via a failed disable-then-probe).
+
+### AuditEventType codes (append-only)
+
+| Code | Name | Description |
+|------|------|-------------|
+| 1 | `ContractInitialized` | `initialize` called |
+| 2 | `UserRegistered` | `register` / `register_sponsored` succeeded |
+| 3 | `UserRemoved` | `remove` / `batch_remove` removed a record |
+| 4 | `UserVerified` | `verify` / `batch_verify` verified a record |
+| 5 | `AdminAction` | Generic admin operation |
+| 6 | `UnauthorizedAttempt` | Auth check failed; gated on `log_unauthorized` |
+| 7 | `DataExported` | Paginated export operation |
+| 8 | `VerificationRevoked` | `revoke_verification` revoked a record |
+| 9 | `UserRenamed` | `rename` moved a registration |
+| 10 | `ContractPaused` | `pause` / `emergency_pause` / `set_paused` |
+| 11 | `ContractUnpaused` | `unpause` / `clear_emergency_pause` |
+| 12 | `RoleChanged` | `set_role` / `activate_role` granted a role |
+| 13 | `ContractUpgraded` | `upgrade` replaced the WASM |
+| 14 | `AuditConfigChanged` | `set_audit_config` mutated the config |
+
+> Codes are **append-only**. Indexers store the numeric discriminant; renumbering
+> silently re-labels historical entries. New variants must be added at the end.
+
+`tests/testdata/abi/public_entrypoints.golden.json` is a sorted snapshot of
+public function names and arity taken from `docs/abi.json`. `make abi-check`
+and `tests/abi_entrypoints_golden.rs` fail when an entrypoint is removed,
+renamed, or changes arity. Refresh with
+`python3 scripts/generate_abi_json.py --update-entrypoints-golden` only for an
+intentional public ABI change (Issue #631). See
+[the ABI testdata README](../tests/testdata/abi/README.md).
+
+`tests/testdata/bindings/get_address_simulate.v1.json` is a versioned golden of
+the `ScVal` XDR that `simulateTransaction` returns for `get_address` (hit and
+miss). `tests/bindings_golden.rs` fails when the contract encoding drifts, and CI
+uploads the file as the `bindings-golden-fixtures` artifact for
+`trustbridge-action/src/soroban.ts` to consume. See
+[the fixture README](../tests/testdata/bindings/README.md).
+
+### CI Integration
+
+The `differential-tests` CI job runs after the main quality gate and verifies
+TypeScript decode matches Rust golden values. This catches ABI drift early in
+the PR pipeline.
 
 ---
 
@@ -13,8 +153,10 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 ```rust
 struct ContributorRecord {
     stellar_address: Address,
+    payout_address: Address,     // separate payout recipient from identity
     registered_at: u32,  // u32 saves 4 bytes vs u64; sufficient until ~2106
     verified: bool,
+    is_bot: bool,
 }
 ```
 
@@ -128,6 +270,23 @@ enum Role {
 | Revoker | ❌ | ✅ | ❌ | ❌ |
 | Upgrader | ❌ | ❌ | ✅ | ❌ |
 
+**Optional expiry (Issues #221, #428):** `set_role` grants a role with no
+expiry. `set_role_with_expiry(target, role, expires_at: Option<u64>)` grants
+the same role with an optional Unix timestamp. The grant is active only while
+`ledger.timestamp() < expires_at`; at the exact expiry timestamp it is
+expired. Every privileged role-gated entrypoint checks expiry before role
+authorization, including `verify`, `batch_verify`, `revoke_verification`, all
+Upgrader actions, and `execute_batch_remove`'s second-signer check. An expired
+grant is rejected with `RoleExpired` (error code 57), not the generic
+`NotAuthorized` error. Renew the role with `set_role` or
+`set_role_with_expiry` before retrying. Expiry is **lazy**: stored role and
+expiry entries remain until `remove_role` deletes them. Read APIs such as
+`get_role`, `has_role`, and `get_role_holders` report an expired grant as
+absent; `get_role_expiry(address)` continues to return its raw timestamp.
+The contract admin's identity (`ADMIN_KEY`, checked by `has_admin_role`) is a
+separate immutable authority and is not affected by expiry on its RBAC
+`Role::Admin` grant.
+
 ### HealthSnapshot
 
 Returned by `get_health` (Issue #210).
@@ -141,6 +300,19 @@ struct HealthSnapshot {
     cooldown_secs: u64,
     cooldown_remaining_secs: u64,
     attestation_present: bool,
+}
+```
+
+### HealthProbes
+
+Returned by `get_health_probes` (Issue #668). Never errors — an
+uninitialized deployment reports `admin_set: false`.
+
+```rust
+struct HealthProbes {
+    paused: bool,
+    admin_set: bool,
+    index_gen: u32,             // bumped on every index removal
 }
 ```
 
@@ -192,15 +364,259 @@ struct ChallengeRecord {
 | 18 | `NoChallengeActive` | `cancel_challenge` or `complete_challenge` called with no active challenge |
 | 19 | `ChallengeNotResolvable` | `complete_challenge` called before the delay has elapsed |
 | 20 | `ChallengeActive` | `register` attempted while a challenge is active on the username |
+| 21 | `InvalidPauseReason` | `pause` / `unpause` / `set_paused` given an unrecognized reason code |
+| 22 | `AlreadyReserved` | `add_reserved` for a username already on the reserved list |
+| 23 | `NotReserved` | `remove_reserved` for a username not on the reserved list |
+| 24 | `UsernameReserved` | `register` for a username on the reserved list |
+| 25 | `ReservedListFull` | Reserved list has reached its maximum size |
+| 26 | `AdminTransferPending` | `propose_admin_transfer` while a transfer is already pending |
+| 27 | `AdminTransferDelayActive` | `execute_admin_transfer` before the delay has elapsed |
+| 28 | `NoPendingAdminTransfer` | `execute_admin_transfer` with no pending proposal |
+| 29 | `AttestationRequired` | `upgrade` without an attestation while attestation-required mode is on |
+| 30 | `NetworkMismatch` | Instance state was initialized on a different network than the one executing (Issue #231 / #401) |
+| 31 | `VerifierAllowlistFull` | `add_verifier` would exceed the `MAX_VERIFIERS` cap (Issue #293) |
+| 32 | `VerifierNotAllowlisted` | `remove_verifier` for an address not on the allowlist (Issue #293) |
+| 33 | `VerifierExpiryInPast` | `add_verifier` given a non-zero `expires_at` not in the future (Issue #293) |
+| 34 | `NoPendingRoleGrant` | `activate_role` / `cancel_role_grant` with no pending grant (Issue #220) |
+| 35 | `RoleGrantNotReady` | `activate_role` before the grant's timelock elapsed (Issue #220) |
+| 36 | `ProvenanceMissing` | `assert_build` / `set_provenance_digests` before any provenance record exists (Issue #225) |
+| 37 | `ProvenanceMismatch` | `assert_build` given a hash that does not match stored provenance (Issue #225) |
+| 39 | `StagedWasmMismatch` | `upgrade` / `execute_upgrade` was given a WASM hash that does not match the staged-WASM slot (Issue #300) |
+| 40 | `UpgradeProposalAlreadyPending` | `propose_multisig_upgrade` was called while a proposal is already live (Issue #301) |
+| 41 | `NoUpgradeProposalPending` | `approve_upgrade` / `execute_upgrade` / `cancel_upgrade_proposal` was called with no live proposal (or a proposal id that does not match) (Issue #301) |
+| 42 | `UpgradeProposalAlreadyApproved` | `approve_upgrade` was called by an address that already approved this proposal (Issue #301) |
+| 43 | `UpgradeProposalDelayActive` | `execute_upgrade` was called before the proposal's delay elapsed (Issue #301) |
+| 44 | `UpgradeProposalInsufficientApprovals` | `execute_upgrade` was called before the approval threshold was met (Issue #301) |
+| 46 | `FallbackListFull` | `register` was given more fallback addresses than `MAX_FALLBACK_ADDRESSES` |
+| 47 | `UsernameTaken` | `rename` was called with a `new_username` that is already registered |
+| 48 | `RotationRequired` | `register` was asked to change the registered address while the rotation delay is armed (Issue #234) — use the request/execute rotation flow |
+| 49 | `RotationPending` | A rotation is already pending for this username (Issue #234) |
+| 50 | `NoRotationPending` | `execute_address_rotation` / `cancel_address_rotation` was called with no pending rotation (Issue #234) |
+| 51 | `RotationNotReady` | `execute_address_rotation` was called before the delay has elapsed (Issue #234) |
+| 52 | `InvalidCursor` | A pagination cursor no longer decodes against the current registry state (Issue #215) |
+| 53 | `VerifyRateLimited` | A non-admin caller would exceed its per-ledger verify/revoke cap (Issue #292) |
+| 54 | `DualControlRequired` | `batch_remove` was called with a batch larger than the configured dual-control threshold (Issue #219) — use `propose_batch_remove` / `execute_batch_remove` instead |
+| 55 | `BatchRemoveProposalPending` | `propose_batch_remove` was called while a proposal is already pending (Issue #219) |
+| 56 | `NoPendingBatchRemove` | `execute_batch_remove` / `cancel_batch_remove` was called with no live (or already-expired) proposal (Issue #219) |
+| 57 | `RoleExpired` | A role-gated privileged invocation was made at or after the role's expiry timestamp |
+| 58 | `OracleProofBadLayout` | `verify_with_proof`: empty `message` or all-zero `signature` (structurally malformed proof) |
+| 59 | `OracleProofNotAllowlisted` | `verify_with_proof`: `oracle_pubkey` is not on the oracle allowlist (always, when it is empty) |
+| 60 | `OracleProofExpired` | `verify_with_proof`: non-zero `expires_at` is earlier than the ledger timestamp |
+| 61 | `OracleProofBadSignature` | `verify_with_proof`: signature is not a canonical Ed25519 encoding |
+| 62 | `AddressMismatch` | `verify_with_oracle_proof`: proof message is not bound to the record's current `stellar_address` |
+
+> **`NetworkMismatch` moved from 21 to 30.** This table previously listed it at
+> code 21 while the enum had `InvalidPauseReason` there and no `NetworkMismatch`
+> variant at all — a client built from these docs would have decoded a bad
+> pause-reason as a network mismatch (Issue #402). Code 30 was an unused gap, so
+> filling it leaves every other discriminant untouched and is not an ABI break.
+> `scripts/check_error_codes.sh` now fails CI if this table, `src/error.rs`, and
+> `abi/contract_error_codes.golden` drift apart again.
 
 `ContractError::from_code(u32)` maps every code in this table back to the typed
 variant and returns `None` for any unrecognized code. Every code round-trips
 through `from_code(variant.code()) == Some(variant)` — verified by the unit
 tests in `src/lib.rs` (`test_error_from_code_is_inverse_of_code`).
 
+#### Off-chain retry classification
+
+`ContractError::category()` (`src/error.rs`) maps every variant to one of three
+buckets so the dashboard, the action runner, and the indexer can pick a retry
+policy without parsing strings or maintaining their own code list. The match is
+exhaustive at compile time — a new variant cannot be added without classifying
+it. `ContractError::is_retryable()` is the shorthand for `category() == Retry`.
+
+| Category | Meaning | Off-chain action |
+|----------|---------|------------------|
+| `Retry` | Transient — the blocking condition clears with time or an unrelated state change | Re-submit the same transaction later with backoff |
+| `Auth` | The caller did not satisfy an authorization check | Do not retry with the same signer; a key holder must act |
+| `Fatal` | The request is malformed or violates an invariant, or a one-shot call was already made | Do not retry verbatim; change the request or abort |
+
+| Variant | Category | Rationale |
+|---------|----------|-----------|
+| `NotAuthorized` | `Auth` | Wrong signer / missing role |
+| `AttestationRequired` | `Auth` | Admin must publish an attestation first |
+| `Paused` | `Retry` | Succeeds once the admin unpauses |
+| `CooldownActive` | `Retry` | Succeeds once the cooldown window elapses |
+| `ChallengeNotResolvable` | `Retry` | Succeeds once the challenge delay elapses |
+| `ChallengeActive` | `Retry` | Succeeds once the active challenge is resolved |
+| `AdminTransferDelayActive` | `Retry` | Succeeds once the transfer delay elapses |
+| `AlreadyInitialized` | `Fatal` | One-shot call already made |
+| `NotInitialized` | `Fatal` | Needs an operator to run `initialize` |
+| `NotRegistered` | `Fatal` | Referenced username does not exist |
+| `AlreadyVerified` / `NotVerified` | `Fatal` | Record already in the requested state |
+| `InvalidVersion` | `Fatal` | Target version not strictly greater |
+| `InvalidRole` | `Fatal` | Unknown role discriminant |
+| `InvalidUsername` | `Fatal` | Username fails validation |
+| `AttestationExpired` | `Fatal` | Needs a fresh `attest_upgrade` |
+| `UnattestedWasm` | `Fatal` | Hash does not match the live attestation |
+| `InvalidBatchSize` | `Fatal` | Batch too large or empty |
+| `InvalidReasonCode` / `InvalidPauseReason` | `Fatal` | Unknown reason discriminant |
+| `ZeroAddress` | `Fatal` | Burn address rejected |
+| `ChallengeAlreadyActive` / `NoChallengeActive` | `Fatal` | Challenge state precondition not met |
+| `AlreadyReserved` / `NotReserved` | `Fatal` | Reserved-list precondition not met |
+| `UsernameReserved` | `Fatal` | Username is on the reserved list |
+| `ReservedListFull` | `Fatal` | Reserved list at capacity |
+| `AdminTransferPending` / `NoPendingAdminTransfer` | `Fatal` | Admin-transfer state precondition not met |
+| `NetworkMismatch` | `Fatal` | The executing network does not change between attempts |
+| `VerifierAllowlistFull` / `VerifierNotAllowlisted` / `VerifierExpiryInPast` | `Fatal` | Verifier-allowlist precondition not met |
+| `NoPendingRoleGrant` | `Fatal` | No grant to activate or cancel |
+| `RoleGrantNotReady` | `Retry` | Succeeds once the grant timelock elapses |
+| `ProvenanceMissing` / `ProvenanceMismatch` | `Fatal` | Nothing deployed yet, or the hash does not match |
+
+Completeness is enforced by `src/error.rs` unit tests
+(`every_error_code_has_a_category`, `retryable_errors_are_the_transient_set`,
+`auth_failures_are_classified_as_auth`, `bad_request_errors_are_fatal`).
+
 ---
 
+### RoleHolder (Issue #228)
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `address` | `Address` | Address holding the role |
+| `role` | `Role` | Role held, as the `Role` discriminant |
+
+### PendingRotation (Issue #234)
+
+Returned by `get_pending_rotation`. Represents an address rotation that has
+been requested but not yet executed.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `new_address` | `Address` | The address the registration will move to on execution |
+| `requested_at` | `u64` | Ledger timestamp the rotation was requested |
+| `executable_at` | `u64` | Earliest ledger timestamp at which `execute_address_rotation` may succeed |
+
+### PendingBatchRemove (Issue #219)
+
+Returned by `get_pending_batch_remove`. Represents a dual-control batch-remove
+proposal that has been queued but not yet executed or cancelled.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `usernames` | `Vec<String>` | Exact usernames to remove on execution |
+| `proposed_by` | `Address` | Address that called `propose_batch_remove`; `execute_batch_remove` rejects this address as executor |
+| `proposed_at` | `u64` | Ledger timestamp the proposal was created |
+
+### ExportAttestation (Issue #223)
+
+Returned by `export_attestation`. Bundles a paginated export page with a
+deterministic SHA-256 digest so off-chain consumers can verify the export
+matches what the contract held at the snapshot ledger.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `page` | `ExportPage` | The page as `get_registered_paginated` would return it |
+| `digest` | `BytesN<32>` | SHA-256 over `page`'s XDR encoding |
+| `version` | `Vec<u32>` | Contract version `[major, minor, patch]` at snapshot time |
+| `ledger` | `u32` | Ledger sequence the snapshot was taken at |
+
+### RecordProof (Issue #230)
+
+Returned by `get_record_proof`. Lets a light client confirm a single
+registration's existence and verified status without paging the full registry.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `exists` | `bool` | `true` when a record is currently stored for the queried username |
+| `verified` | `bool` | `true` when the record is verified; always `false` when `exists` is `false` |
+| `registered_at` | `u32` | Ledger timestamp the record was last written; `0` when absent |
+| `as_of_ledger` | `u32` | Ledger sequence at which the proof was taken |
+| `ttl_threshold_ledgers` | `u32` | Remaining-TTL threshold below which the entry is bumped |
+| `ttl_bump_ledgers` | `u32` | How far ahead of the current ledger a bump extends the entry |
+| `key_prefix` | `Symbol` | Symbol half of the record's storage key |
+
+### RepairReport (Issue #368)
+
+Returned by `repair_index`. Contains the stored counter values and the values
+recomputed by walking the index, so an operator can review any discrepancy
+before committing a correction.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `stored_count` | `u32` | Value of `count` read from instance storage |
+| `recomputed_count` | `u32` | Value recomputed by walking the index |
+| `stored_verified` | `u32` | Value of `verified` read from instance storage |
+| `recomputed_verified` | `u32` | Value recomputed by counting `verified = true` records |
+| `drifted` | `bool` | `true` when either counter differed from its recomputed value |
+
+### VerifierAllowEntry (Issue #293)
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `address` | `Address` | Allowlisted verifier |
+| `expires_at` | `u64` | Ledger timestamp after which the entry is inactive; `0` = no expiry |
+| `added_at` | `u64` | Ledger timestamp the entry was added or last refreshed |
+
+### EventDomain (Issue #226)
+
+Attached as the `domain` field of **every** event this contract emits.
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `contract_id` | `Address` | Emitting contract instance |
+| `network_id` | `BytesN<32>` | SHA-256 of the network passphrase |
+| `contract_version` | `(u32, u32, u32)` | Contract version at emit time |
+| `domain_version` | `u32` | Envelope schema version — currently `1` |
+
+Indexers should scope deduplication to `(contract_id, network_id)`. See
+[EVENT_INDEXING.md](./EVENT_INDEXING.md#event-domain-separation-issue-226).
+
+This is an additive change to all 12 events: no field was renamed, retyped, or
+removed, and topic assignments are unchanged. Consumers that decode events
+positionally must be updated; consumers that ignore unknown fields need no
+change.
+
+## Batch size limits (Issue #227)
+
+`batch_verify` and `batch_remove` are capped at **`MAX_WRITE_BATCH` = 25**
+entries, not the generic `BatchConfig::default().max_batch_size` of 100.
+
+The 100 was a shape check that was never derived from what a batch costs. Each
+accepted entry pays a persistent read, a persistent write, a TTL extension, an
+event publish, and an audit-log append; the worst case is a full batch of
+39-character usernames that all need writing. Soroban exposes no host function
+for querying remaining instruction budget, so a contract cannot check its
+headroom mid-loop — a batch that overruns simply traps, with no partial success
+to fall back on. The cap therefore has to be conservative and measured rather
+than checked at runtime.
+
+Passing more than 25 entries returns `InvalidBatchSize` (code 14) **before any
+state is written**.
+
+### Fail-before-write
+
+`batch_verify` runs in two phases. Phase 1 resolves every entry and collects
+only those that will actually change, writing nothing; phase 2 applies them.
+A rejected batch therefore touches no state at all.
+
+Both entry points now write each counter **once per batch** instead of a
+read-modify-write per entry — 2 storage operations rather than 2N, and `count`
+and `vcount` move exactly once, with no intermediate state in which one has been
+advanced for some entries but not others.
+
+Duplicate usernames within a single batch are collapsed in phase 1, so a
+repeated entry is counted once against `vcount`.
+
+**Raising `MAX_WRITE_BATCH` requires re-running `test_bench_batch_verify_max`
+and `test_bench_batch_remove_max`, not just editing the constant.**
+
 ## Functions
+
+### `stage_wasm(caller: Address, wasm_hash: BytesN<32>) -> Result<(), ContractError>`
+
+Stages the intended upgrade hash; admin or Upgrader authorization required.
+Replaces any existing staged slot.
+
+### `get_staged() -> Option<StagedWasm>`
+
+Public read of the staged slot, returning `None` when empty.
+
+### `clear_staged(caller: Address) -> Result<(), ContractError>`
+
+Admin-only, idempotent slot clearing. This is the exported function, not
+the internal `clear_staged_wasm` helper; `commit_staged_wasm` is not exported.
 
 ### `initialize(admin: Address) -> Result<(), ContractError>`
 
@@ -225,15 +641,15 @@ stellar contract invoke --id $ID --source deployer --network testnet --send=yes 
 
 ---
 
-### `register(github_username: String, stellar_address: Address) -> Result<(), ContractError>`
+### `register(github_username: String, stellar_address: Address, fallback_addresses: Vec<Address>) -> Result<(), ContractError>`
 
-Register or update a GitHub username mapping.
+Register or update a GitHub username mapping. `entity_type` distinguishes personal users (0), orgs (1), and teams (2). Teams require `org_name`.
 
 | | |
 |---|---|
-| **Auth** | `stellar_address` must sign; if the username is already registered to a *different* address, that address must sign too |
+| **Auth** | `stellar_address` must sign; if the username is already registered to a *different* address, that address must sign too; each fallback address must also sign |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `Paused`, `InvalidUsername`, `ZeroAddress` |
+| **Errors** | `NotInitialized`, `Paused`, `InvalidUsername`, `ZeroAddress`, `FallbackListFull` |
 | **Events** | `RegisteredEvent` |
 
 **Zero-address rejection:**
@@ -241,7 +657,7 @@ Register or update a GitHub username mapping.
 `stellar_address` must not be the well-known zero/burn address
 (`GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF`, the strkey
 encoding of an all-zero ed25519 public key), or the call fails with
-`ZeroAddress` (code 15), checked before `require_auth`. On a live network
+`ZeroAddress` (code 16), checked before `require_auth`. On a live network
 `require_auth` would already reject this address — no private key exists for
 it — but `mock_all_auths` in tests and local sandboxes bypasses that check, so
 the explicit guard is what actually stops a mistaken zero-address registration
@@ -260,6 +676,16 @@ instead of an opaque auth failure. Use `is_address_zero` to pre-check.
 | ASCII alphanumerics, `-`, `_` | `user_123`, `bob-smith` | `a@invalid`, `dot.name`, `has space` |
 | First and last character alphanumeric | `alice`, `7` | `-invalid`, `invalid-`, `_leading`, `trailing_` |
 | No consecutive hyphens | `foo-bar-baz` | `foo--bar` |
+
+**Case folding (Issue #194).** GitHub logins are case-insensitive, so every
+persistent storage key built from `github_username` uses its ASCII-lowercased
+canonical form — `Alice`, `ALICE`, and `alice` all resolve to one record.
+Registering a case variant of an existing login updates that record (subject
+to the same `old.stellar_address.require_auth()` protection a same-case
+re-registration requires) rather than creating a second, independent entry.
+Paginated exports and `get_all_registered` report the canonical (lowercased)
+username; domain events report the raw string as submitted. See
+[SECURITY.md § Username Case-Folding](SECURITY.md#5-username-case-folding-issue-194).
 
 Two deliberate choices:
 
@@ -296,6 +722,17 @@ Behavior:
 **Copy-pasteable examples**
 
 ```bash
+# Register personal account
+stellar contract invoke --id $ID --source deployer --network testnet --send=yes \
+  -- register --github-username octocat --stellar-address G... --entity-type 0
+
+# Register org
+stellar contract invoke --id $ID --source deployer --network testnet --send=yes \
+  -- register --github-username my-org --stellar-address G... --entity-type 1 --org-name my-org
+
+# Register team
+stellar contract invoke --id $ID --source deployer --network testnet --send=yes \
+  -- register --github-username my-team --stellar-address G... --entity-type 2 --org-name my-org
 # New registration (registrant signs with the Stellar address being registered)
 stellar contract invoke --id $CONTRACT_ID \
   --source-account deployer \
@@ -327,6 +764,24 @@ stellar contract invoke --id $CONTRACT_ID \
 | `InvalidUsername` (code 11) | Username empty, >39 chars, or contains disallowed characters | Use 1–39 ASCII alphanumerics, hyphens, underscores |
 | `NotAuthorized` (code 3) | `stellar_address` did not sign, or old address did not sign on transfer | Ensure the correct source account is used |
 
+
+---
+
+### `register_sponsored(github_username: String, stellar_address: Address, sponsor: Address) -> Result<(), ContractError>`
+
+Register or update a GitHub username mapping sponsored by a maintainer/account.
+
+| | |
+|---|---|
+| **Auth** | Both `stellar_address` and `sponsor` must sign; if already registered to a different address, that old address must sign too (double-auth protection) |
+| **Mutates** | Yes |
+| **Errors** | `NotInitialized`, `Paused`, `InvalidUsername` |
+| **Events** | `RegisteredEvent` (carrying the sponsor) |
+
+```bash
+stellar contract invoke --id $ID --source sponsor_key --network testnet --send=yes \
+  -- register_sponsored --github-username octocat --stellar-address G... --sponsor G...
+```
 
 ---
 
@@ -398,6 +853,49 @@ Read-only lookup. Returns `null`/`None` if not registered.
 stellar contract invoke --id $ID --source deployer --network testnet \
   -- get_address --github-username octocat
 ```
+
+> **Payout-address resolution (GitHub Action):** do **not** use `get_address`
+> for CI payouts — it returns the record whether or not `verified` is set, so an
+> unverified squatter registration would be paid. Use
+> `get_address_if_verified` instead.
+
+---
+
+### `get_address_if_verified(github_username: String) -> Result<ContributorRecord, ContractError>`
+
+Verified-only address lookup for CI payouts (Issue #287). `get_address` is left
+unchanged; this is a versioned sibling read with stricter semantics.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+| **Works while paused** | Yes (same as `get_address`) |
+| **Errors** | `NotRegistered` (code 4), `NotVerified` (code 6) |
+
+| Registry state | Result |
+|---|---|
+| Registered **and** `verified == true` | `Ok(ContributorRecord)` |
+| Registered but `verified == false` | `Err(NotVerified)` — code `6` |
+| Never registered / removed | `Err(NotRegistered)` — code `4` |
+
+```bash
+stellar contract invoke --id $ID --source deployer --network testnet \
+  -- get_address_if_verified --github-username octocat
+```
+
+**Action-oriented ABI note.** The payout resolver in the GitHub Action must:
+
+1. Call `get_address_if_verified(github_username)`.
+2. On `Ok`, read `payout_address` (falls back to `stellar_address`) and pay.
+3. On **any** `Err` — both code `4` (`NotRegistered`) and code `6`
+   (`NotVerified`) — **do not pay**. Surface the distinction in logs only; the
+   pay/skip decision is the same for both.
+4. Pause is *not* checked by this read. If payouts should also halt while the
+   registry is frozen, gate the job on `is_paused()` separately.
+
+Contract-side behaviour is pinned by `test_verified_only_lookup_*` in
+`src/lib.rs`.
 
 ---
 
@@ -568,47 +1066,330 @@ failure symptoms, and `make bench` reproduction commands.
 | Field | Type | Semantics |
 |-------|------|-----------|
 | `records` | `Vec<(String, ContributorRecord)>` | Current page |
-| `next_cursor` | `Option<u32>` | Next zero-based index offset, or `None` when done |
+| `next_cursor` | `Option<BytesN<8>>` | Opaque cursor for the next call, or `None` when done |
 | `total` | `u32` | Live registration count |
 | `has_more` | `bool` | `true` when another page exists |
+| `merkle_root` | `BytesN<32>` | Merkle root over `records`, in page order (Issue #216) |
+
+### Merkle root over an export page (Issue #216)
+
+`merkle_root` lets a treasury or dashboard prove a specific
+`(github_username, stellar_address, verified)` triple was present in a given
+export page without republishing the whole registry, and lets anyone detect
+an edited off-chain CSV copy of that page (its recomputed root would not
+match the one the contract returned).
+
+**Leaf encoding:**
+
+```text
+leaf = SHA256("trustbridge/export-leaf/v1:" || username_bytes || 0x00 || address_strkey_bytes || verified_byte)
+```
+
+- `username_bytes` — raw bytes of the entry's `github_username` exactly as it
+  appears in `records` (its canonical, lowercased form — see
+  [SECURITY.md § Username Case-Folding](SECURITY.md#5-username-case-folding-issue-194)).
+- `0x00` — fixed separator between the username and address byte strings.
+- `address_strkey_bytes` — raw bytes of `record.stellar_address`'s Stellar
+  strkey (the `G...` string), not its internal binary encoding.
+- `verified_byte` — `0x01` if `record.verified`, else `0x00`. The verified
+  flag is part of the leaf, so a proof attests to verification status at
+  export time, not just membership.
+
+`merkle_leaf_hash(github_username, stellar_address, verified) -> BytesN<32>`
+is a read-only, no-auth contract call exposing this exact computation, so
+off-chain tooling can check its own reimplementation against the on-chain one
+before trusting proofs built from it.
+
+**Tree construction:** a standard bottom-up binary tree,
+`node = SHA256("trustbridge/export-node/v1:" || left || right)`, over the
+page's leaves in page order. When a level has an odd number of nodes, the
+last one is promoted to the next level **unchanged** — never duplicated or
+re-hashed with itself. An empty page's root is 32 zero bytes; a one-record
+page's root is that single leaf's hash unchanged (every level promotes it).
+
+**Scope:** one root per page, not a historic accumulator over the registry's
+lifetime, and no zero-knowledge proof — a verifier needs the leaf's plaintext
+fields and a sibling-hash path, like any standard Merkle proof. See
+`src/merkle.rs` for the reference implementation and
+`tests/merkle_export.rs` for a worked inclusion proof (built independently of
+the contract's own tree code) that verifies for a member and fails for a
+non-member.
+
+#### Cross-page Merkle root stability (Issue #619)
+
+Merkle roots in `get_public_paginated` and exported record snapshots satisfy cross-page root stability:
+- **Snapshot Determinism**: For a fixed, unchanged registry snapshot, reconstructing the exported records via sequential pagination yields an identical record sequence and identical full-export Merkle root regardless of the `limit` parameter or page boundary splits (e.g. limit 1, 2, 5, 10, or 50).
+- **Page Offset and Window Stability**: When different page queries return the same underlying record set (such as tail pages where `limit >= remaining_records`), `ExportPage.merkle_root` is identical across calls.
+- **Empty Tail and Single-Record Edge Cases**: An empty registry or a cursor past the end of the registry returns an empty record set with the canonical all-zero sentinel root (`[0u8; 32]`). A single-record page root is strictly equal to that single leaf's hash.
+- **Mutation Sensitivity**: Removing a record invalidates prior roots and previous page cursors. Changing bot status via `set_bot_status` preserves leaf consistency under the v1 leaf schema.
+- **Initialization Gate**: Uninitialized contract calls fail with `ContractError::NotInitialized` rather than returning an empty root.
+
+#### ExportPage layout compatibility
+
+The checked-in golden layout at
+`abi/export_page.layout.golden` is enforced by
+`export_page_layout_preserves_golden_prefix`. Existing `ExportPage` fields must
+keep their names, types, and order. New fields may be appended and remain
+backward-compatible with existing dashboard parsers; inserting or reordering a
+field is a breaking change.
+
+To intentionally accept a breaking layout change, update the golden file in the
+same commit, increment the ABI/schema version recorded in the release change,
+and document the old and new field order in the pull request. The layout test
+must pass with the updated golden before release.
 
 ### `get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
+
+
+### `set_oracle_allowlist(pubkeys: Vec<BytesN<32>>) -> Result<(), ContractError>`
+
+Replaces the Ed25519 oracle public keys whose proofs
+`verify_with_oracle_proof` accepts (Issue #584). An empty list disables oracle
+verification. **Auth:** contract admin.
+
+**Errors:** `NotInitialized`.
+
+### `get_oracle_allowlist() -> Vec<BytesN<32>>`
+
+Returns the current oracle allowlist (empty if never set). Read-only, no auth.
+
+### `verify_with_oracle_proof(github_username: String, proof: OracleProof) -> Result<(), ContractError>`
+
+Marks a registered username verified on the strength of an allowlisted
+oracle's signature instead of an admin/Verifier call. `proof` is
+`OracleProof { oracle_pubkey: BytesN<32>, message: Bytes, signature: BytesN<64>, expires_at: u64 }`,
+and `message` must be exactly
+`<github_username>:<stellar_address strkey>:<expires_at decimal>` for the
+record's current `stellar_address` — see
+[SECURITY.md](SECURITY.md#oracle-signed-proof-interface-signature-check).
+`expires_at = 0` skips the expiry check. On success the record, counters,
+`VerifiedEvent`, and audit log update exactly as for `verify`.
+
+**Auth:** the registered `stellar_address`.
+
+**Errors:** `NotInitialized`, `Paused`, `NotRegistered`, `ZeroAddress`,
+`AddressMismatch` (62),
+`OracleProofBadLayout` (58), `OracleProofNotAllowlisted` (59),
+`OracleProofExpired` (60), `OracleProofBadSignature` (61), `AlreadyVerified`.
+A well-formed signature that does not verify traps the invocation.
+
+---
+
+### `get_pending_reverify(offset: u32, limit: u32) -> Result<Vec<String>, ContractError>`
+
+Lists canonical GitHub usernames flagged for re-verification after an address
+change (`PENDING_REVERIFY_KEY`, Issue #587).
+
+| | |
+|---|---|
+| **Auth** | None (read-only) |
+| **Mutates** | No |
+| **Errors** | `NotInitialized`, `InvalidBatchSize` (`limit > MAX_PAGE_LIMIT`) |
+| **Returns** | `Vec<String>` — flagged usernames within the scanned window |
+| **Pagination** | Offset-based over the registry index: scans entries `[offset, offset + limit)` |
+| **Limit** | `0` → `DEFAULT_PAGE_LIMIT`; `> MAX_PAGE_LIMIT` (100) → `InvalidBatchSize` |
+
+Gas is bounded by `limit`, so a page may hold fewer than `limit` names (or
+none) while more remain. Advance `offset` by `limit` until it reaches
+`get_stats().total`. An empty registry returns an empty page. A name drops
+out once `verify` / `batch_verify` clears its flag; `rename` moves the flag
+to the new name.
+
+```bash
+stellar contract invoke --id $ID --network testnet \
+  -- get_pending_reverify --offset 0 --limit 100
+```
+
+---
+
+### `get_health_probes() -> HealthProbes`
+
+Pre-Wave operator probes: pause flag, admin presence, index generation
+(Issue #668). See [`CONTRACT_HEALTH.md`](CONTRACT_HEALTH.md#pre-wave-probes-issue-668).
+
+| | |
+|---|---|
+| **Auth** | None (read-only; works while paused) |
+| **Mutates** | No |
+| **Errors** | None — uninitialized reports `admin_set: false` |
+
+Preferred for liveness/uptime alerting because it never errors. See
+[CONTRACT_HEALTH.md → Choosing a probe & alert SLOs](CONTRACT_HEALTH.md#choosing-a-probe--alert-slos-issue-756).
+
+---
+
+## Pagination API Selection Guide (Issue #302)
+
+The contract exposes **three pagination APIs** for reading the registry. They
+differ in authorization, return type, and intended use case. Choose the right
+one for your integration:
+
+| API | Auth | Return Type | Verified Field | Merkle Root | Use Case |
+|-----|------|-------------|----------------|-------------|----------|
+| **`get_registered_page`** | Admin | `Vec<(String, Address)>` | ❌ No | ❌ No | Legacy offset-based admin export |
+| **`get_registered_paginated`** | Admin | `ExportPage` | ✅ Yes | ✅ Yes | Modern cursor-based admin export |
+| **`get_public_paginated`** | None | `ExportPage` | ✅ Yes | ✅ Yes | Public dashboard/indexer sync |
+
+### When to use each API
+
+**Use `get_registered_paginated` when:**
+- You are the contract admin or hold admin credentials
+- You need full `ContributorRecord` metadata (verified, registered_at, is_bot)
+- You need cursor-based pagination with opaque tokens
+- You need merkle roots for page integrity verification
+- You need export attestation support
+
+**Use `get_public_paginated` when:**
+- You are building a public dashboard or indexer
+- You don't have admin credentials
+- You need the verified flag per record (Issue #96)
+- You need cursor-based pagination with opaque tokens
+- You need merkle roots for page integrity verification
+- Works during pause (Issue #294) — critical for indexer uptime
+
+**Use `get_registered_page` when:**
+- You need simple offset-based pagination (no cursors)
+- You only need username + address (no verified field)
+- You don't need merkle roots or export attestation
+- Legacy tooling that predates cursor pagination (Issue #143)
+
+**Migration path:** `get_registered_page` → `get_registered_paginated`. The
+cursor-based API handles removals better (no silent skip/duplicate) and
+includes full record metadata.
+
+### Parity guarantees (Issue #302)
+
+All three APIs guarantee:
+- ✅ Empty registry returns empty result
+- ✅ Single record returns that record
+- ✅ Middle removal skips removed username (Issue #52)
+- ✅ Last page detection (Issue #143)
+- ✅ Works while paused (admin/public export is read-only)
+- ✅ Multi-page walk visits every live username exactly once
+
+Covered by `tests/pagination_parity.rs`.
+
+---
+
+### `get_registered_page(offset: u32, limit: u32) -> Result<Vec<(String, Address)>, ContractError>`
+
+**Offset-based** admin export returning `(github_username, stellar_address)`
+pairs. Older API — prefer `get_registered_paginated` for new integrations.
 
 | | |
 |---|---|
 | **Auth** | Admin (`admin.require_auth()`) — unchanged by Issue #143 |
 | **Mutates** | No |
-| **Errors** | `NotInitialized` |
+| **Errors** | `NotInitialized`, `NotAuthorized` |
+| **Returns** | `Vec<(String, Address)>` — username + address only |
+| **Pagination** | Offset-based: `offset=0`, `offset=limit`, `offset=2*limit`, ... |
 | **Limit** | `0` → `DEFAULT_PAGE_LIMIT`; `> MAX_PAGE_LIMIT` → clamped to `MAX_PAGE_LIMIT` |
 
+**No verified field:** This API predates Issue #96 and does not include the
+`verified` flag. If you need verification status per record, use
+`get_registered_paginated` or `get_public_paginated`.
+
+**No merkle root:** This API does not compute or return a merkle root over the
+page. For integrity verification, use `get_registered_paginated`.
+
 ```bash
+# Page 1 (offset 0)
 stellar contract invoke --id $ID --source admin --network testnet \
-  -- get_registered_paginated --cursor 0 --limit 100
+  -- get_registered_page --offset 0 --limit 50
+
+# Page 2 (offset 50)
+stellar contract invoke --id $ID --source admin --network testnet \
+  -- get_registered_page --offset 50 --limit 50
 ```
 
-### `get_public_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
+---
 
-Same page shape and limit clamping; no admin auth; requires not paused.
+### `get_registered_paginated(cursor: Option<BytesN<8>>, limit: u32) -> Result<ExportPage, ContractError>`
+
+**Cursor-based** admin export returning full `ContributorRecord` with
+metadata. Modern API — prefer this over `get_registered_page`.
+
+| | |
+|---|---|
+| **Auth** | Admin (`admin.require_auth()`) |
+| **Mutates** | No |
+| **Errors** | `NotInitialized`, `NotAuthorized`, `InvalidCursor` |
+| **Returns** | `ExportPage` — full records + pagination metadata |
+| **Pagination** | Cursor-based: opaque `BytesN<8>` tokens |
+| **Limit** | `0` → `DEFAULT_PAGE_LIMIT`; `> MAX_PAGE_LIMIT` → clamped to `MAX_PAGE_LIMIT` |
+
+**Includes verified field:** Each `ContributorRecord` has the `verified` flag,
+so you know verification status without a second lookup (Issue #96).
+
+**Merkle root included:** `ExportPage.merkle_root` is a SHA-256 commitment over
+the page for integrity verification (Issue #216).
+
+**Opaque cursors:** Never construct or parse `cursor` yourself. Always use
+`None` to start, then pass back `next_cursor` from each page. Cursors become
+invalid after registry mutations (removal) and fail with `InvalidCursor`.
 
 ```bash
-stellar contract invoke --id $ID --source deployer --network testnet \
-  -- get_public_paginated --cursor 0 --limit 100
+# Page 1 (cursor = None to start)
+stellar contract invoke --id $ID --source admin --network testnet \
+  -- get_registered_paginated --cursor null --limit 50
+
+# Page 2 (cursor from page 1's next_cursor)
+stellar contract invoke --id $ID --source admin --network testnet \
+  -- get_registered_paginated --cursor '<opaque_bytes>' --limit 50
 ```
 
-### Consumer loop
+---
+
+### `get_public_paginated(cursor: Option<BytesN<8>>, limit: u32) -> Result<ExportPage, ContractError>`
+
+**Cursor-based public export** with no auth required. Same `ExportPage` shape
+as `get_registered_paginated` — dashboards and indexers get the verified flag
+without admin credentials (Issue #96).
+
+| | |
+|---|---|
+| **Auth** | None — permissionless |
+| **Mutates** | No |
+| **Errors** | `NotInitialized` |
+| **Returns** | `ExportPage` — full records + pagination metadata |
+| **Pagination** | Cursor-based: opaque `BytesN<8>` tokens |
+| **Limit** | `0` → `DEFAULT_PAGE_LIMIT`; `> MAX_PAGE_LIMIT` → clamped to `MAX_PAGE_LIMIT` |
+
+**Works while paused (Issue #294):** Public read must stay available during
+maintenance or security pauses so indexers don't fall behind. Previously this
+returned `Paused`; that gate was removed.
+
+**Includes verified field:** Same full `ContributorRecord` as the admin API —
+no second lookup needed to know who is verified.
+
+**Cursors interchangeable:** A cursor from `get_registered_paginated` can be
+passed to `get_public_paginated` and vice versa — both read the same index.
+
+```bash
+# Page 1 (cursor = None to start, no auth)
+stellar contract invoke --id $ID --network testnet \
+  -- get_public_paginated --cursor null --limit 50
+
+# Page 2 (cursor from page 1's next_cursor)
+stellar contract invoke --id $ID --network testnet \
+  -- get_public_paginated --cursor '<opaque_bytes>' --limit 50
+```
+
+---
+
+### Consumer loop (cursor-based APIs)
 
 ```text
-cursor ← 0
+cursor ← None
 repeat:
   page ← get_registered_paginated(cursor, limit)   # or get_public_paginated
   process(page.records)
-  if page.has_more is false OR page.next_cursor is None:
+  if not page.has_more:
     stop
   cursor ← page.next_cursor
 ```
 
-Exhaustion is when `has_more == false` / `next_cursor == None` (including an
-empty page when `cursor >= total`).
+Exhaustion is when `has_more == false` (equivalently, `next_cursor == None`).
 
 Boundary tests: `test_paginated_export_at_max_page_limit`,
 `test_paginated_export_over_max_page_limit_clamps` in `src/lib.rs`.
@@ -617,18 +1398,25 @@ Boundary tests: `test_paginated_export_at_max_page_limit`,
 
 ### `config_verification(caller: Address, attestation: Symbol, expires_in: u64, threshold: u32) -> Result<(), ContractError>`
 
-Stores the verification configuration parameters (attestation symbol, expiration window, and threshold). Can only be called once by the contract admin.
+Stores the verification configuration parameters (attestation symbol, expiration window, and threshold). Can only be called once by the contract admin. Emits `VerificationConfiguredEvent` on success.
 
 | | |
 |---|---|
 | **Auth** | Admin |
 | **Mutates** | Yes |
+| **Events** | `VerificationConfiguredEvent` |
 | **Errors** | `NotInitialized`, `Paused`, `NotAuthorized`, `AlreadyInitialized` |
 
 ```bash
 stellar contract invoke --id $ID --source admin --network testnet --send=yes \
   -- config_verification --caller G... --attestation github_att --expires-in 3600 --threshold 2
 ```
+
+---
+
+### `get_verification_config() -> Option<VerificationConfig>`
+
+Returns the stored verification configuration (`attestation`, `expires_in`, `threshold`), or `None` if `config_verification` has not been called yet. Read-only; no auth required.
 
 ---
 
@@ -647,45 +1435,25 @@ footprint limit. Same shape as `get_all_registered` — no `verified` flag; use
 
 ---
 
-### `get_registered_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
+### `get_registered_paginated` / `get_public_paginated` (cursor-based export)
 
-Admin-gated paginated export. Each entry is a full `ContributorRecord`, so the
-`verified` bit travels with every row — no second call or cross-reference
-against `get_address` is needed to know verification status (Issue #96).
-
-| | |
-|---|---|
-| **Auth** | Admin |
-| **Mutates** | No |
-| **Errors** | `NotInitialized` |
-
-`limit = 0` defaults to `DEFAULT_PAGE_LIMIT` (20); any value above
-`MAX_PAGE_LIMIT` (100) is clamped down to it. `next_cursor` is `Some` while
-`has_more` is true; pass it back as `cursor` to continue.
+Documented once under [Pagination API Selection
+Guide](#pagination-api-selection-guide-issue-302):
+`get_registered_paginated(cursor: Option<BytesN<8>>, limit)` (admin) and
+`get_public_paginated(cursor: Option<BytesN<8>>, limit)` (permissionless).
+Cursors are opaque `BytesN<8>` tokens — never construct or parse one yourself;
+start from `None` and pass back each page's `next_cursor`. A cursor issued
+before a registry removal fails with `InvalidCursor` (see
+`tests/cursor_pagination.rs` and the soak notes in
+`docs/REGISTRY_INVARIANTS.md`). `limit = 0` defaults to `DEFAULT_PAGE_LIMIT`
+(20); values above `MAX_PAGE_LIMIT` (100) clamp down to it. `next_cursor` is
+`Some` while `has_more` is true; pass it back as `cursor` to continue.
 
 ```bash
 stellar contract invoke --id $ID --source admin --network testnet \
-  -- get_registered_paginated --cursor 0 --limit 50
-```
-
----
-
-### `get_public_paginated(cursor: u32, limit: u32) -> Result<ExportPage, ContractError>`
-
-Same `ExportPage` shape as `get_registered_paginated` — including the
-`verified` flag per record — but callable by anyone. This is the
-unauthenticated read path for dashboards and indexers that need
-username + address + verified without an admin key (Issue #96).
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Mutates** | No |
-| **Errors** | `NotInitialized`, `Paused` |
-
-```bash
-stellar contract invoke --id $ID --source deployer --network testnet \
-  -- get_public_paginated --cursor 0 --limit 50
+  -- get_registered_paginated --cursor null --limit 50
+stellar contract invoke --id $ID --network testnet \
+  -- get_public_paginated --cursor null --limit 50
 ```
 
 ---
@@ -804,9 +1572,99 @@ after the record has already been through one full cycle. Covered by
 
 ---
 
+### `extend_registry_ttl(usernames: Vec<String>) -> Result<u32, ContractError>`
+
+Extends the time-to-live (TTL) for persistent storage entries of multiple
+registered usernames. Returns the count of successfully extended records.
+
+This is the on-chain keeper endpoint: an off-chain job periodically calls this
+to prevent registered records from being archived when their TTL drops below
+the Soroban host's minimum threshold (~30 days of remaining TTL).
+
+| | |
+|---|---|
+| **Auth** | None — permissionless by design |
+| **Mutates** | TTL only (no state changes beyond bumping TTL) |
+| **Errors** | `NotInitialized`, `InvalidBatchSize` |
+| **Returns** | `u32` — count of usernames that were found and extended |
+| **Since** | 1.0.0 |
+
+**Permissionless access.** Any caller can extend TTL for any username. This is
+intentional: the keeper is not privileged, and allowing any address to help
+keep the registry alive reduces operational single points of failure. The
+operation is read-like (no state mutation beyond TTL extension), so there is
+no griefing risk.
+
+**Batch size limits:**
+- Minimum: 1 username (empty list fails with `InvalidBatchSize`)
+- Maximum: **100 usernames** (`BatchConfig::default().max_batch_size`)
+- Exceeding the limit fails with `InvalidBatchSize` (error code 14)
+
+The 100-username cap is higher than write operations (`batch_verify`,
+`batch_remove` use 25) because TTL extension is cheap — just a persistent
+`.extend_ttl()` call with no record deserialization, event publishing, or
+audit logging.
+
+**Partial success:** If a username in the batch is not registered (e.g.
+removed since the keeper's list was built), it is silently skipped and not
+counted in the returned total. This is by design — the keeper's off-chain
+list can lag behind on-chain removals, and failing the entire batch over one
+stale entry would be worse than skipping it.
+
+**Idempotent:** Extending TTL for a username that was recently extended is
+safe and succeeds again. The host TTL is simply bumped to `current_ledger +
+TTL_BUMP` each time.
+
+**Works while paused:** Unlike state-mutating functions, `extend_registry_ttl`
+remains available when the contract is paused, so the keeper can continue
+extending TTL during a maintenance window.
+
+```bash
+# Keeper extending TTL for cold records
+stellar contract invoke --id $ID --source keeper --network testnet --send=yes \
+  -- extend_registry_ttl --usernames '["alice","bob","carol"]'
+```
+
+**Keeper implementation notes:**
+1. Read the full registry via `get_public_paginated` (permissionless) or
+   `get_registered_paginated` (admin-only)
+2. Identify usernames with remaining TTL below a threshold (e.g. 30 days)
+3. Batch them into groups of up to 100 and call `extend_registry_ttl`
+4. Budget XLM for keeper fees based on registry size and cadence
+
+See [STORAGE_RENT.md](STORAGE_RENT.md#keeper-implementation) for the complete
+keeper workflow and cost estimation.
+
+---
+
+### `set_bot_status(caller: Address, github_username: String, is_bot: bool) -> Result<(), ContractError>`
+
+Sets the bot-account status flag on a contributor record.
+
+| | |
+|---|---|
+| **Auth** | `caller` must sign; must be admin or registrant |
+| **Mutates** | Yes |
+| **Errors** | `NotInitialized`, `NotRegistered`, `NotAuthorized` |
+| **Events** | `BotStatusChangedEvent` |
+
+```bash
+# Registrant setting own bot flag
+stellar contract invoke --id $ID --source registrant --network testnet --send=yes \
+  -- set_bot_status --caller G... --github-username octocat --is_bot true
+
+# Admin setting bot flag
+stellar contract invoke --id $ID --source admin --network testnet --send=yes \
+  -- set_bot_status --caller G... --github-username octocat --is_bot true
+```
+
+---
+
 ### `get_verified_count() -> u32`
 
-Returns the number of verified registrations.
+Returns the number of **currently** verified registrations. This figure drops
+when a verification is revoked. For "how many were ever verified", read
+[`get_ever_verified_count`](#get_ever_verified_count---u32) instead.
 
 | | |
 |---|---|
@@ -829,9 +1687,39 @@ stellar contract invoke --id $ID --source deployer --network testnet \
 
 ---
 
+### `get_ever_verified_count() -> u32`
+
+Returns how many verifications have ever been granted, including any since
+revoked (Issue #229). Monotonic: it never decreases.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+
+`get_verified_count()` answers "who is verified right now" and moves in both
+directions; this answers "how many did we ever verify" and only climbs. A
+contributor verified, revoked, and verified again counts twice here — the
+counter records verification events, not distinct contributors.
+
+Instances deployed before this counter existed have no stored value and report
+the live verified count instead of zero, which is the tightest lower bound the
+contract can still prove after the fact.
+
+```bash
+stellar contract invoke --id $ID --source deployer --network testnet \
+  -- get_ever_verified_count
+```
+
+---
+
 ### `get_stats() -> Stats`
 
-Returns `{ total, verified }` registration counts.
+Returns `{ total, verified, ever_verified }` registration counts.
+
+`verified` is the live count and falls on revoke; `ever_verified` is the
+monotonic historical count described above. `total` is the number of
+registered contributors.
 
 | | |
 |---|---|
@@ -848,6 +1736,9 @@ stellar contract invoke --id $ID --source deployer --network testnet \
 ### `pause() -> Result<(), ContractError>`
 
 Pauses all state-mutating contract operations. Admin-only.
+
+Paste-ready CLI + Stellar Lab recipes for this and every other admin op:
+[ADMIN_RUNBOOK.md § Stellar Lab & CLI invoke recipes](ADMIN_RUNBOOK.md#stellar-lab--cli-invoke-recipes).
 
 ---
 
@@ -871,7 +1762,22 @@ Assigns an administrative or operational role (`Admin`, `Upgrader`, `Verifier`).
 
 ### `remove_role(target: Address) -> Result<(), ContractError>`
 
-Revokes a role from an address. Admin-only.
+Revokes a role from an address. Admin-only. Also clears the role's expiry and any
+pending timelocked grant.
+
+This is the **cleanup path for expired grants**. Expiry is lazy, so a lapsed grant
+stays in storage until `remove_role` deletes it.
+
+**Idempotent (Issue #752):** calling it again for the same address, or for an
+address that never held a role, returns `Ok(())` and emits **no** event. Cleanup
+jobs can re-run safely.
+
+| Call | Result | Events |
+|---|---|---|
+| On an active, expired, or pending (timelocked) grant | `Ok(())`, storage cleared | 1 × `RoleRevokedEvent` |
+| Again, with nothing left to remove | `Ok(())`, no change | none |
+| While paused | `Err(Paused)`, grant untouched | none |
+| Without admin auth | auth error, grant untouched | none |
 
 ---
 
@@ -890,6 +1796,73 @@ Configures the WASM upgrade timelock cooldown period in seconds. Admin-only.
 ### `get_cooldown() -> u64`
 
 Returns the current WASM upgrade timelock cooldown period in seconds.
+
+---
+
+### `add_verifier(verifier: Address, expires_at: u64) -> Result<(), ContractError>`
+
+Adds `verifier` to the campaign allowlist and grants it `Role::Verifier`
+(Issue #293). Admin-only. This — together with `remove_verifier` — is the
+**only** way to mutate the allowlist: the `set_verifier_allowlist` helper in
+`src/storage.rs` is internal-only and not an on-chain entrypoint
+(Issue #638; see `docs/SECURITY.md`).
+
+- **Cap:** at most `MAX_VERIFIERS` (10) concurrently active members. A new
+  address over the cap → `VerifierAllowlistFull`. Expired entries are pruned
+  before the check, so a lapsed member never blocks a new one.
+- **Expiry:** `expires_at` is a ledger timestamp after which the entry stops
+  authorizing `verify` / `batch_verify`. `0` = no expiry. A non-zero value not
+  in the future → `VerifierExpiryInPast`.
+- **Refresh:** calling again for an address already listed updates its
+  `expires_at` in place and does **not** consume another slot.
+- **`set_role` interaction:** composes, does not duplicate. `add_verifier` also
+  calls `set_role(verifier, Verifier)`. **Once the allowlist has been populated
+  at least once**, `verify` / `batch_verify` require the caller to be an
+  *active* allowlist member — a bare `set_role(Verifier)` grant is no longer
+  sufficient. Before the first `add_verifier` call the contract stays in pure
+  role-based mode (backward compatible). There is only one expiry mechanism in
+  the contract — this one.
+
+| **Errors** | `NotInitialized`, `Paused`, `NotAuthorized`, `VerifierExpiryInPast`, `VerifierAllowlistFull` |
+
+---
+
+### `remove_verifier(verifier: Address) -> Result<(), ContractError>`
+
+Removes `verifier` from the allowlist and revokes its `Role::Verifier`.
+Admin-only. Not listed → `VerifierNotAllowlisted`.
+
+| **Errors** | `NotInitialized`, `Paused`, `NotAuthorized`, `VerifierNotAllowlisted` |
+
+---
+
+### `get_verifiers() -> Vec<VerifierAllowEntry>`
+
+The allowlist as `{ address, expires_at, added_at }` entries, including any that
+have expired but not yet been pruned. Read-only; no auth.
+
+---
+
+### `is_active_verifier(verifier: Address) -> bool`
+
+`true` if `verifier` is on the allowlist and not expired as of the current
+ledger. Read-only; no auth.
+
+---
+
+### `verifier_slots_remaining() -> u32`
+
+Allowlist slots free before the `MAX_VERIFIERS` cap, counting only active
+(non-expired) members. Read-only; no auth.
+
+---
+
+### `prune_expired_verifiers() -> Result<u32, ContractError>`
+
+Drops every expired allowlist entry, returning how many were removed. Callable
+by anyone — it only removes entries that are already inactive.
+
+| **Errors** | `NotInitialized` |
 
 ---
 
@@ -1017,8 +1990,23 @@ duplicate deliveries of `RegisteredEvent` / `VerifiedEvent` /
 
 ```
 topics: ["registered_event", github_username]
-data:   { stellar_address, timestamp }
+data:   { stellar_address, timestamp, sponsor: Option<Address>, domain: EventDomain }
 ```
+
+`domain` was added in 1.1.0 (Issue #373) for parity with `VerifiedEvent` /
+`RemovedEvent`; indexers can now attribute registrations to a deployment
+without out-of-band configuration.
+
+### BotStatusChangedEvent
+
+```
+topics: ["bot_status_changed_event", github_username]
+data:   { is_bot: bool, actor: Address, timestamp, domain: EventDomain }
+```
+
+Emitted by `set_bot_status` (Issue #374) every time the `is_bot` flag is
+written. `actor` is the admin or registrant that made the call. Covered by
+`test_set_bot_status_emits_event`.
 
 ### RemovedEvent
 
@@ -1079,6 +2067,21 @@ compatibility surface.
 | `test_verification_revoked_event_payload_is_complete` | Full event list matches: topic symbol, `github_username` topic, `stellar_address`, `timestamp`, and `reason_code` in data |
 | `test_verification_revoked_event_not_published_on_not_verified` | **Failure path**: `NotVerified` must not publish an event |
 
+### VerificationConfiguredEvent
+
+```
+topics: ["verification_configured_event", admin]
+data:   { attestation, expires_in, threshold, timestamp }
+```
+
+Emitted by `config_verification` on the (one-time) successful write of the
+verification parameters. The same values are readable afterwards via
+`get_verification_config`.
+
+| Test | What it checks |
+|------|----------------|
+| `test_config_verification_emits_event_and_getter_reflects_it` | Full event payload/topics match, and `get_verification_config` returns the values just configured |
+
 ### UpgradedEvent
 
 ```
@@ -1111,8 +2114,16 @@ topics: ["role_revoked_event", address]
 data:   { admin, timestamp }
 ```
 
-`RoleRevokedEvent` is emitted when an admin revokes a role from an address.
-Like `RoleGrantedEvent`, the `address` topic lets indexers filter server-side.
+`RoleRevokedEvent` is emitted when an admin revokes a role from an address
+(`remove_role`, `remove_verifier`). Like `RoleGrantedEvent`, the `address` topic
+lets indexers filter server-side.
+
+**Indexer expectation (Issue #752):** one `RoleRevokedEvent` per actual removal.
+Re-running `remove_role` on an already-cleaned address emits nothing, and a second
+`remove_verifier` fails with `VerifierNotAllowlisted`, also without an event. So
+indexers never see duplicate revocations from repeated cleanup.
+`prune_expired_verifiers` emits no events. Its `u32` return value is the number of
+expired allowlist entries it dropped (`0` on a re-run).
 Note that `role` is **not** present in the data payload — a consumer that needs
 the previous role must track it from the corresponding `RoleGrantedEvent`.
 
@@ -1150,6 +2161,98 @@ this event `ADMIN_KEY` points at `new_admin`.
 
 ---
 
+### WasmStagedEvent (Issue #300)
+
+```
+topics: ["wasm_staged_event", wasm_hash]
+data:   { staged_by, timestamp }
+```
+
+Emitted when an admin or Upgrader stages a WASM hash ahead of an upgrade via
+`stage_wasm`. `wasm_hash` is a topic so indexers can filter for a specific
+hash. The slot is advisory — `upgrade` will reject a hash that differs from the
+staged one, but will proceed if nothing is staged.
+
+| Test | What it checks |
+|------|----------------|
+| `test_wasm_staged_event_shape` | Full event list matches: topic symbol `"wasm_staged_event"`, `wasm_hash` topic, `staged_by` and `timestamp` in data |
+
+### StagedWasmClearedEvent (Issue #300)
+
+```
+topics: ["staged_wasm_cleared_event", wasm_hash]
+data:   { cleared_by, timestamp }
+```
+
+Emitted when the staged WASM slot is cleared via `clear_staged` before the
+upgrade is executed. Only emitted when something was actually staged; a no-op
+clear produces no event.
+
+| Test | What it checks |
+|------|----------------|
+| `test_staged_wasm_cleared_event_shape` | Full event list matches: topic symbol, `wasm_hash` topic, `cleared_by` and `timestamp` in data |
+
+---
+
+### UpgradeProposedEvent (Issue #301)
+
+```
+topics: ["upgrade_proposed_event", proposal_id]
+data:   { wasm_hash, proposed_by, executable_at, timestamp }
+```
+
+Emitted when `propose_multisig_upgrade` creates a new upgrade proposal.
+`proposal_id` is the monotonic `u32` counter assigned to this proposal.
+`executable_at` is the earliest ledger timestamp at which `execute_upgrade`
+may succeed (= `timestamp + delay_secs`).
+
+| Test | What it checks |
+|------|----------------|
+| `test_upgrade_proposed_event_shape` | One event emitted; topic symbol `"upgrade_proposed_event"`; `proposal_id` topic is `0` for the first proposal |
+
+### UpgradeApprovedEvent (Issue #301)
+
+```
+topics: ["upgrade_approved_event", proposal_id]
+data:   { approved_by, approval_count, timestamp }
+```
+
+Emitted each time an eligible signer calls `approve_upgrade`. `approval_count`
+is the running total of distinct approvals after this one is recorded.
+Subscribers can watch `approval_count` to know when the threshold will be met
+without reading contract state.
+
+| Test | What it checks |
+|------|----------------|
+| `test_upgrade_approved_event_shape` | One event emitted; topic symbol `"upgrade_approved_event"`; `proposal_id` topic matches |
+
+### UpgradeProposalExecutedEvent (Issue #301)
+
+```
+topics: ["upgrade_proposal_executed_event", proposal_id]
+data:   { wasm_hash, executed_by, approval_count, timestamp }
+```
+
+Emitted when `execute_upgrade` successfully swaps the contract WASM. Always
+followed immediately by `UpgradedEvent` in the same invocation. `approval_count`
+is the total number of distinct approvals the proposal accumulated.
+
+### UpgradeProposalCancelledEvent (Issue #301)
+
+```
+topics: ["upgrade_proposal_cancelled_event", proposal_id]
+data:   { wasm_hash, cancelled_by, timestamp }
+```
+
+Emitted when the admin discards a live proposal via `cancel_upgrade_proposal`
+before execution.
+
+| Test | What it checks |
+|------|----------------|
+| `test_upgrade_proposal_cancelled_event_shape` | One event emitted; topic symbol `"upgrade_proposal_cancelled_event"`; `proposal_id` topic matches |
+
+---
+
 ### `version() -> (u32, u32, u32)`
 
 Returns the deployed contract version as `(major, minor, patch)`.
@@ -1161,7 +2264,11 @@ Returns the deployed contract version as `(major, minor, patch)`.
 
 The version is written to instance storage by `initialize`. Instances deployed
 before version tracking existed carry no stored version and report the build
-constant `1.0.0` instead.
+constant `1.1.0` instead.
+
+Fresh instances initialize at `1.1.0`. An already-initialized `1.0.0` instance
+retains its stored version after a WASM upgrade; the admin must call
+`migrate([1, 1, 0])` after installing the version that includes `batch_verify`.
 
 ```bash
 stellar contract invoke --id $ID --source deployer --network testnet \
@@ -1417,6 +2524,25 @@ make bindings-build CONTRACT_ID=$CONTRACT_ID NETWORK=testnet   # also installs a
 
 The output directory is git-ignored. Generated bindings are a build artifact,
 not source: regenerate them after every deploy rather than committing them.
+CI generates bindings from the exact WASM artifact built in the quality job and
+publishes them as the `trustbridge-typescript-bindings` workflow artifact for
+14 days. On a pull request, download that artifact from the workflow run when
+you need to consume the proposed ABI; do not copy generated files into the
+repository.
+
+For local generation from a release artifact, use the Makefile target without
+requiring a deployed contract ID:
+
+```bash
+make bindings WASM=target/wasm32v1-none/release/trustbridge_contract.wasm
+```
+
+The existing `CONTRACT_ID` form remains available for generating from a
+deployed contract:
+
+```bash
+make bindings CONTRACT_ID=$CONTRACT_ID NETWORK=testnet
+```
 
 ### Version handshake
 
@@ -1443,6 +2569,35 @@ if (!compatible) {
 Read-only calls simulate against RPC and never submit a transaction, so the
 handshake costs no fees.
 
+### Semver compatibility policy
+
+`is_compatible(major, minor, patch)` treats its arguments as the minimum
+version required by the caller. Compatibility is checked in semver order:
+
+| Deployed version | Minimum requested | Result | Policy |
+|---|---|---:|---|
+| `1.0.0` | `1.0.0` | `true` | Exact version is compatible |
+| `1.0.1` | `1.0.0` | `true` | Patch releases are compatible |
+| `1.1.0` | `1.0.1` | `true` | Newer minor releases are compatible |
+| `1.0.0` | `1.0.1` | `false` | Older patch releases are rejected |
+| `1.0.9` | `1.1.0` | `false` | Older minor releases are rejected |
+| `2.0.0` | `1.1.0` | `true` | A newer major is newer than the minimum gate |
+| `1.1.0` | `2.0.0` | `false` | An older major is rejected |
+
+The current feature gates are kept in sync with the table below. The unit
+tests in `src/version.rs` fail if either constant drifts:
+
+| Capability | Constant | Minimum version |
+|---|---|---:|
+| `batch_verify` | `BATCH_VERIFY_MIN_VERSION` | `1.1.0` |
+| Cross-contract read surface | `CROSS_CONTRACT_READ_MIN_VERSION` | `1.0.0` |
+
+Compatibility is a version-order gate, not permission to make a breaking ABI
+change without review. Any breaking change requires a major `CONTRACT_VERSION`
+bump, an explicit migration story, and updated consumer minimums. Additive
+features introduced after a published minimum use a minor bump and must add or
+update their own minimum-version constant and policy-table case.
+
 ### Regeneration checklist
 
 1. Bump `CONTRACT_VERSION` in `src/lib.rs` for any ABI change.
@@ -1451,6 +2606,31 @@ handshake costs no fees.
 
 A contract change that alters the ABI without a version bump leaves clients
 unable to detect the drift, so the bump is a review blocker.
+
+---
+
+## Registration cooldown (Issue #4 / #296)
+
+The per-username registration cooldown is **enforced by the contract itself** —
+there is no helper an integrator has to remember to call.
+
+- `set_cooldown(seconds)` (admin-only) configures the window; `0` disables it.
+- On a **successful** mutation, `register`, `verify`, and the
+  username/address-change paths stamp the username's last-action timestamp.
+- While the window is open, a follow-up mutation on that username fails with
+  `CooldownActive` (code 8). A username with no prior recorded action is never
+  in cooldown, so first-time registration always succeeds immediately.
+- `is_registration_in_cooldown(github_username) -> bool` is the **read-only**
+  view of that state, for dashboards, the action runner, and cross-contract
+  callers.
+
+There is **no `record_action` entry point.** An earlier build exported a
+public, unauthenticated `record_action(github_username)` that simply wrote the
+current timestamp. Because it took no auth, any caller could push an arbitrary
+username into cooldown and block its registration — a griefing vector — and it
+was redundant once enforcement moved inline. It was removed in Issue #296. If
+you called it, delete the call: the cooldown is applied automatically by the
+mutating functions above.
 
 ---
 
@@ -1474,9 +2654,11 @@ admin or any registrant to invoke them:
 |---|---|---|
 | `get_address(github_username)` | `Option<ContributorRecord>` | Core identity lookup |
 | `has_record(github_username)` | `bool` | Cheap existence check, avoids decoding the full record |
-| `get_public_paginated(cursor, limit)` | `Result<ExportPage, ContractError>` | Paginated read; fails with `Paused` while the registry is paused |
-| `get_stats()` | `Stats` | `{ total, verified }` |
-| `get_verified_count()` | `u32` | |
+| `get_record_proof(github_username)` | `RecordProof` | Existence proof for light clients: verified bit, storage key, TTL policy |
+| `get_public_paginated(cursor, limit)` | `Result<ExportPage, ContractError>` | Paginated read; **available while the registry is paused** (Issue #294) — only `NotInitialized` can fail it |
+| `get_stats()` | `Stats` | `{ total, verified, ever_verified }` |
+| `get_verified_count()` | `u32` | Live count; drops on revoke |
+| `get_ever_verified_count()` | `u32` | Monotonic; never drops |
 | `get_role(address)` | `Option<Role>` | RBAC lookup, e.g. to gate a payout on `Role::Verifier` |
 | `is_paused()` / `is_contract_paused()` | `bool` | Check before a call that would otherwise fail on `Paused` |
 | `is_registration_in_cooldown(github_username)` | `bool` | |
@@ -1501,6 +2683,14 @@ cross-contract call. This is deliberate: the registry has no notion of a
 "trusted contract" allowlist, so widening the export surface would mean any
 deployed contract could exfiltrate the full registry, not just the intended
 consumer.
+
+This deny is covered by tests, not just this note:
+`tests/integration.rs::cross_contract_caller_cannot_run_get_registered_paginated`,
+`…_get_registered_page`, and `…_get_all_registered` assert a contract caller
+fails auth on every admin export, while
+`cross_contract_public_read_surface_is_reachable` confirms the read surface
+above stays callable. See also `docs/SECURITY.md` §
+*Cross-Contract Callers and Admin Exports*.
 
 ### Example: a hypothetical payout contract reading verification status
 
@@ -1688,7 +2878,10 @@ Returns a packed health snapshot for dashboards and CI probes.
 | **Works while paused** | ✅ |
 | **Errors** | `NotInitialized` |
 
-See [CONTRACT_HEALTH.md](CONTRACT_HEALTH.md) for full reference.
+See [CONTRACT_HEALTH.md](CONTRACT_HEALTH.md) for full reference, and
+[Choosing a probe & alert SLOs](CONTRACT_HEALTH.md#choosing-a-probe--alert-slos-issue-756)
+for when to prefer `get_health_probes`. `NotInitialized` is the only contract
+error, so any other failure is RPC or transport.
 
 ---
 
@@ -1750,3 +2943,257 @@ Returns the active challenge record, or `None`.
 |---|---|
 | **Auth** | None |
 | **Mutates** | No |
+
+---
+
+## Role enumeration (Issue #228)
+
+### `get_role_holders(offset: u32, limit: u32) -> Vec<RoleHolder>`
+
+Read-only; no auth. One page of `(address, role)` pairs, ordered by grant time
+(oldest first).
+
+- `limit` is capped at `MAX_ROLE_PAGE_LIMIT` (50). `0` or any larger value
+  yields the cap.
+- An `offset` past the end returns an empty page rather than an error.
+- **The admin is included** — `initialize` grants `Role::Admin` through the same
+  path that maintains the index.
+- Revoking a role compacts the index, shifting later entries down one. A caller
+  paging with a stored offset should restart if `get_role_holder_count()`
+  changed mid-walk.
+
+### `get_role_holder_count() -> u32`
+
+Read-only; no auth. Number of addresses currently holding a role. Lets a caller
+size its pagination loop, and gives a dashboard a cheap drift check.
+
+## Network tagging (Issue #231)
+
+### `get_network_tag() -> Option<BytesN<32>>`
+
+Read-only; no auth. The `network_id` recorded at `initialize`, or `None` for an
+instance initialized before network tagging existed.
+
+### `adopt_network_tag() -> Result<(), ContractError>`
+
+Admin-only. Tags an untagged instance with the network it is running on, for
+instances deployed before this field existed.
+
+Deliberately **not** a re-tagging entry point: if a tag is already present and
+disagrees with the live network, this returns `NetworkMismatch` (code 30) rather
+than overwriting it. An entry point that could rewrite the tag would defeat the
+check entirely. Re-adopting the *same* network is a no-op and succeeds, so a
+migration script can call it unconditionally.
+
+### Enforcement
+
+`require_initialized` — which every gated entry point already calls — now also
+compares the recorded network id against `env.ledger().network_id()`. A
+mismatch returns `NetworkMismatch` (code 30) from **every** gated function,
+read or write.
+
+An instance with no recorded tag is allowed through, so contracts deployed
+before this change keep working. Once a tag is present it is compared on every
+call and never rewritten.
+
+## New Functions (Issues #218, #219, #221, #223)
+
+### Role expiry (Issue #221)
+
+#### `set_role_with_expiry(target: Address, role: Role, expires_at: Option<u64>) -> Result<(), ContractError>`
+
+Admin-only. Identical to `set_role`, except the grant lapses once
+`env.ledger().timestamp() >= expires_at`. `None` behaves exactly like
+`set_role` (no expiry). See the **Optional expiry** note under the `Role`
+type above for the full semantics, including that expiry is lazy and never
+affects the contract admin's own identity.
+
+Emits `RoleGrantedEvent` (unchanged shape — expiry is not carried on the
+event; read it back with `get_role_expiry`).
+
+While a `set_role_delay` timelock is armed it cannot mint a role instantly:
+it returns `RoleGrantNotReady` (35) unless `target` already actively holds
+`role`, in which case only the expiry changes (e.g. to off-board a key
+early). New grants go through `set_role` + `activate_role` (Issue #220).
+
+#### `get_role_expiry(address: Address) -> Option<u64>`
+
+Read-only; no auth. The raw expiry timestamp for `address`'s current role
+grant — `None` for a no-expiry grant or no role at all. Unlike `get_role`,
+this does not hide an already-past timestamp, so an operator can distinguish
+"never expires" from "expired at T" without waiting for `remove_role`.
+
+#### `has_role(address: Address, role: Role) -> bool`
+
+Read-only; no auth. `true` iff `get_role(address) == Some(role)`.
+
+### Time-bounded verification (Issue #218)
+
+`config_verification`'s `expires_in` (seconds) is now enforced. `verify` and
+`batch_verify` record a verification timestamp; expiry is checked against it.
+
+#### `is_verification_active(github_username: String) -> bool`
+
+Read-only; no auth; works while paused. The effective, expiry-aware status:
+`true` only if the username is registered, `verified`, and — when
+verification was configured with a non-zero `expires_in` — that window has
+not lapsed. This differs from `get_address(..).verified` exactly when a
+verification is raw-`true` but expired: the raw flag stays `true` (expiry is
+lazy — see below), this reads `false`.
+
+#### `get_verification_expiry(github_username: String) -> Option<u64>`
+
+Read-only; no auth. The ledger timestamp the username's current verification
+will expire at, or `None` if it cannot expire (never verified, verification
+not configured, `expires_in == 0`, or revoked).
+
+**Lazy expiry, and what it means for `verify` / `revoke_verification` /
+`get_stats`:**
+
+- `ContributorRecord.verified` is **not** flipped back to `false` in storage
+  when the window lapses — only `revoke_verification` does that. Reads that
+  need the effective status call `is_verification_active`, not the raw flag.
+- `verify` on an expired-but-not-revoked username **renews** it (fresh
+  timestamp) instead of returning `AlreadyVerified` — a verification that is
+  still active is unaffected and still rejects a duplicate call.
+- `revoke_verification` is unaffected by expiry: it acts on the raw
+  `verified` flag regardless of whether it has also expired, and clears the
+  verification timestamp either way.
+- **Stats definition:** `get_stats().verified` / `get_verified_count()` count
+  the raw `verified` flag, the same as before this issue — they do **not**
+  subtract expired-but-unrevoked verifications. This keeps the counter an
+  O(1) read instead of a full-registry scan on every call. Use
+  `is_verification_active` for the per-record effective answer; there is no
+  aggregate "currently active" counter.
+
+### Signed export attestation (Issue #223)
+
+#### `export_attestation(cursor: Option<BytesN<8>>, limit: u32) -> Result<ExportAttestation, ContractError>`
+
+Admin-only; unaffected by the normal pause flag (same as
+`get_registered_paginated` / `get_all_registered` — admin export tooling
+stays available during maintenance). Wraps the same page
+`get_registered_paginated(cursor, limit)` would return with a SHA-256 digest,
+the contract's schema version, and the ledger sequence — see the
+`ExportAttestation` type above and
+[ADMIN_RUNBOOK.md](./ADMIN_RUNBOOK.md#signed-export-attestation-issue-223)
+for the offline verification workflow. An empty registry produces an empty
+page and a real (deterministic) digest over it, not an error.
+
+### Dual-control `batch_remove` (Issue #219)
+
+#### `set_batch_remove_threshold(threshold: u32) -> Result<(), ContractError>`
+
+Admin-only. `0` (default) disables dual control — `batch_remove` always
+executes directly, exactly as before this issue. A non-zero value requires
+any batch **larger** than it (strictly greater — a batch exactly at the
+threshold is unaffected) to go through `propose_batch_remove` /
+`execute_batch_remove` instead.
+
+#### `get_batch_remove_threshold() -> u32`
+
+Read-only; no auth.
+
+#### `propose_batch_remove(caller: Address, usernames: Vec<String>) -> Result<(), ContractError>`
+
+Admin-only. Records the batch and proposer for later execution by a
+*different* admin-equivalent address. Only one proposal may be pending;
+returns `BatchRemoveProposalPending` if one already is (unless it has
+expired — see below). Emits `BatchRemoveProposedEvent`.
+
+#### `execute_batch_remove(caller: Address) -> Result<BatchSummary, ContractError>`
+
+`caller` must be the contract admin or hold `Role::Admin`, **and** must not
+be the address that proposed the batch — this is what makes it dual
+control. Performs the removals with the same partial-success semantics as
+`batch_remove`. A proposal older than `BATCH_REMOVE_PROPOSAL_TTL_SECS`
+(24h) is treated as gone (`NoPendingBatchRemove`) rather than executed.
+Emits `BatchRemoveExecutedEvent` plus one `RemovedEvent` per removed
+username.
+
+#### `cancel_batch_remove(caller: Address) -> Result<(), ContractError>`
+
+Admin-only. Discards the pending proposal without executing it. Available
+even while paused — see
+[SECURITY.md](./SECURITY.md#dual-control-batch_remove-issue-219). Emits
+`BatchRemoveCancelledEvent`.
+
+#### `get_pending_batch_remove() -> Option<PendingBatchRemove>`
+
+Read-only; no auth; works while paused.
+
+**batch_remove itself:** now returns `DualControlRequired` (code 30) if
+`usernames.len()` exceeds the configured threshold, instead of executing —
+below the threshold, or with the default threshold of `0`, `batch_remove`'s
+behavior is completely unchanged.
+
+## Timelocked role grants (Issue #220)
+
+### `set_role_delay(secs: u64) -> Result<(), ContractError>`
+
+Admin-only. Seconds a future `set_role` grant must wait before activation.
+`0` (the default) keeps grants instant, so existing deployments are unchanged.
+
+### `get_role_delay() -> u64`
+
+Current delay in seconds.
+
+### `set_role(target: Address, role: Role) -> Result<(), ContractError>`
+
+Unchanged when the delay is `0`. When the delay is non-zero the grant is queued
+instead of applied, and `RoleGrantPendingEvent` is emitted in place of
+`RoleGrantedEvent`. The admin address itself is stored separately and is never
+subject to this delay.
+
+### `get_pending_role(target: Address) -> Option<PendingRoleGrant>`
+
+`PendingRoleGrant { role: Role, activate_at: u64 }` — the queued grant, if any.
+
+### `activate_role(target: Address) -> Result<(), ContractError>`
+
+Admin-only. Applies a queued grant once `activate_at` has passed and emits the
+normal `RoleGrantedEvent`.
+
+- `NoPendingRoleGrant` (34) — nothing queued for `target`.
+- `RoleGrantNotReady` (35) — timelock has not elapsed.
+
+### `cancel_role_grant(target: Address) -> Result<(), ContractError>`
+
+Admin-only. Drops a queued grant and emits `RoleGrantCancelledEvent`.
+`remove_role` also drops any queued grant for the same address.
+
+### Events
+
+| Event | Fields |
+|-------|--------|
+| `RoleGrantPendingEvent` | `address` (topic), `role`, `admin`, `activate_at`, `timestamp` |
+| `RoleGrantCancelledEvent` | `address` (topic), `admin`, `timestamp` |
+| `GuardianChangedEvent` | `guardian: Option<Address>`, `admin`, `timestamp` |
+
+## Provenance digests and build verification (Issues #224, #225)
+
+`WasmProvenance` gains two optional digests:
+
+```rust
+pub struct WasmProvenance {
+    // ... existing fields ...
+    pub sbom_hash: Option<BytesN<32>>,
+    pub source_hash: Option<BytesN<32>>,
+}
+```
+
+### `set_provenance_digests(sbom_hash: Option<BytesN<32>>, source_hash: Option<BytesN<32>>) -> Result<(), ContractError>`
+
+Admin-only. Records the digests for the currently deployed WASM. A `None`
+argument leaves the stored value untouched. Fails with `ProvenanceMissing` (36)
+when no provenance record exists.
+
+### `assert_build(hash: BytesN<32>) -> Result<(), ContractError>`
+
+Read-only pre-upgrade check comparing `hash` to `provenance.wasm_hash`.
+
+- `ProvenanceMissing` (36) — nothing deployed via `upgrade` yet.
+- `ProvenanceMismatch` (37) — hashes differ.
+
+`upgrade` still checks the WASM hash exactly as before; `assert_build` is an
+independent read that neither requires nor consumes an attestation.
