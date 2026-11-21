@@ -570,6 +570,28 @@ Gotchas:
 - Execute fails with `UpgradeProposalDelayActive` while the delay is running and
   `UpgradeProposalInsufficientApprovals` until the threshold is met — both are
   transient, so retrying after more approvals / time is expected.
+- `set_upgrade_threshold` **fails closed** with `ThresholdExceedsSignerCap`
+  (Issue #795) if `--threshold` is greater than `MAX_UPGRADE_SIGNERS` (the
+  hard cap on distinct approvers per proposal — currently 20). An impossible
+  threshold would permanently freeze every future upgrade, since no proposal
+  could ever collect enough approvals to execute. The call is rejected before
+  any storage write, so the previous threshold is left unchanged.
+  **Recovery:** if this is ever hit (e.g. a typo in `--threshold`), simply
+  retry `set_upgrade_threshold` with a value `<= MAX_UPGRADE_SIGNERS`:
+  ```bash
+  # Rejected — exceeds the signer cap, previous threshold unchanged:
+  stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
+    -- set_upgrade_threshold --caller "$ADMIN" --threshold 9999
+
+  # Recover by lowering the threshold to a reachable value:
+  stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
+    -- set_upgrade_threshold --caller "$ADMIN" --threshold 2
+  ```
+  There is no separate "add signers" step — this contract has no fixed
+  signer roster; any admin/Upgrader-privileged address may approve a given
+  proposal (see [multisig upgrade flow](#multisig-upgrade-flow-issue-301)).
+  The only hard ceiling is `MAX_UPGRADE_SIGNERS` itself, so recovery is always
+  "lower the threshold to something `<= MAX_UPGRADE_SIGNERS`".
 
 ---
 
