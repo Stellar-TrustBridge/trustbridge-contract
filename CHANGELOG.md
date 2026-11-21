@@ -5,6 +5,34 @@ version exposed by `version()` and follow semantic versioning: major for
 breaking changes, minor for additive interface changes, and patch for
 compatible corrections.
 
+## Entry template (Wave-facing ABI changes)
+
+Every PR that adds, removes, or changes a public entrypoint, event, or
+storage key MUST add an entry under `## [Unreleased]` (or the target
+version) using this template. `docs/CONTRIBUTING.md` § "ABI change
+checklist" requires it before merge.
+
+```markdown
+### Added | Changed | Removed
+
+- **Entrypoint(s):** `fn_name(args) -> ReturnType` — one-line description of
+  the new or changed behavior and why.
+- **Events:** `EventName` (topic `topic_name`), fields: `field: Type, ...`
+  (omit if no event changed).
+- **Storage keys:** `DataKey::Variant` — purpose, TTL/bump policy if new
+  (omit if no storage key changed).
+- **Migration notes:** what existing deployments/integrators must do, or
+  "None — additive, backward compatible" / "None — default preserves prior
+  behavior."
+- **Docs updated:** `docs/ABI.md#fn_name`, and `docs/BREAKING_CHANGES.md`
+  if this is breaking.
+- (Issue #NNN)
+```
+
+Breaking changes (removed/renamed entrypoints, changed return/error shape,
+changed event field layout) must also get a `docs/BREAKING_CHANGES.md`
+entry and bump the minor/major version per the policy above.
+
 ## [1.2.0] - Unreleased
 
 ### Added

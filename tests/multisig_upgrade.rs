@@ -716,6 +716,51 @@ fn test_non_admin_cannot_set_attestation_required() {
 }
 
 #[test]
+fn test_unauthorized_set_attestation_required_leaves_flag_unchanged_round_trip() {
+    let (env, admin, upgrader, random, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        // Baseline: flag starts false.
+        assert!(!TrustBridgeContract::get_attestation_required(env.clone()));
+
+        // Unauthorized callers cannot flip it on.
+        assert_eq!(
+            TrustBridgeContract::set_attestation_required(env.clone(), upgrader.clone(), true),
+            Err(ContractError::NotAuthorized)
+        );
+        assert!(
+            !TrustBridgeContract::get_attestation_required(env.clone()),
+            "rejected upgrader write must not mutate the stored flag"
+        );
+        assert_eq!(
+            TrustBridgeContract::set_attestation_required(env.clone(), random.clone(), true),
+            Err(ContractError::NotAuthorized)
+        );
+        assert!(
+            !TrustBridgeContract::get_attestation_required(env.clone()),
+            "rejected random-caller write must not mutate the stored flag"
+        );
+
+        // Admin can now flip it on, then unauthorized callers cannot flip it
+        // back off either — the gate stays on across the round trip.
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+        assert_eq!(
+            TrustBridgeContract::set_attestation_required(env.clone(), upgrader.clone(), false),
+            Err(ContractError::NotAuthorized)
+        );
+        assert!(
+            TrustBridgeContract::get_attestation_required(env.clone()),
+            "rejected upgrader write must not disable an admin-enabled flag"
+        );
+
+        // Admin restores the default for symmetry with the round trip.
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), false).unwrap();
+        assert!(!TrustBridgeContract::get_attestation_required(env.clone()));
+    });
+}
+
+#[test]
 fn test_clear_attestation_does_not_disable_required_flag() {
     let (env, admin, _upgrader, _random, contract_id) = setup();
 

@@ -4284,6 +4284,67 @@ fn test_batch_register_at_max_write_batch_ceiling() {
     );
 }
 
+/// Issue #782: `batch_verify` charges one verify-rate unit per requested
+/// username (see `charge_verify_rate` in `src/storage.rs`), atomically, up
+/// front — before any record is touched. A full `MAX_WRITE_BATCH` batch from
+/// a non-admin verifier must be rejected with `VerifyRateLimited`, and
+/// nothing in the batch gets written, when the configured per-ledger cap is
+/// below the batch size.
+#[test]
+fn test_batch_verify_at_ceiling_exceeds_verify_rate_limit_writes_nothing() {
+    let (env, admin, _user1, verifier, contract_id) = setup_test_env();
+
+    let usernames = make_batch_usernames(&env, MAX_WRITE_BATCH, "rate-ceil");
+    let addrs = register_batch_bounded(&env, &contract_id, &usernames).unwrap();
+    assert_eq!(addrs.len(), MAX_WRITE_BATCH);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+        // Cap is below the batch size: MAX_WRITE_BATCH (25) usernames need 25
+        // units, but only 10 are allowed per ledger.
+        TrustBridgeContract::set_verify_limit(env.clone(), 10).unwrap();
+    });
+
+    env.mock_all_auths();
+    let result = env.as_contract(&contract_id, || {
+        TrustBridgeContract::batch_verify(env.clone(), verifier.clone(), usernames.clone())
+    });
+    assert_eq!(
+        result,
+        Err(ContractError::VerifyRateLimited),
+        "a {}-username batch must be rejected when the per-ledger cap is only 10 units",
+        MAX_WRITE_BATCH
+    );
+
+    // The charge-then-write ordering means a rejected charge must leave every
+    // record in the batch still unverified.
+    env.as_contract(&contract_id, || {
+        for name in usernames.iter() {
+            let record = TrustBridgeContract::get_address(env.clone(), name.clone()).unwrap();
+            assert!(
+                !record.verified,
+                "rejected batch_verify must not verify {name:?}"
+            );
+        }
+    });
+
+    // Raising the cap to exactly the batch size lets the identical batch
+    // through in the same ledger (admin is exempt from the cap, so this
+    // confirms the boundary for the verifier itself, not just a reset).
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_verify_limit(env.clone(), MAX_WRITE_BATCH).unwrap();
+    });
+    env.mock_all_auths();
+    let summary = env
+        .as_contract(&contract_id, || {
+            TrustBridgeContract::batch_verify(env.clone(), verifier.clone(), usernames.clone())
+        })
+        .unwrap();
+    assert_eq!(summary.successful, MAX_WRITE_BATCH);
+}
+
 /// Assert ContractError::InvalidBatchSize when attempting oversized bulk register helper path.
 #[test]
 fn test_batch_register_oversized_batch_rejected() {

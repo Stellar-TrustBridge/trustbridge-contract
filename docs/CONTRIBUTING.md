@@ -45,6 +45,7 @@ build / wasm-size). Every pull request and push to `main` runs these jobs from
 | `quality` | `cargo test --test homoglyph_corpus` (named blocking step), then `make check` (`make fmt`, `make lint`, `make test`, `make docs-check`, plus error-codes / event-topics / abi-check / wasm-size) |
 | `build` | `make build` (`stellar contract build`), `make wasm-size`, `make wasm-hash-pin WASM_HASH_STRICT=1` |
 | `abi-consistency` | `./scripts/check_error_codes.sh` (`make error-codes`) and `./scripts/check_event_topics.sh` (`make event-topics`) — fails on any `ContractError` / event-topic drift |
+| `diff-test` | `make diff-test` (TypeScript differential tests), then `./scripts/check_fixture_pairing.sh origin/main` — fails if Rust XDR/meta fixtures and `ts-differential-tests/` change independently (see [`ts-differential-tests/README.md`](../ts-differential-tests/README.md#ci-entry-point)) |
 | `oracle-proof-tests` | `cargo test --lib oracle_proof` |
 | `cargo-deny` | `cargo deny --config deny.toml check` (see [Supply-chain checks](#supply-chain-checks)) |
 | `mutants` | `cargo mutants --config mutants.toml --file src/utils.rs` — nightly and `workflow_dispatch` only (see [Mutation Testing](#mutation-testing--utilsrs-issue-243)) |
@@ -124,6 +125,13 @@ CI compares `docs/ABI.md` with the pull request base revision. Changes to
 public function signature headings require a new versioned `CHANGELOG.md`
 heading, for example `## [1.2.0] - 2026-08-28`, with a description of the
 change. Typo fixes and prose-only ABI edits do not require a changelog entry.
+
+**Required template.** Entries for entrypoint/event/storage-key changes must
+follow the [Entry template](../CHANGELOG.md#entry-template-wave-facing-abi-changes)
+at the top of `CHANGELOG.md` (entrypoint signature, events, storage keys,
+migration notes, docs updated, issue number). Reviewers should reject ABI
+PRs whose changelog entry omits the migration-notes line — Wave integrators
+rely on it to know whether an upgrade is safe to skip.
 The check is intentionally a heuristic: it watches function signature
 headings rather than trying to understand the complete ABI. If a legitimate
 prose edit is reported as an ABI change, add a reason in the changed changelog

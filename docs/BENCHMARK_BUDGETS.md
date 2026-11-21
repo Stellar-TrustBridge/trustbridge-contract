@@ -104,6 +104,44 @@ meter execution costs across the entire batch ceiling:
 Oversized batches (`> MAX_WRITE_BATCH`) and empty batches (`0`) are rejected immediately before
 contract budget consumption with `ContractError::InvalidBatchSize`.
 
+### `batch_verify` / `register` write-batch metering (Issue #782)
+
+Two independent caps apply to a `batch_verify` call, and Wave operators doing
+bulk onboarding must budget for both:
+
+1. **Shape cap — `MAX_WRITE_BATCH = 25`** (`src/batch.rs`). Enforced before
+   auth or any storage access; `usernames.len() == 0` or `> 25` fails fast
+   with `ContractError::InvalidBatchSize` and costs nothing.
+2. **Verify-rate cap — `get_verify_limit()`**, default
+   `DEFAULT_VERIFIES_PER_LEDGER = 20` (`src/storage.rs::charge_verify_rate`).
+   `batch_verify` spends **one unit per requested username**, charged
+   atomically up front via `charge_verify_rate(&env, &caller, usernames.len())`
+   — before any record is written. If the caller's units already spent this
+   ledger plus the batch size would exceed the cap, the whole call fails with
+   `ContractError::VerifyRateLimited` and **no record in the batch is
+   touched**, even if some entries would otherwise have succeeded. The admin
+   is exempt from this cap; a `Role::Verifier` or allowlisted verifier is not.
+
+**Worked examples:**
+
+| Scenario | Batch size | Verify-rate limit | Units already spent this ledger | Result |
+|---|---|---|---|---|
+| Default cap, first batch of the ledger | 20 | 20 (default) | 0 | `Ok` — exactly at the cap |
+| Default cap, one past the cap | 21 | 20 (default) | 0 | `Err(VerifyRateLimited)` — all 21 unverified |
+| Operator raises cap to the shape ceiling | 25 (`MAX_WRITE_BATCH`) | 25 | 0 | `Ok` — maximum batch, maximum cap, same ledger |
+| Second batch same ledger, cap unchanged | 10 | 20 (default) | 15 (from a prior `verify`/`batch_verify`) | `Err(VerifyRateLimited)` — 15 + 10 > 20 |
+| Admin runs the same batch | 25 | 20 (default) | any | `Ok` — admin is exempt from `charge_verify_rate` |
+
+Because the charge happens before any write, operators bulk-onboarding near
+the cap should either raise `set_verify_limit` ahead of the run (admin-only,
+`0` disables the check) or split the run into batches no larger than the
+remaining per-ledger allowance (`get_verify_limit() - verify_units_spent`,
+where the latter is a storage-module diagnostic helper, not a public ABI
+call). `tests/integration.rs::test_batch_verify_at_ceiling_exceeds_verify_rate_limit_writes_nothing`
+locks this boundary: a full `MAX_WRITE_BATCH` batch against a cap of 10 is
+rejected and leaves every record unverified, and the identical batch
+succeeds once the cap is raised to `MAX_WRITE_BATCH`.
+
 ---
 
 ## CI job

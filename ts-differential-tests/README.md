@@ -30,6 +30,17 @@ runs `make diff-test` (`npm ci` + `npm test`, Node.js 20, npm cache keyed on
 golden-value mismatch shows which fixture diverged. Keep that job required in
 the repository's branch protection rules to block merges until it passes.
 
+The same `diff-test` job also runs
+[`scripts/check_fixture_pairing.sh`](../scripts/check_fixture_pairing.sh)
+(`origin/main...HEAD`) right after the TypeScript tests. It fails the PR when
+a Rust XDR/meta fixture (`tests/testdata/bindings/`, `tests/bindings_golden.rs`,
+`tests/generate_xdr_fixtures.rs`, `abi/export_page.layout.golden`) changes
+without a matching `ts-differential-tests/` update, or when a committed
+`ts-differential-tests/fixtures/*` file changes without a matching Rust
+golden regeneration — see "Upgrade, RBAC, and multisig XDR fixture coverage"
+below for how to regenerate both sides together. Run it locally before
+pushing with `./scripts/check_fixture_pairing.sh origin/main`.
+
 The older `fixtures/get_address_octocat.*` files are placeholders and are not
 used by the CI entry point. The shared Rust golden above is the source of
 truth for these tests.
