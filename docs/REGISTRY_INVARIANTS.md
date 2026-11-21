@@ -275,6 +275,28 @@ P3 documents the "unregistered verify" edge case: the contract returns
 call on a non-existent username cannot inflate `verified_count`. This is
 covered by the property-fuzzing suite (I7) and confirmed by P3 and P6.
 
+### Pagination parity soak (randomized cursor walk)
+
+`tests/pagination_parity.rs::test_parity_soak_random_cursor_walk` seeds a
+23-record registry (deliberately not a multiple of common page sizes),
+removes one middle record, then walks both `get_registered_paginated`
+(admin) and `get_public_paginated` (public) end-to-end with a randomized page
+`limit` per call (1–7), re-seeded per iteration with a small xorshift32 PRNG
+— no external fuzz dependency required. It asserts the full ordered username
+sequence collected by both APIs is identical across all iterations, proving
+cursors stay interchangeable between the admin and public variants (per the
+`get_public_paginated` doc comment) under varied limit sequences, not just
+the fixed limits the other parity tests use.
+
+Run it locally with more iterations than the CI default of 6:
+
+```bash
+SOAK_ITERATIONS=50 cargo test --test pagination_parity test_parity_soak_random_cursor_walk -- --nocapture
+```
+
+Unset `SOAK_ITERATIONS` to fall back to 6 seeded runs, which keeps default
+`cargo test` fast and deterministic.
+
 ### Extending the proof suite
 
 When adding a contract function that mutates `total` or `verified`:
