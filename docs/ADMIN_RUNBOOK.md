@@ -20,6 +20,7 @@ Related docs: [SECURITY](SECURITY.md) · [ABI](ABI.md) · [DEPLOYMENT](DEPLOYMEN
 - [Emergency Pause Lifecycle](#emergency-pause-lifecycle)
 - [Recovery notes](#recovery-notes)
 - [Guardian Circuit Breaker (Issue #196)](#guardian-circuit-breaker-issue-196)
+- [Guardian rotation — dual-control checklist (Issue #789)](#guardian-rotation--dual-control-checklist-issue-789)
 - [Wave Pause Checklist](#wave-pause-checklist)
 
 ## Routine actions
@@ -1166,6 +1167,73 @@ stellar contract invoke \
   --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
   -- remove_guardian
 ```
+
+### Guardian rotation — dual-control checklist (Issue #789)
+
+`set_guardian` is a single admin-signed call: it unilaterally replaces the
+current guardian with no on-chain second approval. During a Wave rotation,
+discipline around *who prepares, who executes, and who verifies* has to be
+carried operationally, since the contract does not enforce it. Follow this
+checklist for every add/remove, and treat any deviation as an incident.
+
+1. **Propose (preparer).** One operator drafts the rotation ticket: outgoing
+   guardian address (if any), incoming guardian address, and the reason
+   (scheduled rotation, suspected key compromise, offboarding). Do not include
+   the incoming guardian's private key material anywhere in the ticket.
+2. **Verify out-of-band (approver, distinct person).** A second operator
+   confirms the incoming address belongs to the intended holder through a
+   channel other than the one the ticket arrived on (voice call, signed
+   message, in-person), and independently reads the *current* on-chain state
+   before anything changes:
+   ```bash
+   stellar contract invoke --id $CONTRACT_ID --network testnet \
+     -- get_guardian
+   ```
+3. **Execute.** Only the admin key — never the outgoing or incoming guardian
+   key — submits the rotation:
+   ```bash
+   stellar contract invoke \
+     --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+     -- set_guardian --guardian $NEW_GUARDIAN_ADDRESS
+   ```
+   To retire the guardian role entirely instead of rotating it, use
+   `remove_guardian` (see above) rather than setting a placeholder address.
+4. **Confirm the event (approver).** The approver — not the preparer who
+   executed the call — independently checks `GuardianChangedEvent` for the
+   transaction and that `get_guardian` now returns the new address:
+   ```bash
+   stellar contract invoke --id $CONTRACT_ID --network testnet \
+     -- get_guardian
+   ```
+   A rotation is not complete until this independent confirmation lands in the
+   ticket; the executing operator's own say-so is not sufficient sign-off.
+5. **Record.** Log the old address, new address, approver identity, and
+   transaction hash in the incident/change log referenced from
+   [SECURITY.md](SECURITY.md). Subgraph consumers watching for rotations should
+   alert on `GuardianChangedEvent`; see
+   [docs/subgraph/README.md](subgraph/README.md).
+
+#### Guardian key lost or suspected compromised mid-Wave
+
+If the guardian key is lost or suspected compromised while a Wave is live:
+
+1. **Do not wait for a replacement before freezing**, if the concern is
+   compromise rather than mere unavailability: the admin can call
+   `emergency_pause` or `set_paused` itself — the admin always retains every
+   guardian capability plus more, so losing the guardian key never removes the
+   ability to freeze writes.
+2. **Rotate immediately** via the dual-control steps above as soon as a
+   verified replacement address is available. Do not reuse the compromised
+   address even if control is later "recovered" — treat recovery itself as
+   unverified until the dual-control proposer/approver split above is
+   satisfied again.
+3. **Never skip step 2 (out-of-band verification) under incident pressure.**
+   A rushed, unverified `set_guardian` during an active incident is exactly
+   how a compromised-key incident becomes a guardian-takeover incident.
+4. **Audit the gap.** Because `set_guardian` has no cooldown, review the audit
+   log (`get_audit_log` / `AUDIT_LOG.md` tooling) for any admin or guardian
+   action taken between the suspected compromise time and the rotation, and
+   note the window explicitly in the incident report.
 
 ## Timelocked role grants (Issue #220)
 
