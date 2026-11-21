@@ -191,7 +191,11 @@ Setting `required = true` means:
 - Clearing attestation (`clear_attestation`) and then calling `upgrade` fails with `AttestationRequired`.
 - The cooldown still applies independently.
 
-The `is_attestation_required()` read exposes the current config for monitoring and client-side enforcement.
+The `get_attestation_required()` read (no auth) exposes the current config
+for monitoring and client-side enforcement; `set_attestation_required(caller,
+required)` is admin-only and recorded in `tests/auth_matrix.csv` alongside
+every other setter/getter pair, including an explicit unauthorized-caller
+negative row (Issue #790).
 
 **Threat scenarios:**
 - *Compromised admin key attempts silent upgrade*: `upgrade` fails with `AttestationRequired` unless an attestation for that exact hash was published first (observable on-chain by watchers).
