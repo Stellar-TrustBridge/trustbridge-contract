@@ -875,6 +875,17 @@ Use this when freezing writes during an active Wave.
 8. Post-incident note: include window duration, impacted functions, and
 	follow-up actions.
 
+**Pause reason survives `migrate` and `upgrade` (Issue #786).** The reason
+recorded by `pause`/`set_paused`/`unpause` lives in instance storage, which
+neither a version `migrate` nor a WASM `upgrade` touches — only an explicit
+`pause`/`unpause`/`set_paused` call changes it. If a Wave incident spans an
+upgrade (e.g. a hotfix deployed while frozen), `get_pause_reason` after the
+upgrade still reports the reason recorded before it, so the incident timeline
+does not lose context mid-remediation. Covered by
+`test_integration_pause_reason_persists_across_migrate` and (under the
+`wasm-test` feature) `test_integration_pause_reason_persists_across_wasm_upgrade`
+in [`tests/integration.rs`](../tests/integration.rs).
+
 ---
 
 ## Role Expiry (Issue #221)

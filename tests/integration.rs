@@ -861,6 +861,80 @@ fn test_integration_version_migration() {
     });
 }
 
+// ── Issue #786: pause reason persistence across upgrade/migrate ──────────────
+
+/// `pause_reason` is stored in instance storage, which survives both
+/// `migrate` (a version bump with no WASM swap) and `upgrade` (a WASM swap
+/// that leaves instance storage untouched) — it must never reset to the
+/// default (`PauseReason::Other`) across either operation, or Wave incident
+/// timelines lose the recorded reason for the pause they are investigating.
+#[test]
+fn test_integration_pause_reason_persists_across_migrate() {
+    let (env, _admin, _user1, _user2, contract_id) = setup_test_env();
+    env.mock_all_auths();
+
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::pause(env.clone(), trustbridge_contract::PauseReason::SecurityIncident as u32)
+            .unwrap();
+        assert_eq!(
+            TrustBridgeContract::get_pause_reason(env.clone()),
+            trustbridge_contract::PauseReason::SecurityIncident
+        );
+    });
+
+    // migrate() bumps the stored schema version without touching the WASM;
+    // it must not disturb the pause reason recorded before it ran.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::migrate(env.clone(), (1, 2, 0)).unwrap();
+    });
+
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::get_pause_reason(env.clone()),
+            trustbridge_contract::PauseReason::SecurityIncident,
+            "pause reason must survive migrate()"
+        );
+        // The contract is still paused post-migrate (migrate does not clear
+        // pause state) — get_health_probes must reflect that too.
+        assert!(TrustBridgeContract::get_health_probes(env.clone()).paused);
+    });
+}
+
+/// Real WASM-swap counterpart to the migrate test above: `upgrade` replaces
+/// the executable but never touches instance storage, so the pause reason
+/// recorded before the upgrade must read back unchanged afterward. Requires a
+/// pre-built WASM artifact (`wasm-test` feature), matching the existing
+/// `test_integration_wasm_upgrade_cooldown` convention in this file.
+#[test]
+#[cfg(feature = "wasm-test")]
+fn test_integration_pause_reason_persists_across_wasm_upgrade() {
+    let (env, _admin, _user1, _user2, contract_id) = setup_test_env();
+    env.mock_all_auths();
+
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::pause(env.clone(), trustbridge_contract::PauseReason::Maintenance as u32)
+            .unwrap();
+    });
+
+    let wasm_bytes = soroban_sdk::Bytes::from_slice(
+        &env,
+        include_bytes!("../target/wasm32v1-none/release/trustbridge_contract.wasm"),
+    );
+    let new_wasm_hash = env.deployer().upload_contract_wasm(wasm_bytes);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::upgrade(env.clone(), new_wasm_hash).unwrap();
+    });
+
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::get_pause_reason(env.clone()),
+            trustbridge_contract::PauseReason::Maintenance,
+            "pause reason must survive a real WASM upgrade"
+        );
+    });
+}
+
 // ── Issue #788: get_health_probes on uninitialized contracts ─────────────────
 
 /// `get_health_probes` must never error on a freshly-deployed, uninitialized
