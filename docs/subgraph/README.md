@@ -129,6 +129,89 @@ Notes and gotchas:
 - Treat the subgraph as a change-notification cache. After any gap, reconcile
   against `get_public_paginated` on-chain — see `DASHBOARD_SYNC.md`.
 
+## Alert mapping: `UpgradeAttestedEvent` and index-generation bumps (Issue #787)
+
+`UpgradeAttestedEvent` and an index-generation bump are both **unmodelled,
+contract-instance-level signals** (no contributor identity), so neither gets a
+subgraph entity under the scope rule above. They still matter for Wave
+operators, so indexers should alert on them directly from the raw event log
+rather than silently dropping them.
+
+### `UpgradeAttestedEvent`
+
+| Field | Type | Meaning |
+|---|---|---|
+| `wasm_hash` (topic) | `BytesN<32>` | The WASM hash the admin attested for the *next* `upgrade` call |
+| `expires_at` | `u64` | Unix timestamp after which `upgrade` will reject this attestation (`AttestationExpired`) |
+| `timestamp` | `u64` | When the attestation was recorded |
+
+Alert mapping:
+
+- **Treat every `UpgradeAttestedEvent` as a change-window signal.** Fire a
+  Warn-level alert (not critical — attesting is a normal pre-upgrade step) so
+  on-call knows a WASM swap is imminent and can cross-check it against the
+  planned change log.
+- **Unexpected attestation outside a declared change window is the actual
+  incident.** If `UpgradeAttestedEvent` fires with no matching entry in the
+  Wave change log, escalate to critical — see [`get_health_probes` →
+  Unexpected upgrade window](../CONTRACT_HEALTH.md#choosing-a-probe--alert-slos-issue-756),
+  which reports the same condition (`attestation_present: true`) as a polled
+  snapshot.
+- **Pair with `AttestationClearedEvent`.** If an attestation is withdrawn
+  (`AttestationClearedEvent`, same shape) before the matching `UpgradedEvent`
+  arrives, clear the Warn alert rather than letting it dangle.
+- Example handler (`AssemblyScript`, mirrors the sketch below — logs only,
+  no entity write):
+  ```ts
+  export function handleUpgradeAttested(ev: UpgradeAttestedEvent): void {
+    log.warning(
+      "upgrade attested: wasm_hash={}, expires_at={}",
+      [ev.params.wasm_hash.toHexString(), ev.params.expires_at.toString()],
+    );
+    // Forward to the alerting pipeline (e.g. a webhook sink); do not persist
+    // as an entity — this event names no contributor and is out of schema
+    // scope per "Event → entity mapping" above.
+  }
+  ```
+
+### Index-generation bumps
+
+There is **no dedicated `IndexGenerationBumpedEvent`** emitted on-chain today
+— `index_gen` is an internal counter (bumped by `repair_index` and by registry
+structural changes) surfaced only through `get_health` /
+`get_health_probes().index_gen`. Indexers cannot subscribe to this as a log
+event; they must poll it.
+
+Alert mapping:
+
+- **Poll `get_health_probes().index_gen` on the same cadence as the health
+  probe itself** (see [CONTRACT_HEALTH.md](../CONTRACT_HEALTH.md)) and diff
+  against the last-seen value.
+- **A bump invalidates any cached `get_public_paginated` / registry-index
+  cursor the dashboard is holding**, exactly as [DASHBOARD_SYNC.md → Health
+  probes for dashboards](../DASHBOARD_SYNC.md#health-probes-for-dashboards-issue-756)
+  documents for cursor invalidation. Treat a bump as Warn-level ("re-sync
+  cached registry views"), not critical — it is routine maintenance, not
+  contract failure.
+- **An `index_gen` bump with no corresponding `repair_index` invocation in the
+  audit log** is the escalation case: it implies a structural registry change
+  nothing recorded, and should page.
+- Example poll-and-diff handler:
+  ```ts
+  // Run on the indexer's existing polling loop; `lastSeenIndexGen` is
+  // persisted indexer-local state, not a subgraph entity.
+  export function checkIndexGeneration(probes: HealthProbesSnapshot): void {
+    if (probes.indexGen != lastSeenIndexGen) {
+      log.warning(
+        "index_gen bumped: {} -> {} — invalidating cached cursors",
+        [lastSeenIndexGen.toString(), probes.indexGen.toString()],
+      );
+      invalidateCachedCursors();
+      lastSeenIndexGen = probes.indexGen;
+    }
+  }
+  ```
+
 ## Mapping handler sketch
 
 ```ts
