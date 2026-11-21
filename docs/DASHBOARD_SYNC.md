@@ -60,6 +60,29 @@ in bounded chunks, so a dashboard/indexer sync job can page through without
 risking a resource-limit failure on a large registry. See
 `test_get_registered_page_paginates_and_gates_on_admin` in `src/lib.rs`.
 
+### Recommended page size versus budget
+
+`MAX_PAGE_LIMIT = 100` is a ceiling, not a recommendation. `limit > 100` is
+clamped to `100` rather than rejected, and a page that materializes too many
+ledger entries fails the whole invocation (no partial page).
+
+| Reader | Endpoint | Recommended `limit` |
+|--------|----------|--------------------:|
+| Public dashboard poll | `get_public_paginated` | `20` (`DEFAULT_PAGE_LIMIT`) |
+| Indexer backfill | `get_public_paginated` | `50` (`CHUNK_SIZE`) |
+| Admin export | `get_registered_paginated` | `50` |
+| Recovery after an OOG | Either | `10`, then increase |
+
+Typical oversized-page symptoms are `Budget exceeded` / instruction-limit
+errors, ledger-footprint errors, and RPC timeouts. On any of them, halve the
+limit and retry from the last successful `cursor`; do not treat the failure as
+an empty registry. A request of 150 returning 100 rows is the silent clamp,
+not a dropped page.
+
+Full budget model, CLI examples, and reproduction commands:
+[BENCHMARK_BUDGETS.md](BENCHMARK_BUDGETS.md). Field semantics:
+[ABI.md § ExportPage](ABI.md#exportpage).
+
 ## Event Idempotency & Replay Handling
 
 Issue #135: Horizon/RPC replays and worker retries are normal operating conditions, not

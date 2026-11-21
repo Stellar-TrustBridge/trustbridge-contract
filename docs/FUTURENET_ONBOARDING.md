@@ -48,6 +48,66 @@ stellar keys address contributor
 
 **No on-chain contract event at this step** (account funding is a Horizon operation, not a contract event).
 
+### Faucet rate limits and workarounds
+
+Futurenet Friendbot rate-limits funding per account, per IP, and per time
+window. When the limit is hit, `stellar keys generate ... --fund` or
+`stellar keys fund ...` fails with `429`, `too many requests`, `rate limit
+exceeded`, or a friendbot/funding error. The key itself was still created
+locally — only the funding leg failed.
+
+Work through these workarounds in order:
+
+1. **Reuse an already-funded identity.** You do not need a fresh key for every
+   session. A cheap read against any deployed Futurenet contract proves the
+   account is funded:
+
+   ```bash
+   export CONTRACT_ID=$(cat deployments/futurenet.json | python3 -c "import sys,json; print(json.load(sys.stdin)['contract_id'])")
+   stellar contract invoke --id $CONTRACT_ID --source-account contributor \
+     --network futurenet -- get_stats
+   # Expected: {"total":0,"verified":0} — the account paid no fee, so it is funded
+   ```
+
+   If you have no deployment yet, skip to Step 3 with the existing identity; a
+   successful deploy is the same proof.
+
+2. **Wait, then retry with exponential backoff.** Avoid tight retry loops: they
+   extend the rate-limit window. Use increasing delays and stop as soon as one
+   attempt succeeds:
+
+   ```bash
+   for delay in 30 60 120 240; do
+     if stellar keys fund contributor --network futurenet; then
+       echo "Funded contributor after ${delay}s backoff"
+       break
+     fi
+     echo "Friendbot rate-limited; retrying in ${delay}s"
+     sleep "$delay"
+   done
+   ```
+
+3. **Generate the key first, fund it separately.** Splitting the two operations
+   makes the failure explicit and lets you retry funding without regenerating
+   (and losing) the key:
+
+   ```bash
+   stellar keys generate contributor --network futurenet
+   stellar keys fund contributor --network futurenet
+   ```
+
+4. **Fall back to testnet** if Futurenet funding stays throttled. Testnet has a
+   separate Friendbot quota:
+
+   ```bash
+   stellar keys fund contributor --network testnet
+   NETWORK=testnet SOURCE=contributor ./scripts/deploy.sh
+   ```
+
+`scripts/futurenet_smoke_test.sh` recognises these same error strings during
+the deploy phase and prints the remediation above instead of an opaque deploy
+failure. See [DEPLOYMENT.md § Futurenet smoke test](DEPLOYMENT.md#futurenet-smoke-test).
+
 ---
 
 ## Step 2 — Build the contract
@@ -215,6 +275,7 @@ for filter patterns and field layouts.
 | `make invoke-lookup` | Read-only address lookup |
 | `make invoke-verify` | Verify a contributor (admin or Verifier role) |
 | `make invoke-stats` | Read registry statistics |
+| `make futurenet-smoke` | Deploy + run the Futurenet smoke checks (`ADMIN=G...`) |
 
 ---
 
@@ -250,7 +311,14 @@ If the address matches yours, registration succeeded in an earlier session. Proc
 rustup target add wasm32v1-none
 ```
 
-### Account not funded / insufficient fee
+### Account not funded / insufficient fee / Friendbot rate limit
+
+If the error mentions `429`, `too many requests`, `rate limit`, or `friendbot`,
+this is a faucet throttle, not a contract bug. Reuse an already-funded identity
+or back off and retry as described in
+[Faucet rate limits and workarounds](#faucet-rate-limits-and-workarounds).
+
+Otherwise, fund the identity explicitly:
 
 ```bash
 stellar keys fund contributor --network futurenet

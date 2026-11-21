@@ -26,6 +26,10 @@
 #                  Kept separate from SOURCE so a plain `make validate-registry`
 #                  never attempts an admin-gated call with a non-admin identity.
 #   PAGE_LIMIT   — records requested per page for the admin-side check (default: 100)
+#   REPORT_FILE  — optional path for a stable JSON dry-run repair report whose
+#                  field names/order are pinned in docs/ABI.md and
+#                  docs/CONTRACT_HEALTH.md. The report is read-only: it never
+#                  proposes or applies writes.
 #
 # Exit status: 0 if the export matches live state, 1 if any mismatch was
 # found, 2 on usage/configuration errors.
@@ -41,6 +45,7 @@ SOURCE="${SOURCE:-default}"
 ADMIN_SOURCE="${ADMIN_SOURCE:-}"
 STELLAR="${STELLAR:-stellar}"
 PAGE_LIMIT="${PAGE_LIMIT:-100}"
+REPORT_FILE="${REPORT_FILE:-}"
 
 EXPORT_FILE="${1:-}"
 
@@ -83,6 +88,10 @@ fi
 echo "==> Validating $EXPORT_FILE against ${CONTRACT_ID} (${NETWORK})" >&2
 
 mismatches=0
+missing_onchain=0
+address_mismatch=0
+verified_mismatch=0
+missing_from_export=0
 record_count="$(jq '.records | length' "$EXPORT_FILE")"
 
 for i in $(seq 0 $((record_count - 1))); do
@@ -99,6 +108,7 @@ for i in $(seq 0 $((record_count - 1))); do
   if [[ "$onchain" == "null" ]]; then
     echo "MISSING_ONCHAIN    ${username}  (export has ${exp_address}, verified=${exp_verified})"
     mismatches=$((mismatches + 1))
+    missing_onchain=$((missing_onchain + 1))
     continue
   fi
 
@@ -108,9 +118,11 @@ for i in $(seq 0 $((record_count - 1))); do
   if [[ "$onchain_address" != "$exp_address" ]]; then
     echo "ADDRESS_MISMATCH   ${username}  export=${exp_address} onchain=${onchain_address}"
     mismatches=$((mismatches + 1))
+    address_mismatch=$((address_mismatch + 1))
   elif [[ "$onchain_verified" != "$exp_verified" ]]; then
     echo "VERIFIED_MISMATCH  ${username}  export=${exp_verified} onchain=${onchain_verified}"
     mismatches=$((mismatches + 1))
+    verified_mismatch=$((verified_mismatch + 1))
   fi
 done
 
@@ -141,11 +153,93 @@ if [[ -n "$ADMIN_SOURCE" ]]; then
     if ! jq -e --arg u "$uname" '.records[] | select(.github_username == $u)' "$EXPORT_FILE" >/dev/null; then
       echo "MISSING_FROM_EXPORT ${uname}"
       mismatches=$((mismatches + 1))
+      missing_from_export=$((missing_from_export + 1))
     fi
   done < "$onchain_usernames"
 else
   echo "==> ADMIN_SOURCE not set — skipping the on-chain-only diff." >&2
   echo "    Set ADMIN_SOURCE=<admin identity> to also detect registrations missing from the export." >&2
+fi
+
+if [[ -n "$REPORT_FILE" ]]; then
+  # Pinned JSON shape (v1): field names and order are a compatibility surface
+  # for dashboard parsers — see docs/ABI.md#dry-run-repair-report.
+  if [[ -n "$ADMIN_SOURCE" ]]; then admin_diff_enabled=true; else admin_diff_enabled=false; fi
+  export_verified_count="$(jq '[.records[] | select(.verified == true)] | length' "$EXPORT_FILE")"
+  exported_at="$(jq -r '.exported_at // ""' "$EXPORT_FILE")"
+
+  stats="$("$STELLAR" contract invoke \
+    --id "$CONTRACT_ID" \
+    --source-account "$SOURCE" \
+    --network "$NETWORK" \
+    -- get_stats 2>/dev/null || echo null)"
+
+  if jq -e 'type == "object" and has("total") and has("verified")' <<<"$stats" >/dev/null 2>&1; then
+    onchain_total="$(jq -r '.total' <<<"$stats")"
+    onchain_verified="$(jq -r '.verified' <<<"$stats")"
+    if [[ "$onchain_total" == "$record_count" && "$onchain_verified" == "$export_verified_count" ]]; then
+      counter_parity=true
+    else
+      counter_parity=false
+    fi
+  else
+    onchain_total=null
+    onchain_verified=null
+    counter_parity=null
+  fi
+
+  result=ok
+  if [[ "$mismatches" -gt 0 || "$counter_parity" == "false" ]]; then
+    result=mismatch
+  fi
+
+  jq -n \
+    --argjson schema_version 1 \
+    --arg tool "validate_registry" \
+    --arg contract_id "$CONTRACT_ID" \
+    --arg network "$NETWORK" \
+    --arg generated_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    --arg exported_at "$exported_at" \
+    --argjson checked_records "$record_count" \
+    --argjson export_verified "$export_verified_count" \
+    --argjson onchain_total "$onchain_total" \
+    --argjson onchain_verified "$onchain_verified" \
+    --argjson missing_onchain "$missing_onchain" \
+    --argjson address_mismatch "$address_mismatch" \
+    --argjson verified_mismatch "$verified_mismatch" \
+    --argjson missing_from_export "$missing_from_export" \
+    --argjson total_mismatches "$mismatches" \
+    --argjson admin_diff_enabled "$admin_diff_enabled" \
+    --argjson counter_parity "$counter_parity" \
+    --arg result "$result" \
+    '{
+      schema_version: $schema_version,
+      tool: $tool,
+      contract_id: $contract_id,
+      network: $network,
+      generated_at: $generated_at,
+      export: {
+        exported_at: $exported_at,
+        total: $checked_records,
+        verified: $export_verified
+      },
+      counters: {
+        onchain_total: $onchain_total,
+        onchain_verified: $onchain_verified,
+        parity: $counter_parity
+      },
+      mismatches: {
+        missing_onchain: $missing_onchain,
+        address_mismatch: $address_mismatch,
+        verified_mismatch: $verified_mismatch,
+        missing_from_export: $missing_from_export,
+        total: $total_mismatches
+      },
+      admin_diff_enabled: $admin_diff_enabled,
+      result: $result
+    }' > "$REPORT_FILE"
+
+  echo "==> Wrote dry-run repair report to ${REPORT_FILE}" >&2
 fi
 
 echo "" >&2

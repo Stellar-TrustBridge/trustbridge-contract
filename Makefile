@@ -23,9 +23,11 @@ BINDINGS_DIR ?= bindings/typescript
 PKG_MANAGER  ?= pnpm
 EXPORT_FILE ?= registry-export-$(NETWORK).json
 ADMIN_SOURCE ?=
+REPORT_FILE ?=
 WASM_SIZE_LIMIT ?= 204800
 
 .PHONY: help build build-legacy test fuzz bench bench-export bench-username bench-double-verify bench-register-budget fmt lint docs docs-check check ci clean \
+        futurenet-smoke check-export-layout \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
         export-registry validate-registry
@@ -177,6 +179,12 @@ deploy-mainnet: build ## Deploy to Stellar Mainnet (requires explicit ADMIN and 
 	@if [ -z "$(ADMIN)" ]; then echo "Set ADMIN to the G-address of the contract admin."; exit 1; fi
 	@if [ "$(CONFIRM_MAINNET)" != "yes" ]; then echo "ERROR: CONFIRM_MAINNET=yes is required for mainnet deployment to prevent accidental mainnet deploys."; exit 1; fi
 	NETWORK=mainnet ADMIN=$(ADMIN) ./scripts/deploy.sh
+
+futurenet-smoke: ## Deploy + smoke-check a fresh Futurenet instance (ADMIN required)
+	@if [ -z "$(ADMIN)" ]; then \
+		echo "ERROR: set ADMIN to a funded Futurenet G-address."; exit 1; \
+	fi
+	ADMIN=$(ADMIN) SOURCE=$(SOURCE) NETWORK=futurenet ./scripts/futurenet_smoke_test.sh
 
 require-contract-id:
 	@if [ -z "$(CONTRACT_ID)" ]; then \
@@ -333,5 +341,11 @@ invoke-set-paused: ## Toggle contract pause state (PAUSED, SOURCE=admin, CONTRAC
 export-registry: require-contract-id ## Export full registry to JSON (admin) — see docs/DEPLOYMENT.md#registry-export--import (SOURCE=admin, CONTRACT_ID, EXPORT_FILE)
 	CONTRACT_ID=$(CONTRACT_ID) SOURCE=$(SOURCE) NETWORK=$(NETWORK) OUTPUT_FILE=$(EXPORT_FILE) ./scripts/export_registry.sh
 
-validate-registry: require-contract-id ## Validate a registry export JSON against live state, no writes (CONTRACT_ID, EXPORT_FILE, ADMIN_SOURCE=admin for full diff)
-	CONTRACT_ID=$(CONTRACT_ID) SOURCE=$(SOURCE) ADMIN_SOURCE=$(ADMIN_SOURCE) NETWORK=$(NETWORK) ./scripts/validate_registry.sh $(EXPORT_FILE)
+check-export-layout: ## Verify an export JSON matches the v1 layout snapshot (FILE=...)
+	@if [ -z "$(FILE)" ]; then \
+		echo "ERROR: set FILE=<export.json> to check the export layout."; exit 1; \
+	fi
+	./scripts/check_export_layout.sh $(FILE)
+
+validate-registry: require-contract-id ## Validate a registry export JSON against live state, no writes (CONTRACT_ID, EXPORT_FILE, ADMIN_SOURCE=admin, REPORT_FILE=optional JSON report)
+	CONTRACT_ID=$(CONTRACT_ID) SOURCE=$(SOURCE) ADMIN_SOURCE=$(ADMIN_SOURCE) REPORT_FILE=$(REPORT_FILE) NETWORK=$(NETWORK) ./scripts/validate_registry.sh $(EXPORT_FILE)

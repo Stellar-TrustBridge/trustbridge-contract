@@ -248,6 +248,7 @@ Audit log lines are emitted to stdout and written to `--audit-log` file:
 | `make invoke-register` | Register a username |
 | `make invoke-lookup` | Read-only lookup |
 | `make invoke-stats` | Read statistics |
+| `make check-export-layout` | Verify an export JSON matches the v1 layout snapshot (`FILE=...`) |
 | `make invoke-verify` | Verify a contributor (admin or verifier role) |
 | `make invoke-revoke-verification` | Revoke verification (admin or verifier role) |
 | `make bulk-verify-dry-run` | Dry-run bulk verify from `BULK_VERIFY_FILE` |
@@ -256,6 +257,7 @@ Audit log lines are emitted to stdout and written to `--audit-log` file:
 | `make bulk-revoke` | Bulk revoke with audit log |
 | `make testnet-checklist` | Run the testnet smoke checklist |
 | `make demo-e2e` | Run the cross-repo E2E demo (register → verify → lookup → export) |
+| `make futurenet-smoke` | Deploy + smoke-check a fresh Futurenet instance (`ADMIN=G...`) |
 
 Example registration:
 
@@ -279,6 +281,31 @@ stellar contract invoke --id $CONTRACT_ID \
 `register` requires the source account to authenticate as `stellar-address`. If the
 username is already registered to a different address, that previous address must
 also sign. See [ABI.md](ABI.md#register) for full auth requirements and failure modes.
+
+---
+
+## Futurenet smoke test
+
+`scripts/futurenet_smoke_test.sh` deploys a fresh contract to Futurenet and checks
+that `get_stats` reads `{total: 0, verified: 0}` and that `has_record` returns
+`false` for an unregistered username. It is a deploy sanity check, not a
+replacement for `cargo test`.
+
+```bash
+ADMIN=G... make futurenet-smoke
+# or: ADMIN=G... ./scripts/futurenet_smoke_test.sh
+```
+
+The script prints the failing check by name and exits non-zero. If the deploy
+phase reports `429`, `too many requests`, `rate limit`, or a friendbot/funding
+error, it prints the faucet remediation directly: reuse an already-funded
+identity, retry with exponential backoff (30s → 60s → 120s → 240s), or fall back
+to testnet. Those limits are per account/IP and per time window, so repeated
+`stellar keys generate --fund` calls make the problem worse.
+
+Full contributor walkthrough:
+[FUTURENET_ONBOARDING.md § Faucet rate limits and workarounds](FUTURENET_ONBOARDING.md#faucet-rate-limits-and-workarounds).
+Threat-model rationale: [SECURITY.md § Futurenet Deploy Smoke Workflow](SECURITY.md#futurenet-deploy-smoke-workflow).
 
 ---
 
@@ -330,7 +357,11 @@ make export-registry CONTRACT_ID=$CONTRACT_ID SOURCE=admin
 The script fails with a clear error and a non-zero exit code if `CONTRACT_ID`,
 `SOURCE`, the Stellar CLI, or `jq` are missing.
 
-**Output schema** (stable field names for dashboard/indexer consumers):
+**Output schema** (stable field names for dashboard/indexer consumers): the
+field order and integer widths are pinned as a v1 snapshot in
+[ABI.md § Export page byte layout (v1)](ABI.md#export-page-byte-layout-v1).
+Verify any generated file with
+`make check-export-layout FILE=registry-export-testnet.json`.
 
 ```json
 {
@@ -363,6 +394,7 @@ which covers staging restores and migration dry-runs.
 | `SOURCE` | No | Identity for per-record reads (default: `default`); `get_address` needs no auth, so any funded identity works |
 | `ADMIN_SOURCE` | No | Admin identity; when set, also detects on-chain registrations **missing from** the export via admin-gated `get_registered_paginated` |
 | `PAGE_LIMIT` | No | Records per page for the admin-side check (default: `100`) |
+| `REPORT_FILE` | No | Writes a versioned JSON dry-run repair report with counter proofs (see below) |
 
 ```bash
 CONTRACT_ID=$CONTRACT_ID NETWORK=testnet ./scripts/validate_registry.sh registry-export-testnet.json
@@ -380,6 +412,20 @@ The script reports every mismatch it finds and exits `1` if any are present,
 | `ADDRESS_MISMATCH` | `stellar_address` differs between export and chain |
 | `VERIFIED_MISMATCH` | `verified` flag differs between export and chain |
 | `MISSING_FROM_EXPORT` | Contract has the username; the export file does not (`ADMIN_SOURCE` only) |
+
+For machine consumers, set `REPORT_FILE` to emit a versioned JSON report with
+the same categories plus `get_stats()` counter proofs:
+
+```bash
+CONTRACT_ID=$CONTRACT_ID ADMIN_SOURCE=admin REPORT_FILE=repair-report.json \
+  ./scripts/validate_registry.sh registry-export-testnet.json
+```
+
+The report shape (`schema_version`, `export`, `counters`, `mismatches`,
+`result`) is pinned in [ABI.md § Dry-run repair report](ABI.md#dry-run-repair-report);
+operator interpretation is in
+[CONTRACT_HEALTH.md § Dry-run repair report](CONTRACT_HEALTH.md#dry-run-repair-report).
+The script remains validate-only — the report never triggers a write.
 
 **Safety warning:** this tool is validate-only by design. It does not replay
 writes. Never use an export file to blindly overwrite mainnet state —

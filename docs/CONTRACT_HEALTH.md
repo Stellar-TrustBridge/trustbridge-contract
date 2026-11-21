@@ -128,3 +128,39 @@ const health = await contract.get_health();
 // health.paused, health.version, health.total, health.verified,
 // health.cooldown_secs, health.cooldown_remaining_secs, health.attestation_present
 ```
+
+---
+
+## Dry-run repair report
+
+Issue #811: before acting on a health snapshot or an export file, operators can produce a
+read-only **dry-run repair report** with `scripts/validate_registry.sh`:
+
+```bash
+CONTRACT_ID=$CONTRACT_ID ADMIN_SOURCE=admin REPORT_FILE=repair-report.json \
+  ./scripts/validate_registry.sh registry-export-testnet.json
+```
+
+The report proves two things without writing anything:
+
+1. **Counter proofs** — `counters.onchain_total` / `counters.onchain_verified`
+   come from a live `get_stats()` call and are compared against the counts
+   derived from the export file (`export.total` / `export.verified`).
+   `counters.parity` is `true` only when both match. A `false` parity means the
+   export is stale or the registry counters drifted; do not use that export for
+   a restore.
+2. **Mismatch categories** — `mismatches.missing_onchain`,
+   `address_mismatch`, `verified_mismatch`, and `missing_from_export` are
+   stable counters corresponding to the human-readable diff lines. The last
+   one is only populated when `ADMIN_SOURCE` is set, which is recorded in
+   `admin_diff_enabled`.
+
+`result` is `"ok"` only when every mismatch count is zero **and** counter
+parity is `true` (or `null` when `get_stats()` was unavailable). `schema_version`
+is `1`; parsers should reject unknown versions rather than guessing. The exact
+field order and types are pinned in
+[ABI.md § Dry-run repair report](ABI.md#dry-run-repair-report).
+
+This is a snapshot, not a repair plan: the script never replays writes or calls
+`compact_index`. Review every reported diff before using the normal
+admin-invoke workflow described in [DEPLOYMENT.md](DEPLOYMENT.md#import--validate-issue-133).
