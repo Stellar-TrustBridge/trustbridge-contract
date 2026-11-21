@@ -135,6 +135,14 @@ impl Default for BatchConfig {
 ///
 /// Raising this requires re-running that benchmark, not just editing the
 /// constant.
+///
+/// This is a *shape* cap only. `batch_verify` separately spends one
+/// `charge_verify_rate` unit per requested username against the caller's
+/// per-ledger verify-rate allowance (default `DEFAULT_VERIFIES_PER_LEDGER`
+/// in `storage.rs`) before writing anything, so a full-size batch can still
+/// fail with `ContractError::VerifyRateLimited` even though it is within
+/// `MAX_WRITE_BATCH`. See "batch_verify / register write-batch metering"
+/// in `docs/BENCHMARK_BUDGETS.md` for worked examples near both caps.
 pub const MAX_WRITE_BATCH: u32 = 25;
 
 impl BatchConfig {
