@@ -109,6 +109,31 @@ flowchart TD
 constants everything else names. `events.rs` only depends on `domain.rs`
 (the `EventDomain` stamped on each event). Nothing depends on `lib.rs`.
 
+### Shared helper functions (cross-module surface)
+
+No module in `src/` currently uses `pub(crate)` visibility — every item one
+module exposes to another is plain `pub` at the module level, scoped only
+by the fact that the modules themselves (`mod audit; mod storage; …` in
+`lib.rs`) are private to the crate. That makes the function signature, not
+a visibility keyword, the real contract between modules. The helpers below
+are the ones called from outside their own file and are the ones a
+contributor must keep stable (or update every call site for) when editing:
+
+| Helper | Defined in | Called from |
+|--------|-------------|-------------|
+| `is_valid_github_username`, `canonicalize_username`, `eq_ignore_ascii_case`, `is_zero_address` | `src/utils.rs` | `src/lib.rs`, `src/storage.rs`, `src/batch.rs`, `fuzz/fuzz_targets/*.rs` |
+| `is_reserved`, `add_to_reserved`, `remove_from_reserved` | `src/storage.rs` | `src/lib.rs` (`register`, `rename`, `add_reserved`/`remove_reserved`/`is_reserved` entrypoints) |
+| Index/cursor/audit persistence helpers (e.g. `get_health_probes`, pagination cursor codecs) | `src/storage.rs` | `src/lib.rs`, `src/merkle.rs`, `src/batch.rs` |
+| `EventDomain` construction | `src/domain.rs` | `src/events.rs`, `src/lib.rs` (every `#[contractevent]` emission site) |
+| Oracle allowlist / proof checks | `src/oracle_proof.rs` | `src/lib.rs` (`verify_with_oracle_proof`) |
+| Staged-WASM intent slot helpers | `src/staged_wasm.rs` | `src/lib.rs` (`upgrade`, `stage_wasm`) |
+
+When adding a new cross-module helper, put it in the module that owns the
+state it touches (see the module table above), keep it `pub` at module
+scope only — never re-export it from `lib.rs` unless external crates need
+it — and add a row here so the module map stays a true file-ownership
+reference for Wave PR review.
+
 ### Test locations by domain
 
 | Domain | Tests |
