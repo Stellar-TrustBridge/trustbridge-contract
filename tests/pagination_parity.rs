@@ -677,6 +677,92 @@ fn test_parity_return_type_get_public_paginated() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// § Merkle Root Parity Across Admin / Public Pages (Issue #797)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// For the *same* cursor/limit window, `get_registered_paginated` (admin) and
+/// `get_public_paginated` must produce the identical `merkle_root`. The root
+/// is computed over the page's records, not over which API fetched them, so
+/// divergence would mean the two APIs disagree about what's actually in the
+/// registry for that window — breaking any Wave audit that cross-checks an
+/// admin export against the public export.
+#[test]
+fn test_parity_merkle_root_identical_same_window() {
+    let (env, admin, contract_id) = setup();
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+    let user3 = Address::generate(&env);
+
+    register_user(&env, &contract_id, "alice", &user1);
+    register_user(&env, &contract_id, "bob", &user2);
+    register_user(&env, &contract_id, "carol", &user3);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let admin_page =
+            TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
+        let public_page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
+
+        assert_eq!(
+            admin_page.merkle_root, public_page.merkle_root,
+            "admin and public pages over the identical window must share merkle_root"
+        );
+        assert_eq!(admin_page.total, public_page.total);
+        assert_eq!(admin_page.has_more, public_page.has_more);
+    });
+
+    // Same assertion holds across a second, non-first page.
+    env.as_contract(&contract_id, || {
+        let admin_page1 =
+            TrustBridgeContract::get_registered_paginated(env.clone(), None, 2).unwrap();
+        let public_page1 =
+            TrustBridgeContract::get_public_paginated(env.clone(), None, 2).unwrap();
+        assert_eq!(admin_page1.merkle_root, public_page1.merkle_root);
+        assert_eq!(admin_page1.next_cursor, public_page1.next_cursor);
+
+        let cursor = admin_page1.next_cursor.clone();
+        let admin_page2 =
+            TrustBridgeContract::get_registered_paginated(env.clone(), cursor.clone(), 2).unwrap();
+        let public_page2 =
+            TrustBridgeContract::get_public_paginated(env.clone(), cursor, 2).unwrap();
+        assert_eq!(
+            admin_page2.merkle_root, public_page2.merkle_root,
+            "second-page merkle_root must also be identical across APIs"
+        );
+    });
+}
+
+/// A removal mid-registry must shift *both* APIs' merkle_root identically —
+/// the roots diverging after a removal would mean one API's index skipped
+/// the hole while the other didn't (Issue #52-style divergence).
+#[test]
+fn test_parity_merkle_root_identical_after_removal() {
+    let (env, admin, contract_id) = setup();
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+    let user3 = Address::generate(&env);
+
+    register_user(&env, &contract_id, "alice", &user1);
+    register_user(&env, &contract_id, "bob", &user2);
+    register_user(&env, &contract_id, "carol", &user3);
+    remove_user(&env, &contract_id, &admin, "bob");
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let admin_page =
+            TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
+        let public_page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
+
+        assert_eq!(
+            admin_page.merkle_root, public_page.merkle_root,
+            "merkle_root must stay identical across APIs after a middle removal"
+        );
+        assert_eq!(admin_page.records.len(), 2);
+        assert_eq!(public_page.records.len(), 2);
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // § Coverage Summary
 // ═══════════════════════════════════════════════════════════════════════════
 

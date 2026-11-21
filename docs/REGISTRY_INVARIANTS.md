@@ -84,6 +84,19 @@ compacts, re-registers the exact same names at new addresses, then asserts
 `get_stats().total`, `get_verified_count()`, the chunked index, and a full
 paginated walk all agree with the live record set (I10).
 
+### Admin/public merkle_root parity for the same window (Issue #797)
+
+`get_registered_paginated` (admin) and `get_public_paginated` both return an
+`ExportPage` with a `merkle_root` computed over `records` in page order (see
+`src/merkle.rs`). For the **same** `cursor`/`limit` window they must return
+the identical root — the root is a function of what's in the registry, not
+of which API read it. `test_parity_merkle_root_identical_same_window` and
+`test_parity_merkle_root_identical_after_removal` in
+`tests/pagination_parity.rs` assert this across first/second pages and
+across a middle removal. Divergence here means the two code paths disagree
+about page contents for the same window and breaks any Wave audit that
+cross-checks an admin export digest against the publicly-fetched page.
+
 ### Challenge-period operations preserve count invariants (Issue #214)
 
 The squatter-challenge flow (`start_challenge`, `cancel_challenge`,

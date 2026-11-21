@@ -215,6 +215,11 @@ pub enum ContractError {
     /// `execute_upgrade` was called before the approval threshold was met
     /// (Issue #301).
     UpgradeProposalInsufficientApprovals = 44,
+    /// `set_upgrade_threshold` was called with a value greater than
+    /// `MAX_UPGRADE_SIGNERS`, which would make the threshold permanently
+    /// unreachable (Issue #795). Fails closed instead of silently accepting
+    /// an impossible threshold.
+    ThresholdExceedsSignerCap = 45,
     /// `register` was given more fallback addresses than `MAX_FALLBACK_ADDRESSES`.
     FallbackListFull = 46,
     /// `rename` was called with a `new_username` that is already registered.
@@ -314,6 +319,7 @@ impl ContractError {
             42 => Some(ContractError::UpgradeProposalAlreadyApproved),
             43 => Some(ContractError::UpgradeProposalDelayActive),
             44 => Some(ContractError::UpgradeProposalInsufficientApprovals),
+            45 => Some(ContractError::ThresholdExceedsSignerCap),
             46 => Some(ContractError::FallbackListFull),
             47 => Some(ContractError::UsernameTaken),
             48 => Some(ContractError::RotationRequired),
@@ -420,6 +426,7 @@ impl ContractError {
             ContractError::UpgradeProposalAlreadyPending => ErrorCategory::Fatal,
             ContractError::NoUpgradeProposalPending => ErrorCategory::Fatal,
             ContractError::UpgradeProposalAlreadyApproved => ErrorCategory::Fatal,
+            ContractError::ThresholdExceedsSignerCap => ErrorCategory::Fatal,
             ContractError::FallbackListFull => ErrorCategory::Fatal,
             ContractError::UsernameTaken => ErrorCategory::Fatal,
             ContractError::RotationRequired => ErrorCategory::Fatal,
@@ -494,6 +501,9 @@ impl fmt::Display for ContractError {
             ContractError::NoUpgradeProposalPending => write!(f, "no upgrade proposal pending"),
             ContractError::UpgradeProposalAlreadyApproved => {
                 write!(f, "upgrade proposal already approved")
+            }
+            ContractError::ThresholdExceedsSignerCap => {
+                write!(f, "threshold exceeds signer cap")
             }
             ContractError::UpgradeProposalDelayActive => write!(f, "upgrade proposal delay active"),
             ContractError::UpgradeProposalInsufficientApprovals => {
@@ -606,6 +616,7 @@ mod tests {
             ContractError::UpgradeProposalAlreadyPending,
             ContractError::NoUpgradeProposalPending,
             ContractError::UpgradeProposalAlreadyApproved,
+            ContractError::ThresholdExceedsSignerCap,
             ContractError::UpgradeProposalDelayActive,
             ContractError::UpgradeProposalInsufficientApprovals,
             ContractError::FallbackListFull,

@@ -402,6 +402,64 @@ If the entry has been archived, restore it with that same key
 
 ---
 
+## Rent Reclaim After Mass Removals (Issue #796)
+
+A Wave cleanup batch (`batch_remove` / `execute_batch_remove`) deletes many
+`reg` / `chunk` persistent entries at once. Those entries stop accruing rent
+the instant they're deleted — Soroban doesn't refund past rent, but it also
+stops charging for anything that's gone — so there's no "reclaim" step for
+the deleted entries themselves. What operators actually miss is the
+**follow-up work the removal creates** for the entries that remain:
+
+1. **The index generation bumps.** Every successful `remove` / `batch_remove`
+   calls `bump_index_generation` (`src/storage.rs`), which invalidates any
+   cursor issued before the bump — see
+   [Cursors from other index generations](REGISTRY_INVARIANTS.md#cursors-from-other-index-generations-issue-693).
+   There is **no on-chain event** for this; the contract does not emit an
+   `IndexGenerationBumpedEvent`. The only way to observe the bump is to poll
+   `get_health_probes().index_gen` (see `src/storage.rs::get_index_generation`)
+   before and after the removal batch and compare. Any dashboard or indexer
+   holding a `get_registered_paginated` / `get_public_paginated` cursor from
+   before the batch must discard it and restart pagination from `None`
+   once it sees `index_gen` change — restarting with a stale cursor after
+   a removal is exactly the failure mode
+   [Health probes for dashboards](DASHBOARD_SYNC.md#health-probes-for-dashboards-issue-756)
+   warns about.
+
+2. **Remaining entries still need TTL extension on schedule.** Removing a
+   batch of *other* users' records does not reset or extend the TTL clock on
+   the records that are still live. Run the normal
+   [TTL extension playbook](#operator-playbook-ttl-extension-issue-660)
+   (`scripts/ttl_keeper.sh` / `make ttl-keeper`) right after a mass removal
+   exactly as you would any other day — don't assume the cleanup bought any
+   TTL headroom for the survivors.
+
+3. **Run `compact_index` once the removal settles.** Deleting a scattered
+   set of usernames leaves holes in the flat index that `get_registered_page`
+   and friends must skip over on every read, which costs more CPU budget per
+   page the more holes accumulate. `compact_index` (admin-only) repacks the
+   index so reads go back to being hole-free. See
+   [Remove → compact → re-register parity](REGISTRY_INVARIANTS.md#remove--compact--re-register-parity-issue-306)
+   for the invariant this preserves; it's idempotent and safe to run any time
+   after a batch removal, including mid-Wave.
+
+**Recommended order after a mass removal:**
+
+```text
+execute_batch_remove
+  → poll get_health_probes().index_gen until it reflects the bump
+  → discard any cursors issued before the bump (restart from None)
+  → compact_index (admin)
+  → resume / schedule the normal TTL keeper pass
+```
+
+See also [DASHBOARD_SYNC.md](DASHBOARD_SYNC.md) for how an indexer should
+react to an `index_gen` change end-to-end, and
+[ADMIN_RUNBOOK.md](ADMIN_RUNBOOK.md#registry-maintenance-recipes) for the
+`batch_remove` / `compact_index` CLI recipes themselves.
+
+---
+
 ## Related Docs
 
 - [ARCHITECTURE.md](ARCHITECTURE.md) — Storage layout, instance vs. persistent keys
