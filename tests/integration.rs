@@ -861,6 +861,45 @@ fn test_integration_version_migration() {
     });
 }
 
+// ── Issue #788: get_health_probes on uninitialized contracts ─────────────────
+
+/// `get_health_probes` must never error on a freshly-deployed, uninitialized
+/// instance, and must fail closed with `admin_set: false` so Wave probes do
+/// not page on a deploy that simply has not been initialized yet. This is the
+/// integration-level counterpart to the unit coverage in
+/// `tests/health_probes.rs`, exercised through the same `env.as_contract`
+/// harness the rest of this file uses (no `initialize` call at all).
+#[test]
+fn test_integration_health_probes_uninitialized_never_errors() {
+    let env = Env::default();
+    let contract_id = env.register(TrustBridgeContract, ());
+
+    env.as_contract(&contract_id, || {
+        // Sanity: get_health *does* error pre-initialization.
+        assert_eq!(
+            TrustBridgeContract::get_health(env.clone()),
+            Err(ContractError::NotInitialized)
+        );
+
+        // get_health_probes never errors and reports admin_set: false.
+        let probes = TrustBridgeContract::get_health_probes(env.clone());
+        assert!(!probes.admin_set, "probe must fail closed pre-initialize");
+        assert!(!probes.paused);
+        assert_eq!(probes.index_gen, 0);
+    });
+
+    // After initialize, the same probe flips to admin_set: true without the
+    // caller ever having to special-case the uninitialized window.
+    let admin = Address::generate(&env);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        let probes = TrustBridgeContract::get_health_probes(env.clone());
+        assert!(probes.admin_set);
+        assert!(!probes.paused);
+    });
+}
+
 // ── WASM upgrade + cooldown (requires pre-built WASM) ─────────────────────────
 
 #[test]

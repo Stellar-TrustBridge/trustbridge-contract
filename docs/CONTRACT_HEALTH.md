@@ -167,7 +167,11 @@ remaining time is therefore `0` until the first upgrade.
 
 Behaviour these rules depend on is pinned by
 [`tests/health_probes.rs`](../tests/health_probes.rs):
-`cargo test --test health_probes`.
+`cargo test --test health_probes`. The uninitialized-contract case (Issue
+#788) additionally has integration-level coverage in
+[`tests/integration.rs`](../tests/integration.rs)
+(`test_integration_health_probes_uninitialized_never_errors`):
+`cargo test --test integration test_integration_health_probes_uninitialized_never_errors`.
 
 ---
 
