@@ -151,7 +151,28 @@ consumers can filter by category without parsing XDR.
 
 The full table lives in `scripts/event_indexer.sh` (`TOPIC_TABLE`).
 `scripts/check_event_topics.sh` fails CI if the table falls out of step with
-`src/events.rs`.
+`src/events.rs`; it's the source of truth for the check — don't duplicate its
+logic elsewhere.
+
+### Collision failure messages (Issue #794)
+
+If two event structs derive the same snake_case topic (Issue #643 — e.g. a
+struct that isn't PascalCase, such as `fooEvent`, colliding with `FooEvent`),
+the CI failure names **both** colliding structs with their exact
+`src/events.rs:<line>` location and suggests the fix, instead of only
+printing the bare topic string:
+
+```
+event-topics: duplicate event topics derived from src/events.rs (two structs map to the same topic):
+  topic "foo_event"                    collides between:
+    - FooEvent (src/events.rs:12)
+    - fooEvent (src/events.rs:48)
+event-topics: rename one of the colliding structs so their snake_case names differ.
+```
+
+`scripts/test_check_event_topics_message.sh` (`make event-topics-message-test`)
+pins this message format against a fixture collision so a future edit to the
+script can't silently regress back to a bare topic name with no location.
 
 The table below lists **every** published topic (Issue #754). The **Subgraph**
 column records how [`docs/subgraph/README.md`](subgraph/README.md) handles it:
