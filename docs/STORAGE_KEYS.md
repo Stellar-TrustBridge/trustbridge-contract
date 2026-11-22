@@ -75,6 +75,24 @@ When introducing a new storage key, **new contributors** should:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md#storage-key-best-practices) for the full workflow.
 
+### Temporary keys in tests
+
+Tests that need an ad-hoc storage key may create one with `Symbol::new` inside
+a fresh Soroban `Env` (see
+`tests/storage_keys_collision.rs::test_temporary_test_keys_stay_out_of_production_inventory`).
+That key exists only in the isolated test environment; it is not a production
+storage declaration, is not deployed, and does not pollute a contract instance
+or another test's storage. Here, “temporary” means test-local, not Soroban's
+temporary TTL storage partition.
+
+Do not add test fixtures to `src/storage.rs` or use a test-only name in
+production contract code. CI's `make storage-keys-check` parses production
+`Symbol` declarations in `src/storage.rs`, requires them in this inventory,
+and rejects dynamic `Symbol::new` keys there. The collision integration test
+also checks that production declarations are unique and documented. It
+deliberately does not treat local test symbols as deployable keys; the test
+above guards that separation.
+
 ---
 
 ## Instance Storage (per contract instance)

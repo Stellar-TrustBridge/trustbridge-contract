@@ -681,12 +681,10 @@ fn test_parity_return_type_get_public_paginated() {
 // § Merkle Root Parity Across Admin / Public Pages (Issue #797)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/// For the *same* cursor/limit window, `get_registered_paginated` (admin) and
-/// `get_public_paginated` must produce the identical `merkle_root`. The root
-/// is computed over the page's records, not over which API fetched them, so
-/// divergence would mean the two APIs disagree about what's actually in the
-/// registry for that window — breaking any Wave audit that cross-checks an
-/// admin export against the public export.
+/// For the *same* cursor/limit window and the same returned records,
+/// `get_registered_paginated` (admin) and `get_public_paginated` must produce
+/// the identical `merkle_root`. This fixture verifies every record so public
+/// redaction does not change the returned addresses.
 #[test]
 fn test_parity_merkle_root_identical_same_window() {
     let (env, admin, contract_id) = setup();
@@ -700,6 +698,9 @@ fn test_parity_merkle_root_identical_same_window() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
+        for username in ["alice", "bob", "carol"] {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, username)).unwrap();
+        }
         let admin_page =
             TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         let public_page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
@@ -733,9 +734,9 @@ fn test_parity_merkle_root_identical_same_window() {
     });
 }
 
-/// A removal mid-registry must shift *both* APIs' merkle_root identically —
-/// the roots diverging after a removal would mean one API's index skipped
-/// the hole while the other didn't (Issue #52-style divergence).
+/// A removal mid-registry must shift both APIs' roots identically when their
+/// returned records match. Verify remaining records so redaction is not the
+/// source of any root difference.
 #[test]
 fn test_parity_merkle_root_identical_after_removal() {
     let (env, admin, contract_id) = setup();
@@ -750,6 +751,9 @@ fn test_parity_merkle_root_identical_after_removal() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
+        for username in ["alice", "carol"] {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, username)).unwrap();
+        }
         let admin_page =
             TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         let public_page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();

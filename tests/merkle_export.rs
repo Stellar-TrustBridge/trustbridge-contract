@@ -229,6 +229,118 @@ fn test_empty_registry_export_has_all_zero_root() {
 }
 
 #[test]
+fn test_public_export_redacts_unverified_addresses_and_commits_to_redaction() {
+    let (env, admin, contract_id) = setup();
+    let verified_address = Address::generate(&env);
+    let unverified_address = Address::generate(&env);
+    let zero_address = Address::from_str(
+        &env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+
+    env.mock_all_auths();
+    for (name, address) in [
+        ("verified", &verified_address),
+        ("unverified", &unverified_address),
+    ] {
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, name),
+                address.clone(),
+                SVec::new(&env),
+            )
+            .unwrap();
+        });
+    }
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(env.clone(), admin, s(&env, "verified")).unwrap();
+    });
+
+    let admin_page = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap()
+    });
+    let public_page = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap()
+    });
+    let mut verified_record = None;
+    let mut unverified_record = None;
+    for (name, record) in public_page.records.iter() {
+        if name == s(&env, "verified") {
+            verified_record = Some(record);
+        } else if name == s(&env, "unverified") {
+            unverified_record = Some(record);
+        }
+    }
+    let verified_record = verified_record.expect("verified record must be exported");
+    let unverified_record = unverified_record.expect("unverified record must be exported");
+    let unverified_name = s(&env, "unverified");
+
+    assert!(verified_record.verified);
+    assert_eq!(verified_record.stellar_address, verified_address);
+    assert_eq!(verified_record.payout_address, verified_address);
+
+    assert!(!unverified_record.verified);
+    assert_ne!(unverified_record.stellar_address, unverified_address);
+    assert_ne!(unverified_record.payout_address, unverified_address);
+    assert_eq!(unverified_record.stellar_address, zero_address);
+    assert_eq!(unverified_record.payout_address, zero_address);
+
+    assert_eq!(
+        public_page.merkle_root,
+        independent_root_of_records(&env, &public_page.records),
+        "the public root must commit to the redacted records that were returned"
+    );
+    assert_ne!(
+        public_page.merkle_root, admin_page.merkle_root,
+        "admin and public roots differ when public export redacts unverified addresses"
+    );
+
+    let private_address_leaf = leaf_hash(
+        &env,
+        &unverified_name,
+        &unverified_address,
+        unverified_record.verified,
+    );
+    let mut leaked_address_leaves = SVec::new(&env);
+    for i in 0..public_page.records.len() {
+        let (username, record) = public_page.records.get(i).unwrap();
+        let address = if username == unverified_name {
+            unverified_address.clone()
+        } else {
+            record.stellar_address
+        };
+        leaked_address_leaves.push_back(leaf_hash(&env, &username, &address, record.verified));
+    }
+    assert_ne!(
+        independent_root_of(&env, &leaked_address_leaves),
+        public_page.merkle_root,
+        "replacing the redacted address with its private value must invalidate the public root"
+    );
+    assert_ne!(
+        private_address_leaf,
+        leaf_hash(
+            &env,
+            &unverified_name,
+            &zero_address,
+            unverified_record.verified
+        ),
+        "the redacted leaf must not bind to the private address"
+    );
+
+    let mut admin_unverified_record = None;
+    for (name, record) in admin_page.records.iter() {
+        if name == unverified_name {
+            admin_unverified_record = Some(record);
+        }
+    }
+    let admin_unverified_record =
+        admin_unverified_record.expect("admin export must retain unverified record");
+    assert_eq!(admin_unverified_record.stellar_address, unverified_address);
+    assert_eq!(admin_unverified_record.payout_address, unverified_address);
+}
+
+#[test]
 fn test_leaf_hash_matches_contract_helper() {
     let (env, _admin, contract_id) = setup();
     let addr = Address::generate(&env);

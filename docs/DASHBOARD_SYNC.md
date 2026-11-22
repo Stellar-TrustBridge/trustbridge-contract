@@ -526,3 +526,23 @@ resume path appends nothing the second time.
 
 See [scripts/README.md](../scripts/README.md#topic-classification-issue-399)
 for the full field reference and local verification steps.
+
+## Contract invocation error buckets
+
+When an invocation fails, decode the `ContractError` numeric code with the
+catalog and category table in [ABI.md](ABI.md#contracterror-u32-discriminant).
+Dashboards should bucket by `ErrorCategory` (`Auth`, `Retry`, or `Fatal`), not
+by matching the display string:
+
+- `Retry`: schedule a bounded retry with backoff, only where repeating the
+  transaction is safe.
+- `Auth`: stop retries with the same signer and request action from an
+  authorized key holder.
+- `Fatal`: stop automatic retries and show the error code, variant, and
+  display text so the caller/operator can correct the request or state.
+
+The exact per-variant grouping is maintained in `src/error.rs` and documented
+in the linked ABI catalog. In particular, do not automatically reclassify
+`Paused` or `AttestationRequired` as retryable based on their wording; both are
+currently categorized as `Fatal`. `tests/contract_error_codes.rs` checks the
+documented buckets and snapshots every `Display` string against the code.

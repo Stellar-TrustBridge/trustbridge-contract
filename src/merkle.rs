@@ -26,7 +26,11 @@
 //! - `address_strkey_bytes` — the raw bytes of `record.stellar_address`'s
 //!   Stellar strkey (`Address::to_string()`), not its internal binary
 //!   encoding, since the strkey is what's trivial for off-chain tooling in
-//!   any language to reproduce byte-for-byte from an exported record.
+//!   any language to reproduce byte-for-byte from an exported record. For
+//!   `get_public_paginated`, an unverified record's exported address is the
+//!   zero/burn address, so that redacted value is what the public root binds.
+//!   Admin exports retain the stored address and can therefore have a
+//!   different root for the same registry window.
 //! - `verified_byte` — `0x01` if `record.verified`, else `0x00`. Carrying the
 //!   verified flag in the leaf means a proof attests to verification status
 //!   at export time, not just membership.

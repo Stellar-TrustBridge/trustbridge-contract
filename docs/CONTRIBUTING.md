@@ -932,6 +932,23 @@ We appreciate your contributions to decentralized open-source identity on Stella
 
 Storage keys are **on-chain correctness concerns**: a collision is a catastrophic bug, and key layout changes must stay synchronized across `docs/STORAGE_KEYS.md`, `src/storage.rs`, and test fixtures.
 
+### Temporary test-only keys
+
+Tests may use an ad-hoc `Symbol::new` key in a fresh `Env` when a fixture needs
+to exercise storage without introducing a production key. Such a key is local
+to that test environment and is never deployed; “temporary” here does not mean
+the Soroban temporary TTL partition. Keep it in test code, use a clearly
+test-only name, and do not move it into `src/storage.rs` or production contract
+code. See
+`tests/storage_keys_collision.rs::test_temporary_test_keys_stay_out_of_production_inventory`.
+
+CI checks only production declarations in `src/storage.rs`: `make
+storage-keys-check` requires each declared key to be documented and rejects
+dynamic `Symbol::new` there, while `tests/storage_keys_collision.rs` checks
+declared symbol uniqueness and inventory coverage. Test-local symbols are
+intentionally outside that production inventory, and must remain isolated in
+their own `Env`.
+
 ### When adding a new storage key
 
 1. **Pick the partition**:
