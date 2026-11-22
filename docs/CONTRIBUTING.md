@@ -99,6 +99,11 @@ uses the stable Rust image to match CI.
 ### Rust / Soroban
 
 - Match existing module structure (`lib.rs`, `storage.rs`, `events.rs`, `error.rs`)
+- Before filing a PR that touches `src/*.rs`, check the module-ownership
+  table and the "Shared helper functions" section in `ARCHITECTURE.md` —
+  it names which file owns each entrypoint and which cross-module helpers
+  a change must keep in sync, so changes land in the right module instead
+  of duplicating logic
 - Use `ContractError` for recoverable errors; `require_auth()` for auth failures
 - Add unit tests in `#[cfg(test)] mod test` within `lib.rs`
 - Keep functions focused; storage helpers belong in `storage.rs`

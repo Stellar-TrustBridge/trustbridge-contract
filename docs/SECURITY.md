@@ -191,7 +191,11 @@ Setting `required = true` means:
 - Clearing attestation (`clear_attestation`) and then calling `upgrade` fails with `AttestationRequired`.
 - The cooldown still applies independently.
 
-The `is_attestation_required()` read exposes the current config for monitoring and client-side enforcement.
+The `get_attestation_required()` read (no auth) exposes the current config
+for monitoring and client-side enforcement; `set_attestation_required(caller,
+required)` is admin-only and recorded in `tests/auth_matrix.csv` alongside
+every other setter/getter pair, including an explicit unauthorized-caller
+negative row (Issue #790).
 
 **Threat scenarios:**
 - *Compromised admin key attempts silent upgrade*: `upgrade` fails with `AttestationRequired` unless an attestation for that exact hash was published first (observable on-chain by watchers).
@@ -1557,3 +1561,25 @@ re-checks it via `require_initialized`. State initialized on pubnet and
 executed on testnet — or the reverse — fails closed with `NetworkMismatch`
 (code 30) before any write, so a rejected call leaves no partial state.
 Covered by the pubnet/testnet cases in `tests/network_mismatch.rs`.
+
+## Username validation / reserved-list divergence (Issue #793)
+
+Two independent checks gate a `github_username` at registration: the
+syntactic validator `utils::is_valid_github_username` and the
+admin-managed reserved-name list in `storage.rs` (exposed via
+`add_reserved` / `remove_reserved` / `is_reserved`). Because these two
+checks are maintained in separate modules, they could silently diverge —
+for example a reserved entry whose case-folding does not match the
+canonicalization the validator's own helpers use, letting a reserved,
+Wave-sensitive name slip past registration under a different case.
+
+`fuzz/fuzz_targets/username_reserved_consistency.rs` fuzzes this
+boundary: it seeds the reserved list with a known entry, then feeds
+arbitrary byte strings through both `is_valid_github_username` and
+`is_reserved`, asserting neither panics and that `is_reserved` agrees
+with `utils::eq_ignore_ascii_case` for any input that case-folds to a
+reserved name. Corpus seeds live in
+`fuzz/corpus/username_reserved_consistency/` and include exact-case and
+mixed-case reserved names, a non-reserved valid username, an empty
+string, and a syntactically invalid name (consecutive hyphens). Run with
+`cargo +nightly fuzz run username_reserved_consistency` from `fuzz/`.

@@ -2349,7 +2349,7 @@ a fresh off-chain GitHub identity check after an address change. See
 
 ## Attestation-Required Config (Issue #198)
 
-### `set_attestation_required(required: bool) -> Result<(), ContractError>`
+### `set_attestation_required(caller: Address, required: bool) -> Result<(), ContractError>`
 
 Configures whether a published attestation is mandatory before `upgrade`.
 
@@ -2365,7 +2365,7 @@ unattested upgrades are allowed and provenance notes them as such.
 
 **Since:** added in Issue #198. Existing deployments default to `false`.
 
-### `is_attestation_required() -> bool`
+### `get_attestation_required() -> bool`
 
 Returns whether WASM attestation is required before upgrade. Defaults to `false`.
 

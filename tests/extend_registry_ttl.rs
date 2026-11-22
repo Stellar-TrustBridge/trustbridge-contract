@@ -653,3 +653,72 @@ fn test_extend_registry_ttl_rejected_batch_extends_nothing() {
         "no partial extension"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// § Pause Interaction Tests (Issue #791)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// `extend_registry_ttl` is deliberately permissionless (see its doc comment
+// in `src/lib.rs`): it never corrupts state, so gating it behind
+// `require_not_paused` would mean an emergency pause also starves the
+// registry's rent-keeper, causing entries to expire during an incident —
+// exactly when operators can least afford a surprise. These tests pin that
+// intentional interaction down so a future change to `extend_registry_ttl`
+// (e.g. adding a blanket pause check) cannot silently reintroduce it.
+
+/// TTL extension must keep working while the contract is paused.
+#[test]
+fn test_extend_registry_ttl_succeeds_while_paused() {
+    let (env, admin, contract_id) = setup();
+    register_user(&env, &contract_id, "alice", &Address::generate(&env));
+    advance_days(&env, 61);
+    let before = record_ttl(&env, &contract_id, "alice");
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::pause(env.clone(), 1).unwrap();
+        assert!(TrustBridgeContract::is_paused(env.clone()));
+    });
+
+    env.as_contract(&contract_id, || {
+        let usernames = Vec::from_array(&env, [s(&env, "alice")]);
+        let extended = TrustBridgeContract::extend_registry_ttl(env.clone(), usernames).unwrap();
+        assert_eq!(extended, 1, "TTL extension must not be blocked by pause");
+    });
+
+    let after = record_ttl(&env, &contract_id, "alice");
+    assert!(
+        after > before,
+        "record TTL must actually be bumped while paused"
+    );
+
+    // Confirm the contract is still paused and unpausing afterward is
+    // unaffected by the TTL call (no accidental state coupling).
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::is_paused(env.clone()));
+        TrustBridgeContract::set_paused(env.clone(), false, 0).unwrap();
+        assert!(!TrustBridgeContract::is_paused(env.clone()));
+    });
+    let _ = admin;
+}
+
+/// An invalid batch while paused still fails with `InvalidBatchSize`, not a
+/// pause-related error — pause must not change which error a bad call gets.
+#[test]
+fn test_extend_registry_ttl_rejected_batch_while_paused_is_invalid_batch_size() {
+    let (env, _admin, contract_id) = setup();
+    register_user(&env, &contract_id, "alice", &Address::generate(&env));
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::pause(env.clone(), 1).unwrap();
+    });
+
+    env.as_contract(&contract_id, || {
+        let usernames: Vec<String> = Vec::new(&env);
+        assert_eq!(
+            TrustBridgeContract::extend_registry_ttl(env.clone(), usernames),
+            Err(ContractError::InvalidBatchSize)
+        );
+    });
+}
