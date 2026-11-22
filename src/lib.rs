@@ -3586,6 +3586,10 @@ impl TrustBridgeContract {
         require_initialized(&env)?;
         require_not_paused(&env)?;
 
+        if is_zero_address(&env, &caller) {
+            return Err(ContractError::ZeroAddress);
+        }
+
         caller.require_auth();
 
         // Caller must be the admin OR hold the Verifier role.
@@ -3773,6 +3777,10 @@ impl TrustBridgeContract {
         // Validate reason code before auth to fail fast on malformed input.
         if !RevokeReason::is_valid(reason_code) {
             return Err(ContractError::InvalidReasonCode);
+        }
+
+        if is_zero_address(&env, &caller) {
+            return Err(ContractError::ZeroAddress);
         }
 
         caller.require_auth();
@@ -4219,6 +4227,10 @@ impl TrustBridgeContract {
         let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
         let pending = storage_get_pending_rotation(&env, &github_username)
             .ok_or(ContractError::NoRotationPending)?;
+
+        if is_zero_address(&env, &pending.new_address) {
+            return Err(ContractError::ZeroAddress);
+        }
 
         let timestamp = env.ledger().timestamp();
         if timestamp < pending.executable_at {

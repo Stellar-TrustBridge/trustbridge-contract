@@ -373,6 +373,7 @@ cargo install --locked cargo-fuzz
 | Target | Path | What it fuzzes |
 |---|---|---|
 | `export_cursor` | `fuzz/fuzz_targets/export_cursor.rs` | Paginated-export cursor parsing (`get_public_paginated`) |
+| `pending_reverify_page` | `fuzz/fuzz_targets/pending_reverify_page.rs` | Hostile `offset` / `limit` values for `get_pending_reverify` and its bounded storage scan |
 | `username_validate` | `fuzz/fuzz_targets/username_validate.rs` | `is_valid_github_username` — no-panic guarantee |
 | `github_username` | `fuzz/fuzz_targets/github_username.rs` | `is_valid_github_username` — non-ASCII rejection invariant |
 
@@ -381,6 +382,7 @@ cargo install --locked cargo-fuzz
 ```bash
 # Run the github_username target for 1 000 iterations (smoke test)
 cargo +nightly fuzz run github_username -- -max_total_time=10
+cargo +nightly fuzz run pending_reverify_page -- -max_total_time=10
 
 # Longer soak (10 million inputs)
 cargo +nightly fuzz run github_username -- -runs=10000000
@@ -392,6 +394,13 @@ The `github_username` target asserts two invariants on every input:
 2. **Non-ASCII rejection** — any byte ≥ 0x80 must cause the validator
    to return `false`.  This rules out homoglyph substitution via
    multi-byte UTF-8 (Cyrillic, Arabic, CJK, accented Latin, emoji).
+
+The `pending_reverify_page` target decodes arbitrary byte strings into
+32-bit offset and limit values. Limits over 100 must return
+`InvalidBatchSize`; all other values must return a bounded page without a
+panic. A zero limit exercises the documented default of 20, and offsets past
+the three-record fixture must return an empty page. No environment variables
+are required.
 
 ### Adding a new target
 
