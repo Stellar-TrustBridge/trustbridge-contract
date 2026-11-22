@@ -20,6 +20,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Admin storage mutated after init | No public setter writes `ADMIN_KEY` — only `initialize` does, gated by `AlreadyInitialized` (Issue #97) |
 | Malformed or oversized username input | `InvalidUsername` error, checked before auth and before any write |
 | Unicode / homoglyph username spoofing | Byte-wise ASCII validation rejects all non-ASCII bytes; see **Unicode Rejection Policy** section |
+| Public disclosure of unverified contributor addresses | `get_public_paginated` replaces unverified identity and payout addresses with the zero/burn address before export and Merkle hashing; see [Public export address redaction](#public-export-address-redaction-issue-627) |
 | Writing registry state using the zero/burn address (reachable under `mock_all_auths` / sandboxes that skip `require_auth`) | `is_zero_address` checks reject zero registration and rotation destinations, verification/revocation/batch actors, and a zero pending rotation destination before mutation. Batch verification skips corrupt zero-bound records. Failures use `ZeroAddress` (code 16), before writes; pinned by `tests/zero_address.rs` (Issues #300, #755) |
 | Consecutive-hyphen username bypass | `InvalidUsername` error — consecutive hyphens now enforced on-chain |
 | Counter drift from rejected calls | Invariant property fuzzing, see [REGISTRY_INVARIANTS](REGISTRY_INVARIANTS.md) |
@@ -39,6 +40,23 @@ address, verified flag, and page position. Altering any of these fields,
 reordering rows, or dropping a row after export produces a different root, so
 a consumer recomputing the root with `merkle_leaf_hash` detects the tamper.
 Locked by `tests/record_proof.rs::test_export_binding_rejects_tampered_records`.
+
+### Public export address redaction (Issue #627)
+
+`get_public_paginated` replaces both the identity and payout addresses of every
+unverified contributor with the zero/burn address. This is a deliberate privacy
+boundary: public dashboards and indexers can discover the username and
+verification state without learning an unverified contributor's addresses.
+The redaction is part of the export itself, not just a display convention.
+
+The public page's Merkle root is calculated after redaction and commits to the
+zeroed address values. It cannot be used to recover or prove an unverified
+contributor's private address. Admin-only exports retain the stored address, so
+their roots may differ from public roots for the same page window. Verify a root
+against the exact page returned by the same endpoint; do not compare admin and
+public roots as though their records were interchangeable. The behavior and
+root impact are pinned by
+`tests/merkle_export.rs::test_public_export_redacts_unverified_addresses_and_commits_to_redaction`.
 
 ### Out of Scope (handled off-chain)
 

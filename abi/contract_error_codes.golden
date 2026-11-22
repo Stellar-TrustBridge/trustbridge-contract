@@ -56,6 +56,7 @@
 42 UpgradeProposalAlreadyApproved
 43 UpgradeProposalDelayActive
 44 UpgradeProposalInsufficientApprovals
+45 ThresholdExceedsSignerCap
 46 FallbackListFull
 47 UsernameTaken
 48 RotationRequired

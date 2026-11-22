@@ -241,9 +241,12 @@ pub struct UpgradeAttestedEvent {
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AttestationClearedEvent {
+    /// SHA-256 WASM hash, also included as the second event topic.
     #[topic]
     pub wasm_hash: BytesN<32>,
+    /// Expiration timestamp of the withdrawn attestation.
     pub expires_at: u64,
+    /// Ledger timestamp when the attestation was cleared.
     pub timestamp: u64,
 }
 
