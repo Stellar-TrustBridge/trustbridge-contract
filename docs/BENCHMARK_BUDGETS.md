@@ -129,6 +129,10 @@ branches as the quality gate.
 ## Running locally
 
 ```bash
+# Repeat register/verify pairs and record the per-operation high-water budget:
+make soak-register-verify
+REGISTER_VERIFY_SOAK_ITERATIONS=1000 make soak-register-verify
+
 # Full regression check (mirrors CI exactly):
 make bench-budget-ci
 
@@ -142,6 +146,16 @@ make bench-export                   # get_all_registered sweep
 make bench-username                 # usernames_match sweep
 make bench-double-verify            # verify success vs rejection
 ```
+
+The opt-in register/verify soak checks every pair's resulting counts and
+verification state, resetting the simulated budget between operations. It
+reports the maximum observed CPU and memory for `register` and `verify`
+separately and enforces the same 25M CPU / 3MB memory caps as the focused
+budget checks. Increase `REGISTER_VERIFY_SOAK_ITERATIONS` for longer local
+rehearsals; the ignored soak is not part of the default test suite.
+The soak reports CPU/memory, not XLM rent; pair it with
+`make storage-footprint-check` and `make storage-rent-estimator` when reviewing
+persistent-storage cost changes.
 
 ---
 

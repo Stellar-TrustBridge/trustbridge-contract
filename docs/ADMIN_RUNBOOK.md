@@ -188,6 +188,9 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 
 - **Auth:** admin **only** — the guardian deliberately cannot clear it.
   Emits `EmergencyClearedEvent`.
+- After clearing, verify both `is_emergency_paused` and `is_paused` are false
+  before retrying writes; clearing the emergency flag does not clear a normal
+  pause. Register and verify writes are available again once both flags are off.
 
 ---
 
@@ -361,6 +364,16 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   `tests/auth_matrix.csv` and the ABI reference.
 - Dashboards exclude `is_bot == true` records from human contributor stats.
   Note the arg is `--is_bot` (underscore), matching the ABI.
+
+#### `get_bot_status` — permissionless bot flag read
+
+```bash
+stellar contract invoke --id "$CONTRACT_ID" --network "$NETWORK" \
+  -- get_bot_status --github-username ci-bot
+```
+
+- Returns `true` or `false` for a registered account without requiring auth;
+  returns `NotRegistered` for an unknown username and works while paused.
 
 #### `adopt_network_tag` — tag a pre-network-tagging instance
 
@@ -643,7 +656,34 @@ CONTRACT_ID="$CONTRACT_ID" SOURCE=admin NETWORK="$NETWORK" ./scripts/export_regi
 
 - Pages `get_registered_paginated` and writes a single
   `registry-export-<network>.json`. `SOURCE` must sign as the admin. Take an
-  export **before** any bulk verify/remove or dashboard migration.
+  export **before** any bulk verify/remove or dashboard migration. The file
+  includes the original per-page records and `merkle_root` values as well as
+  the legacy flattened `records` list.
+
+#### Verify exported pages offline (Issue #718)
+
+Run the verifier on the captured file on an offline machine; it needs only
+Python 3 and does not contact Stellar or require a signer:
+
+```bash
+python3 scripts/verify_merkle_export.py registry-export-testnet.json
+```
+
+The export must have been created by the current `export_registry.py`, which
+records each page's records and the `merkle_root` returned by
+`get_registered_paginated`. The verifier rebuilds the v1 leaves from canonical
+username, `stellar_address` strkey, and `verified`, then applies the documented
+domain-separated SHA-256 tree (odd nodes are promoted unchanged; an empty page
+has a 32-byte zero root). Success prints verified page/record counts and exits
+0. Missing roots, malformed page/record data, invalid root encodings, or a
+root mismatch print an `ERROR` and exit non-zero. A mismatch means the
+page's committed username/address/verified data changed or was paired with a
+different page root; rerun the export and compare the captured file and
+network/contract metadata. For authenticity, retain the expected page roots
+from a trusted on-chain read or separate trusted record: the verifier proves
+that a page matches its included root, not who supplied that root. Other
+fields such as `registered_at` are not part of the Merkle leaf and are not
+authenticated by this check.
 
 #### `scripts/payout_allowlist.sh` — verified-only payout CSV (Issue #285)
 
