@@ -1697,7 +1697,7 @@ impl TrustBridgeContract {
             return Err(ContractError::NotAuthorized);
         }
 
-        crate::multisig_upgrade::set_upgrade_threshold(&env, threshold);
+        crate::multisig_upgrade::set_upgrade_threshold(&env, threshold)?;
 
         let timestamp = env.ledger().timestamp();
         push_audit_entry(

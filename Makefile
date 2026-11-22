@@ -265,7 +265,10 @@ subgraph-parity: ## Check Graph schema/entity coverage, waivers, and the EVENT_I
 event-topics: ## Verify the indexer's topic table matches src/events.rs (Issue #399)
 	./scripts/check_event_topics.sh
 
-check: fmt lint error-codes event-topics subgraph-parity abi-check test build docs-check wasm-size ## Run full local quality gate
+event-topics-message-test: ## Pin the collision failure message format (Issue #794)
+	bash scripts/test_check_event_topics_message.sh
+
+check: fmt lint error-codes event-topics event-topics-message-test subgraph-parity abi-check test build docs-check wasm-size ## Run full local quality gate
 
 wasm-hash-pin: build ## Verify release WASM hash matches wasm-hash.pin (mirrors CI hash gate)
 	@if [ -f $(WASM_V1) ]; then WASM=$(WASM_V1); elif [ -f $(WASM_LEGACY) ]; then WASM=$(WASM_LEGACY); else echo "ERROR: No WASM artifact found. Run 'make build' first."; exit 1; fi; \
