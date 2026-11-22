@@ -583,4 +583,9 @@ Automated tests (`tests/storage_keys_collision.rs`) and a linter script (`script
 2. All persistent discriminators are distinct.
 3. The documentation matches the implementation.
 
+Ad-hoc test fixtures may use `Symbol::new` only inside a fresh test `Env`;
+these local names are not production storage declarations and are excluded
+from the CI storage inventory. The collision test pins that separation. See
+[CONTRIBUTING.md § Temporary test-only keys](CONTRIBUTING.md#temporary-test-only-keys).
+
 See [CONTRIBUTING.md](CONTRIBUTING.md#storage-key-best-practices) for the workflow when adding a new key.

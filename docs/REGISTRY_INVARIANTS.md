@@ -84,18 +84,23 @@ compacts, re-registers the exact same names at new addresses, then asserts
 `get_stats().total`, `get_verified_count()`, the chunked index, and a full
 paginated walk all agree with the live record set (I10).
 
-### Admin/public merkle_root parity for the same window (Issue #797)
+### Merkle roots bind the endpoint's exported records (Issue #797)
 
-`get_registered_paginated` (admin) and `get_public_paginated` both return an
-`ExportPage` with a `merkle_root` computed over `records` in page order (see
-`src/merkle.rs`). For the **same** `cursor`/`limit` window they must return
-the identical root — the root is a function of what's in the registry, not
-of which API read it. `test_parity_merkle_root_identical_same_window` and
-`test_parity_merkle_root_identical_after_removal` in
-`tests/pagination_parity.rs` assert this across first/second pages and
-across a middle removal. Divergence here means the two code paths disagree
-about page contents for the same window and breaks any Wave audit that
-cross-checks an admin export digest against the publicly-fetched page.
+Both `get_registered_paginated` (admin) and `get_public_paginated` return an
+`ExportPage` whose `merkle_root` commits to that page's returned `records` in
+order (see `src/merkle.rs`). The record sets are not always identical:
+`get_public_paginated` replaces both `stellar_address` and `payout_address`
+with the zero/burn address for unverified contributors, while the admin export
+retains the stored addresses. Consequently, roots for the same `cursor`/`limit`
+must match only when the returned records match; a public root must never be
+compared to an admin root as if it attested to unreduced private fields.
+
+`tests/merkle_export.rs::test_public_export_redacts_unverified_addresses_and_commits_to_redaction`
+asserts that verified addresses stay visible, both unverified addresses are
+zeroed in the public page, the public root is computed over those redacted
+records, and substituting the private address invalidates that root. Existing
+same-window parity tests cover windows whose exported records match. A consumer
+must use the root from the same API and returned page it is verifying.
 
 ### Challenge-period operations preserve count invariants (Issue #214)
 

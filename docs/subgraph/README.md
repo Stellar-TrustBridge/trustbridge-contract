@@ -309,3 +309,9 @@ Graph schema, and waivers locally. Changes to an event name (including topic
 renames) require corresponding schema or waiver changes. `Address` and
 `BytesN<32>` on-chain values map to Graph `Bytes` in the schema; this check
 validates event/entity identity, not payload field type equivalence.
+
+`AttestationClearedEvent` remains intentionally waived: its `wasm_hash`
+(`BytesN<32>`, topic), `expires_at` (`u64`), and `timestamp` (`u64`) describe
+contract upgrade telemetry, not contributor history. Decode it from the raw
+event stream and clear the matching pending-attestation indicator; do not infer
+that attestation-required mode changed.

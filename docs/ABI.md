@@ -387,6 +387,7 @@ struct ChallengeRecord {
 | 42 | `UpgradeProposalAlreadyApproved` | `approve_upgrade` was called by an address that already approved this proposal (Issue #301) |
 | 43 | `UpgradeProposalDelayActive` | `execute_upgrade` was called before the proposal's delay elapsed (Issue #301) |
 | 44 | `UpgradeProposalInsufficientApprovals` | `execute_upgrade` was called before the approval threshold was met (Issue #301) |
+| 45 | `ThresholdExceedsSignerCap` | `set_upgrade_threshold` was called with a value greater than `MAX_UPGRADE_SIGNERS`, making the threshold unreachable (Issue #795) |
 | 46 | `FallbackListFull` | `register` was given more fallback addresses than `MAX_FALLBACK_ADDRESSES` |
 | 47 | `UsernameTaken` | `rename` was called with a `new_username` that is already registered |
 | 48 | `RotationRequired` | `register` was asked to change the registered address while the rotation delay is armed (Issue #234) — use the request/execute rotation flow |
@@ -418,51 +419,35 @@ variant and returns `None` for any unrecognized code. Every code round-trips
 through `from_code(variant.code()) == Some(variant)` — verified by the unit
 tests in `src/lib.rs` (`test_error_from_code_is_inverse_of_code`).
 
-#### Off-chain retry classification
+#### Off-chain error categories
 
 `ContractError::category()` (`src/error.rs`) maps every variant to one of three
-buckets so the dashboard, the action runner, and the indexer can pick a retry
-policy without parsing strings or maintaining their own code list. The match is
+buckets so dashboards and transaction runners can choose a response without
+parsing display strings or maintaining an independent code list. The match is
 exhaustive at compile time — a new variant cannot be added without classifying
-it. `ContractError::is_retryable()` is the shorthand for `category() == Retry`.
+it. `ContractError::is_retryable()` is the shorthand for
+`category() == Retry`.
 
 | Category | Meaning | Off-chain action |
 |----------|---------|------------------|
-| `Retry` | Transient — the blocking condition clears with time or an unrelated state change | Re-submit the same transaction later with backoff |
-| `Auth` | The caller did not satisfy an authorization check | Do not retry with the same signer; a key holder must act |
-| `Fatal` | The request is malformed or violates an invariant, or a one-shot call was already made | Do not retry verbatim; change the request or abort |
+| `Retry` | Transient condition may clear after time or another state change | Retry the same request with bounded backoff; avoid duplicate side effects |
+| `Auth` | Caller or configured allowlist/role prerequisite is not satisfied | Do not retry with the same credentials; have an authorized key holder resolve it |
+| `Fatal` | This exact request is not classified as automatically retryable | Stop automatic retries; correct the request or require operator/caller intervention |
 
-| Variant | Category | Rationale |
-|---------|----------|-----------|
-| `NotAuthorized` | `Auth` | Wrong signer / missing role |
-| `AttestationRequired` | `Auth` | Admin must publish an attestation first |
-| `Paused` | `Retry` | Succeeds once the admin unpauses |
-| `CooldownActive` | `Retry` | Succeeds once the cooldown window elapses |
-| `ChallengeNotResolvable` | `Retry` | Succeeds once the challenge delay elapses |
-| `ChallengeActive` | `Retry` | Succeeds once the active challenge is resolved |
-| `AdminTransferDelayActive` | `Retry` | Succeeds once the transfer delay elapses |
-| `AlreadyInitialized` | `Fatal` | One-shot call already made |
-| `NotInitialized` | `Fatal` | Needs an operator to run `initialize` |
-| `NotRegistered` | `Fatal` | Referenced username does not exist |
-| `AlreadyVerified` / `NotVerified` | `Fatal` | Record already in the requested state |
-| `InvalidVersion` | `Fatal` | Target version not strictly greater |
-| `InvalidRole` | `Fatal` | Unknown role discriminant |
-| `InvalidUsername` | `Fatal` | Username fails validation |
-| `AttestationExpired` | `Fatal` | Needs a fresh `attest_upgrade` |
-| `UnattestedWasm` | `Fatal` | Hash does not match the live attestation |
-| `InvalidBatchSize` | `Fatal` | Batch too large or empty |
-| `InvalidReasonCode` / `InvalidPauseReason` | `Fatal` | Unknown reason discriminant |
-| `ZeroAddress` | `Fatal` | Burn address rejected |
-| `ChallengeAlreadyActive` / `NoChallengeActive` | `Fatal` | Challenge state precondition not met |
-| `AlreadyReserved` / `NotReserved` | `Fatal` | Reserved-list precondition not met |
-| `UsernameReserved` | `Fatal` | Username is on the reserved list |
-| `ReservedListFull` | `Fatal` | Reserved list at capacity |
-| `AdminTransferPending` / `NoPendingAdminTransfer` | `Fatal` | Admin-transfer state precondition not met |
-| `NetworkMismatch` | `Fatal` | The executing network does not change between attempts |
-| `VerifierAllowlistFull` / `VerifierNotAllowlisted` / `VerifierExpiryInPast` | `Fatal` | Verifier-allowlist precondition not met |
-| `NoPendingRoleGrant` | `Fatal` | No grant to activate or cancel |
-| `RoleGrantNotReady` | `Retry` | Succeeds once the grant timelock elapses |
-| `ProvenanceMissing` / `ProvenanceMismatch` | `Fatal` | Nothing deployed yet, or the hash does not match |
+Use the category for dashboard grouping and automation, and show the numeric
+code plus the matching `Display` text to the operator. Do not infer a bucket
+from the human-readable string. `Paused` and `AttestationRequired`, for example,
+are `Fatal` in the current implementation even though an operator may later
+change the contract state; dashboards must follow the enum mapping rather than
+guessing that every wait condition is retryable.
+
+<!-- error-category-mapping:start -->
+| Category | Variants (exact `ContractError::category()` mapping) |
+|----------|-------------------------------------------------------|
+| `Auth` | `NotAuthorized`, `InvalidRole`, `VerifierNotAllowlisted`, `VerifierExpiryInPast`, `RoleExpired`, `OracleProofNotAllowlisted` |
+| `Retry` | `CooldownActive`, `ChallengeNotResolvable`, `AdminTransferDelayActive`, `RotationNotReady`, `VerifyRateLimited`, `UpgradeProposalDelayActive`, `UpgradeProposalInsufficientApprovals`, `RoleGrantNotReady` |
+| `Fatal` | `AlreadyInitialized`, `NotInitialized`, `NotRegistered`, `AlreadyVerified`, `NotVerified`, `Paused`, `InvalidVersion`, `InvalidUsername`, `AttestationExpired`, `UnattestedWasm`, `InvalidBatchSize`, `InvalidReasonCode`, `ZeroAddress`, `ChallengeAlreadyActive`, `NoChallengeActive`, `ChallengeActive`, `InvalidPauseReason`, `AlreadyReserved`, `NotReserved`, `UsernameReserved`, `ReservedListFull`, `AdminTransferPending`, `NoPendingAdminTransfer`, `AttestationRequired`, `NetworkMismatch`, `VerifierAllowlistFull`, `NoPendingRoleGrant`, `ProvenanceMissing`, `ProvenanceMismatch`, `StagedWasmMismatch`, `UpgradeProposalAlreadyPending`, `NoUpgradeProposalPending`, `UpgradeProposalAlreadyApproved`, `ThresholdExceedsSignerCap`, `FallbackListFull`, `UsernameTaken`, `RotationRequired`, `RotationPending`, `NoRotationPending`, `InvalidCursor`, `DualControlRequired`, `BatchRemoveProposalPending`, `NoPendingBatchRemove`, `OracleProofBadLayout`, `OracleProofExpired`, `OracleProofBadSignature`, `AddressMismatch` |
+<!-- error-category-mapping:end -->
 
 Completeness is enforced by `src/error.rs` unit tests
 (`every_error_code_has_a_category`, `retryable_errors_are_the_transient_set`,
@@ -1127,7 +1112,9 @@ leaf = SHA256("trustbridge/export-leaf/v1:" || username_bytes || 0x00 || address
   [SECURITY.md § Username Case-Folding](SECURITY.md#5-username-case-folding-issue-194)).
 - `0x00` — fixed separator between the username and address byte strings.
 - `address_strkey_bytes` — raw bytes of `record.stellar_address`'s Stellar
-  strkey (the `G...` string), not its internal binary encoding.
+  strkey (the `G...` string), not its internal binary encoding. On
+  `get_public_paginated`, an unverified record's address is zeroed before this
+  leaf is computed; on the admin endpoint it is the stored address.
 - `verified_byte` — `0x01` if `record.verified`, else `0x00`. The verified
   flag is part of the leaf, so a proof attests to verification status at
   export time, not just membership.
@@ -1397,7 +1384,11 @@ maintenance or security pauses so indexers don't fall behind. Previously this
 returned `Paused`; that gate was removed.
 
 **Includes verified field:** Same full `ContributorRecord` as the admin API —
-no second lookup needed to know who is verified.
+no second lookup needed to know who is verified. For unverified records the
+public API zeroes both `stellar_address` and `payout_address`; the returned
+`merkle_root` commits to those zeroed values. Therefore, roots from the public
+and admin endpoints can differ for the same page window. Recompute each root
+from the records returned by that endpoint.
 
 **Cursors interchangeable:** A cursor from `get_registered_paginated` can be
 passed to `get_public_paginated` and vice versa — both read the same index.
@@ -1976,6 +1967,11 @@ upgrading to any other hash.
 | **Mutates** | Yes |
 | **Errors** | `NotInitialized` |
 | **Events** | `AttestationClearedEvent` (only if an attestation was actively stored) |
+
+`AttestationClearedEvent` carries `wasm_hash: BytesN<32>` as its second topic,
+then `expires_at: u64` and `timestamp: u64` in the event value. See
+[EVENT_INDEXING.md](EVENT_INDEXING.md#attestationclearedevent-payload) for the
+decoder and dashboard handling notes.
 
 ---
 

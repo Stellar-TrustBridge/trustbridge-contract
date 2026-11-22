@@ -10,10 +10,12 @@
 //!
 //! This test suite is the automated proof of the collision analysis in
 //! `docs/STORAGE_KEYS.md` § Collision Analysis and Key Namespace Diagram.
+//! Test-only keys may use `Symbol::new` in a fresh `Env`; they must never be
+//! added to `src/storage.rs` or reused as production storage declarations.
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
+use soroban_sdk::{testutils::Address as _, Address, Env, String, Symbol, Vec};
 
 use trustbridge_contract::{ContractError, Role, TrustBridgeContract};
 
@@ -41,6 +43,26 @@ fn s(env: &Env, text: &str) -> String {
 /// so these checks cannot drift from what they validate.
 const STORAGE_SRC: &str = include_str!("../src/storage.rs");
 const STORAGE_KEYS_DOC: &str = include_str!("../docs/STORAGE_KEYS.md");
+
+/// Test-local storage keys live only in this test's fresh environment. They
+/// are not production `src/storage.rs` declarations or deployed key names.
+#[test]
+fn test_temporary_test_keys_stay_out_of_production_inventory() {
+    let env = Env::default();
+    let contract_id = env.register(TrustBridgeContract, ());
+    let test_key = Symbol::new(&env, "test_tmp");
+
+    let stored = env.as_contract(&contract_id, || {
+        env.storage().instance().set(&test_key, &42u32);
+        env.storage().instance().get::<_, u32>(&test_key).unwrap()
+    });
+
+    assert_eq!(stored, 42);
+    assert!(
+        !declared_symbol_literals(STORAGE_SRC).contains(&"test_tmp"),
+        "test-only symbols must not become production storage declarations"
+    );
+}
 
 // ── Instance key uniqueness ──────────────────────────────────────────────────
 

@@ -226,6 +226,36 @@ from `TOPIC_TABLE`, or if the Subgraph column disagrees with the README.
 | `audit_config_changed_event` | `audit_config_changed` | `audit` | waived |
 | `oracle_allowlist_rotated_event` | `oracle_allowlist_rotated` | `admin` | `OracleAllowlistRotatedEvent` |
 
+### `AttestationClearedEvent` payload
+
+`src/events.rs` defines this event with the following fields; keep decoders
+aligned with these names, types, and topic annotations:
+
+| Field | Type | Location | Meaning |
+|---|---|---|---|
+| `wasm_hash` | `BytesN<32>` | Topic (`topic[1]`) | Hash of the WASM whose pending attestation was withdrawn |
+| `expires_at` | `u64` | Event value | Expiration timestamp on the withdrawn attestation |
+| `timestamp` | `u64` | Event value | Ledger timestamp when it was cleared |
+
+The raw event's `topic[0]` is the symbol `attestation_cleared_event`; the
+contract-event decoder reads `wasm_hash` from `topic[1]` and the value tuple in
+declaration order as `expires_at`, then `timestamp`. In the normalized JSONL
+record, the indexer keeps topics and `value` as base64 ScVals, so clients that
+need typed fields must decode the XDR rather than assuming `value` is JSON.
+For example, the decoded shape is:
+
+```text
+topics: [Symbol("attestation_cleared_event"), BytesN<32>(wasm_hash)]
+value:  (expires_at: u64, timestamp: u64)
+```
+
+Dashboards should clear the pending-attestation indicator for the matching
+contract and `wasm_hash`, using the stable event id for replay deduplication.
+This event is emitted only when a stored attestation is actively removed. It
+does **not** disable attestation-required mode; that setting changes only via
+`set_attestation_required`. The event remains waived from the contributor
+subgraph and is available through the raw event stream.
+
 An event whose `topic[0]` does not match any row is written with
 `event_kind: "unknown"` and `category: "unclassified"`. This is intentional: an
 indexer pointed at a newer contract version must keep recording events it does not

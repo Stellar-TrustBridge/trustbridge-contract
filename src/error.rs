@@ -84,6 +84,7 @@ use soroban_sdk::contracterror;
 /// | 42 | `UpgradeProposalAlreadyApproved` | `approve_upgrade` |
 /// | 43 | `UpgradeProposalDelayActive` | `execute_upgrade` |
 /// | 44 | `UpgradeProposalInsufficientApprovals` | `execute_upgrade` |
+/// | 45 | `ThresholdExceedsSignerCap` | `set_upgrade_threshold` |
 /// | 46 | `FallbackListFull` | `register` |
 /// | 47 | `UsernameTaken` | `rename` |
 /// | 48 | `RotationRequired` | `register` |
@@ -451,10 +452,9 @@ impl ContractError {
 }
 
 impl fmt::Display for ContractError {
-    /// Human-readable message for each `ContractError` variant, kept in sync
-    /// with `docs/ABI.md` and the variant doc comments. Off-chain consumers
-    /// (dashboard, indexer) surface this text to operators, so it must not
-    /// drift from the documented catalog.
+    /// Human-readable message for each `ContractError` variant. Off-chain
+    /// consumers surface this text to operators; tests pin every message while
+    /// `docs/ABI.md` documents the separate category used for bucketing.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ContractError::AlreadyInitialized => write!(f, "contract already initialized"),
