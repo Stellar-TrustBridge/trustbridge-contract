@@ -512,6 +512,30 @@ matches what the contract held at the snapshot ledger.
 | `version` | `Vec<u32>` | Contract version `[major, minor, patch]` at snapshot time |
 | `ledger` | `u32` | Ledger sequence the snapshot was taken at |
 
+**Digest stability (Issue #778).** The `digest` field is computed as
+`sha256(page.to_xdr(env))` (`storage::build_export_digest`) over exactly
+the `records`, `next_cursor`, `total`, `merkle_root`, and `has_more` fields
+of `ExportPage` — never over `version`, `ledger`, or any wall-clock value.
+This means:
+
+- The same registry content, queried with the same `cursor`/`limit`, always
+  produces the same digest, regardless of when the query runs, which
+  contract instance holds the data, or which ledger sequence the query
+  happens to run at.
+- A verifier reproducing the digest offline for an air-gapped audit only
+  needs the `page` bytes, not the `version` or `ledger` fields — those two
+  are attestation metadata about *when* the snapshot was taken, not inputs
+  to the hash.
+- Any change to `ExportPage`'s field set or field order is an XDR/ABI
+  break that changes every subsequent digest; such a change must go
+  through `tests/export_page_layout.rs`'s golden-file check
+  (`abi/export_page.layout.golden`) and be called out in this document.
+
+Locked by `tests/export_attestation_digest_stability.rs`, which asserts
+digest stability across repeated calls, across independent contract
+instances holding identical content, across paginated sub-queries, and
+digest sensitivity to real content changes.
+
 ### RecordProof (Issue #230)
 
 Returned by `get_record_proof`. Lets a light client confirm a single

@@ -1583,6 +1583,38 @@ executed on testnet — or the reverse — fails closed with `NetworkMismatch`
 (code 30) before any write, so a rejected call leaves no partial state.
 Covered by the pubnet/testnet cases in `tests/network_mismatch.rs`.
 
+## Reserved-name rejection is case-insensitive (Issue #781)
+
+`storage::is_reserved` folds case via `utils::eq_ignore_ascii_case` before
+comparing a candidate username against the reserved list, so `register`,
+`rename`, and `add_reserved` all reject every case variant of a reserved
+name (e.g. reserving `stellar` also blocks `Stellar`, `STELLAR`, and
+`StElLaR`), not just the exact casing an operator typed. This matters for
+Wave brand-impersonation protection: an attacker who finds that only the
+literal reserved string is blocked could register a differently-cased
+look-alike. The list itself stores entries as given (no case is
+canonicalized on write), so `remove_reserved` also case-folds to let an
+operator remove a reservation using any casing.
+
+**Operator note on list maintenance:** names should be reserved using
+their canonical/lowercase form where practical, since the list is small
+(`MAX_RESERVED = 200`) and a human auditing it via `get_reserved_list`
+benefits from a consistent casing convention — the case-fold comparison
+makes this a readability convention only, not a correctness requirement.
+Reserving `"Stellar"` and later trying to reserve `"stellar"` fails with
+`AlreadyReserved` rather than creating a duplicate entry.
+
+This repo does not perform homoglyph/Unicode-confusable normalization on
+reserved-name comparisons; `is_reserved` is an ASCII case-fold only. If a
+future Wave threat model requires blocking homoglyph variants (e.g.
+Cyrillic lookalikes of Latin letters), that is a separate, not-yet-built
+layer — see `tests/homoglyph_corpus.rs` for related (but distinct) existing
+coverage of homoglyph handling elsewhere in the registry.
+
+Covered by `tests/reserved_name_case_fold.rs`, which locks the
+case-insensitive rejection behavior across `register`, `rename`,
+`add_reserved`, `remove_reserved`, and the `is_reserved` query entrypoint.
+
 ## Username validation / reserved-list divergence (Issue #793)
 
 Two independent checks gate a `github_username` at registration: the
