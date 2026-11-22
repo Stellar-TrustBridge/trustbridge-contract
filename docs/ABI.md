@@ -184,6 +184,57 @@ struct ExportPage {
 }
 ```
 
+### Export page byte layout (v1)
+
+Snapshot pinned by Issue #808. `ExportPage` is a Soroban XDR type. Offline attestors and dashboard parsers
+must treat the following as a stable snapshot:
+
+| Element | Encoding rule |
+|---------|---------------|
+| `String` / `Vec` | 4-byte unsigned big-endian length prefix, then items in declaration order |
+| `u32` (`total`, `registered_at`, `next_cursor` when present) | 4 bytes, **big-endian** |
+| `bool` (`has_more`, `verified`) | XDR boolean |
+| `Option<u32>` (`next_cursor`) | XDR union: discriminant, then the `u32` only when present |
+| `ContributorRecord` | `stellar_address`, `registered_at`, `verified` in that order — never reorder |
+| `Address` | Soroban XDR `Address` encoding; do not assume a raw 32-byte public key |
+
+`registered_at` was narrowed from `u64` to `u32`, so its maximum is
+`4294967295` (~2106). A value above that is not a valid v1 record.
+
+The off-chain JSON emitted by `scripts/export_registry.sh` snapshots the same
+field order:
+
+```json
+{
+  "schema_version": 1,
+  "contract_id": "C...",
+  "network": "testnet",
+  "exported_at": "2026-01-01T00:00:00Z",
+  "count": 2,
+  "records": [
+    {
+      "github_username": "octocat",
+      "stellar_address": "G...",
+      "verified": true,
+      "registered_at": 1732800000
+    }
+  ]
+}
+```
+
+Verify a file against the snapshot with:
+
+```bash
+make check-export-layout FILE=registry-export-testnet.json
+# or: ./scripts/check_export_layout.sh registry-export-testnet.json
+```
+
+The checker reports `LAYOUT_MISMATCH` with the expected field order and exits
+non-zero for reordered/renamed fields, wrong types, malformed JSON, or a
+`registered_at` outside the `u32` range. Any intentional change to this layout
+must bump `schema_version`, update the checker, and update
+[DEPLOYMENT.md § Registry Export & Import](DEPLOYMENT.md#registry-export--import).
+
 ### BatchSummary
 
 Returned by `batch_verify`. `success_rate` is an integer percentage.
@@ -1015,6 +1066,13 @@ Justification: a single invoke that materializes more than ~100 registry
 reads trips the ledger-entry footprint ceiling (see [Cost and
 benchmarks](#cost-and-benchmarks)). Capping the page keeps each call inside
 that budget while still allowing full export via a cursor loop.
+
+**Recommended sizes:** use `20` for public dashboard polls, `50` (one
+`CHUNK_SIZE` chunk) for indexer backfill and admin exports, and `100` only as
+a measured ceiling. An oversized page fails the entire invocation with a
+budget/footprint error; `limit > 100` is clamped to `100` rather than rejected.
+See [BENCHMARK_BUDGETS.md](BENCHMARK_BUDGETS.md) for the budget model,
+failure symptoms, and `make bench` reproduction commands.
 
 ### `ExportPage`
 
@@ -2395,6 +2453,68 @@ struct BatchSummary {
 **Since:** Issue #205. The function signature in the WASM ABI changed from
 `() -> void` to `() -> BatchSummary`. Clients compiled against the old
 bindings should regenerate via `make bindings`.
+
+---
+
+## Dry-run repair report
+
+Issue #811 pins this report shape for dashboard parsers.
+`scripts/validate_registry.sh` is read-only — it never proposes or applies
+writes. With `REPORT_FILE` set it additionally emits a JSON **dry-run repair
+report** whose field names and order are a v1 compatibility surface for
+dashboard parsers. Any change to the keys, nesting, or ordering below is an
+ABI-level change and must bump `schema_version`.
+
+```bash
+CONTRACT_ID=C... REPORT_FILE=repair-report.json \
+  ./scripts/validate_registry.sh registry-export-testnet.json
+```
+
+```json
+{
+  "schema_version": 1,
+  "tool": "validate_registry",
+  "contract_id": "C...",
+  "network": "testnet",
+  "generated_at": "2026-01-01T00:00:00Z",
+  "export": {
+    "exported_at": "2026-01-01T00:00:00Z",
+    "total": 42,
+    "verified": 17
+  },
+  "counters": {
+    "onchain_total": 42,
+    "onchain_verified": 17,
+    "parity": true
+  },
+  "mismatches": {
+    "missing_onchain": 0,
+    "address_mismatch": 0,
+    "verified_mismatch": 0,
+    "missing_from_export": 0,
+    "total": 0
+  },
+  "admin_diff_enabled": true,
+  "result": "ok"
+}
+```
+
+| Field | Type | Semantics |
+|-------|------|-----------|
+| `schema_version` | `u32` | `1` for this shape; bump on any field rename/removal/reorder |
+| `tool`, `contract_id`, `network` | string | Provenance of the report |
+| `generated_at` | string | Report time, ISO-8601 UTC; `exported_at` is the source export's timestamp (empty string if absent) |
+| `export.total`, `export.verified` | `u32` | Counts derived from the export file |
+| `counters.onchain_total`, `counters.onchain_verified` | `u32` or `null` | Live `get_stats()` values; `null` if that read failed |
+| `counters.parity` | `bool` or `null` | Both `get_stats()` counters equal the export counts; `null` when unavailable |
+| `mismatches.*` | `u32` | Per-category counts matching the `MISSING_ONCHAIN`, `ADDRESS_MISMATCH`, `VERIFIED_MISMATCH`, `MISSING_FROM_EXPORT` lines; `total` is their sum |
+| `admin_diff_enabled` | `bool` | Whether `ADMIN_SOURCE` was supplied (the `missing_from_export` check only runs then) |
+| `result` | `"ok"` \| `"mismatch"` | `"mismatch"` if any mismatch count is non-zero or counter parity is `false` |
+
+The report never causes a state change: the script's exit status remains
+`0` (match), `1` (mismatch), or `2` (usage/config error), independent of
+`REPORT_FILE`. See [CONTRACT_HEALTH.md](CONTRACT_HEALTH.md#dry-run-repair-report)
+for operator interpretation of a failing report.
 
 ---
 
