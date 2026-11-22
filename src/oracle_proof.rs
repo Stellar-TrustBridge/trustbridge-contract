@@ -58,9 +58,18 @@ pub struct OracleProof {
 /// consistent with every other admin-gated entry point in this contract).
 pub fn set_oracle_allowlist(env: &Env, admin: &Address, pubkeys: Vec<BytesN<32>>) {
     admin.require_auth();
+    let previous_count = get_oracle_allowlist(env).len();
+    let new_count = pubkeys.len();
     env.storage()
         .instance()
         .set(&ORACLE_ALLOWLIST_KEY, &pubkeys);
+    crate::events::OracleAllowlistRotatedEvent {
+        admin: admin.clone(),
+        previous_count,
+        new_count,
+        timestamp: env.ledger().timestamp(),
+    }
+    .publish(env);
 }
 
 /// Reads the current oracle pubkey allowlist (empty `Vec` if never set).
@@ -499,6 +508,40 @@ mod tests {
                 expires_at: 0,
             };
             let _ = verify_with_proof(&env, &proof);
+        });
+    }
+
+    #[test]
+    fn allowlist_rotation_emits_event_with_counts() {
+        use soroban_sdk::testutils::Events as _;
+
+        let env = Env::default();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+        });
+
+        let events = env.events().all();
+        assert!(
+            !events.is_empty(),
+            "set_oracle_allowlist must emit OracleAllowlistRotatedEvent"
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn allowlist_rotation_without_admin_auth_panics() {
+        let env = Env::default();
+        let contract_id = env.register(crate::TrustBridgeContract, ());
+        let admin = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            crate::TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+            let allowlist = Vec::new(&env);
+            set_oracle_allowlist(&env, &admin, allowlist);
         });
     }
 }

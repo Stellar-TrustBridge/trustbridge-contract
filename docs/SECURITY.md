@@ -20,6 +20,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Admin storage mutated after init | No public setter writes `ADMIN_KEY` — only `initialize` does, gated by `AlreadyInitialized` (Issue #97) |
 | Malformed or oversized username input | `InvalidUsername` error, checked before auth and before any write |
 | Unicode / homoglyph username spoofing | Byte-wise ASCII validation rejects all non-ASCII bytes; see **Unicode Rejection Policy** section |
+| Writing registry state using the zero/burn address (reachable under `mock_all_auths` / sandboxes that skip `require_auth`) | `is_zero_address` checks reject zero registration and rotation destinations, role grant targets (`set_role`, `set_role_with_expiry`), verification/revocation/batch actors, and a zero pending rotation destination before mutation. Batch verification skips corrupt zero-bound records. Failures use `ZeroAddress` (code 16), before writes; pinned by `tests/zero_address.rs` and `tests/role_lifecycle.rs` (Issues #300, #755, #799) |
 | Public disclosure of unverified contributor addresses | `get_public_paginated` replaces unverified identity and payout addresses with the zero/burn address before export and Merkle hashing; see [Public export address redaction](#public-export-address-redaction-issue-627) |
 | Writing registry state using the zero/burn address (reachable under `mock_all_auths` / sandboxes that skip `require_auth`) | `is_zero_address` checks reject zero registration and rotation destinations, verification/revocation/batch actors, and a zero pending rotation destination before mutation. Batch verification skips corrupt zero-bound records. Failures use `ZeroAddress` (code 16), before writes; pinned by `tests/zero_address.rs` (Issues #300, #755) |
 | Consecutive-hyphen username bypass | `InvalidUsername` error — consecutive hyphens now enforced on-chain |
@@ -1099,7 +1100,9 @@ hash for upgrades, not an identity claim.)
 `src/oracle_proof.rs` adds the missing signature-check primitive:
 
 - `set_oracle_allowlist(env, admin, pubkeys)` — admin-gated; replaces the set
-  of Ed25519 public keys whose signatures are accepted.
+  of Ed25519 public keys whose signatures are accepted and emits
+  `OracleAllowlistRotatedEvent` (`admin` topic, `previous_count`, `new_count`,
+  `timestamp`) so indexers and Wave verifiers can audit every allowlist rotation.
 - `get_oracle_allowlist(env)` — public read of the current allowlist.
 - `OracleProof { oracle_pubkey, message, signature, expires_at }` — a signed
   attestation from an off-chain oracle.

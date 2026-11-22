@@ -961,3 +961,18 @@ stellar contract build
 HASH=$(sha256sum target/wasm32v1-none/release/trustbridge_contract.wasm | cut -d' ' -f1)
 make assert-build CONTRACT_ID=$CONTRACT_ID WASM_HASH=$HASH
 ```
+
+## Version Inspection for CLI Operators
+
+Contract entrypoints (`version()`, `get_version()`, `migrate()`) return and accept
+`(u32, u32, u32)` tuples, which `stellar contract invoke` prints as JSON arrays
+(e.g. `[1, 1, 0]`). In Rust/CLI diagnostics (`src/version.rs`), `Display`
+formats `Version` as `"1.1.0"`, `MigrationState` as `not_required` / `pending` /
+`in_progress` / `completed` / `failed`, and `CompatibilityInfo` as
+`current=1.0.0 target=1.1.0 migration_required=true breaking_changes=false data_migration_required=true`.
+
+```bash
+stellar contract invoke --id $CONTRACT_ID --source deployer --network testnet \
+  -- version
+# Output: [1,1,0]  (equivalent to Version::Display "1.1.0")
+```

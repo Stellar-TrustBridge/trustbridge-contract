@@ -182,6 +182,32 @@ impl CompatibilityInfo {
     }
 }
 
+impl core::fmt::Display for MigrationState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            MigrationState::NotRequired => write!(f, "not_required"),
+            MigrationState::Pending => write!(f, "pending"),
+            MigrationState::InProgress => write!(f, "in_progress"),
+            MigrationState::Completed => write!(f, "completed"),
+            MigrationState::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+impl core::fmt::Display for CompatibilityInfo {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "current={} target={} migration_required={} breaking_changes={} data_migration_required={}",
+            self.current_version,
+            self.target_version,
+            self.migration_required,
+            self.breaking_changes,
+            self.data_migration_required
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -585,5 +611,61 @@ mod tests {
                 "version must match build constant"
             );
         });
+    }
+
+    #[test]
+    fn snapshot_version_tuple_vs_display_string() {
+        let v = Version::new(1, 1, 0);
+        assert_eq!(v.to_tuple(), (1, 1, 0));
+        assert_eq!(alloc::format!("{v}"), "1.1.0");
+        assert_eq!(Version::from_tuple((1, 1, 0)), v);
+    }
+
+    #[test]
+    fn snapshot_migration_state_display() {
+        let rendered = [
+            alloc::format!("{}", MigrationState::NotRequired),
+            alloc::format!("{}", MigrationState::Pending),
+            alloc::format!("{}", MigrationState::InProgress),
+            alloc::format!("{}", MigrationState::Completed),
+            alloc::format!("{}", MigrationState::Failed),
+        ];
+        assert_eq!(
+            rendered,
+            [
+                "not_required",
+                "pending",
+                "in_progress",
+                "completed",
+                "failed"
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_compatibility_info_display() {
+        let patch = CompatibilityInfo::for_upgrade(Version::new(1, 1, 0), Version::new(1, 1, 1));
+        assert_eq!(
+            alloc::format!("{patch}"),
+            "current=1.1.0 target=1.1.1 migration_required=true breaking_changes=false data_migration_required=false"
+        );
+
+        let minor = CompatibilityInfo::for_upgrade(Version::new(1, 0, 0), Version::new(1, 1, 0));
+        assert_eq!(
+            alloc::format!("{minor}"),
+            "current=1.0.0 target=1.1.0 migration_required=true breaking_changes=false data_migration_required=true"
+        );
+
+        let major = CompatibilityInfo::for_upgrade(Version::new(1, 1, 0), Version::new(2, 0, 0));
+        assert_eq!(
+            alloc::format!("{major}"),
+            "current=1.1.0 target=2.0.0 migration_required=true breaking_changes=true data_migration_required=true"
+        );
+
+        let downgrade = CompatibilityInfo::for_upgrade(Version::new(2, 0, 0), Version::new(1, 0, 0));
+        assert_eq!(
+            alloc::format!("{downgrade}"),
+            "current=2.0.0 target=1.0.0 migration_required=false breaking_changes=true data_migration_required=true"
+        );
     }
 }
