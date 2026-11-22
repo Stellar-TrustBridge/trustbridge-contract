@@ -513,6 +513,25 @@ compatibility floor at 1.0.0 for callers that want to assert it explicitly.
 - **Username normalization:** Consider enforcing lowercase GitHub handles off-chain and in client SDKs.
 - **Multisig admin:** Admin address can be a multisig or smart account — no contract changes required.
 
+## Data Migrations — Semver Rejection Rule
+
+`Version::needs_migration(target)` and `CompatibilityInfo::for_upgrade` compare
+the deployed version and the target as a `(major, minor, patch)` tuple, not as
+independent fields. A migration is only valid when `target` is strictly ahead
+of the deployed version:
+
+- **Equal target** (`deployed == target`): rejected as a no-op. Running a
+  migration to the version already deployed must never execute storage
+  changes twice.
+- **Lower target** (`deployed > target` in any tuple position — patch, minor,
+  or major): rejected. There is no supported "downgrade migration" path;
+  attempting one must surface as `InvalidVersion`/no-op rather than silently
+  mutating state backwards.
+
+See `src/version.rs::tests::migrate_rejects_equal_target_tuple_comparison` and
+`migrate_rejects_lower_target_across_all_tuple_positions` for the automated
+proof covering all three tuple positions.
+
 ## Migration Window Reads
 
 During a registry migration window, dashboards should treat the on-chain

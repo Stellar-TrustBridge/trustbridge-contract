@@ -351,6 +351,29 @@ make invoke-batch-remove \
   Capped at 25. Returns a `BatchSummary`. Decrements total and verified counters
   for each removed record.
 
+#### `repair_index` — dry-run and fix drifted counters
+
+```bash
+# Dry run first: writes nothing, just reports drift.
+stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=no \
+  -- repair_index --apply false
+
+# Only after reviewing the dry-run report: apply the fix.
+stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
+  -- repair_index --apply true
+```
+
+- **Auth:** admin-only.
+- **Dry run (`apply = false`) is a pure read** — it never writes `count` or
+  `verified`, even when it finds no drift. Always run this first.
+- **`apply = true` corrects both `count` and `verified` together in a
+  single invocation** — there is no partial state where only one counter
+  gets fixed; Soroban commits all of an invocation's storage writes or none
+  of it. A call that finds no drift is a no-op even with `apply = true`.
+- See [SECURITY.md § Index Repair](SECURITY.md#index-repair-repair_index)
+  for the full atomicity and dry-run-write guarantees, and
+  `tests/repair_index.rs` for the automated proof.
+
 #### `set_bot_status` — flag / unflag a CI account
 
 ```bash

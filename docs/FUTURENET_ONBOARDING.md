@@ -86,6 +86,29 @@ The repository pins the Futurenet RPC and Friendbot endpoints in the Makefile. U
 make futurenet-smoke FUTURENET_DRY_RUN=true
 ```
 
+## Auth Identity Gotchas
+
+- **Identity names are local, not on-chain.** `stellar keys generate contributor --network futurenet --fund` only creates a *local* CLI identity named `contributor`; it does not reserve that name anywhere on-chain. Two contributors on the same machine (CI runner, shared devbox) must use distinct identity names (e.g. `contributor-$USER`) or the second `generate` silently overwrites the first identity's keypair in `~/.config/stellar/identity/`.
+- **`SOURCE` and `ADMIN` must resolve to the same funded identity** the first time you deploy, unless you intentionally want a separate admin. If `ADMIN` is set to an address with no matching local key, `initialize` will deploy fine but every subsequent admin-gated `invoke-*` target fails with a signing error, not an auth error — because the CLI can't find a signer for `ADMIN`, not because the contract rejected the call.
+- **Re-running `stellar keys generate <name> --fund` on an existing identity name is a no-op for the keypair** but still calls Friendbot again, which counts against the rate limit below. Use `stellar keys address <name>` to check if an identity already exists before regenerating.
+
+## Friendbot Rate Limits
+
+- The pinned Futurenet Friendbot (`https://friendbot-futurenet.stellar.org`) rate-limits funding requests **per account and per source IP**, not just per account. Funding several identities back-to-back from the same CI runner or shared network can trip the IP-level limit even though each individual account has only been funded once.
+- A rate-limited Friendbot call returns an HTTP error (commonly 400/429) and the CLI surfaces this as a generic funding failure — it does **not** retry automatically. If `stellar keys generate ... --fund` fails, wait before retrying rather than looping the command, which only adds more rejected requests against the same limit window.
+- Funding is idempotent per account: if an identity is already funded, a repeated `--fund` call is unnecessary. Check balance first with `stellar keys address <name>` + a balance query before re-funding.
+
+## Common RPC Errors Linked From the Smoke Script
+
+`scripts/futurenet_smoke_test.sh` surfaces these failure modes; use this table to map its error output to the fix:
+
+| Smoke script message | Likely cause | Fix |
+|---|---|---|
+| `connection refused` / timeout on RPC calls | `FUTURENET_RPC_URL` points at a stale or unreachable endpoint | Confirm you're using the pinned endpoint (`https://rpc-futurenet.stellar.org`); only override it with a known-compatible service |
+| `tx submission failed: txBadSeq` | The source account's sequence number is stale (e.g. a prior invoke partially submitted) | Re-fetch the account with `stellar keys address <name>` / re-run the smoke script; do not manually bump sequence numbers |
+| `signing key not found for <address>` | `ADMIN` or `SOURCE` resolves to an address with no local identity (see Auth Identity Gotchas above) | Verify `stellar keys address $SOURCE` matches the address you expect, and that `ADMIN` was set from a local identity, not pasted from elsewhere |
+| `account not found` from Friendbot or RPC | The identity was generated but never successfully funded, or funding silently failed under the Friendbot rate limit | Re-check with `stellar keys address <name>`, then retry funding after waiting out the rate-limit window |
+
 ## Step 1 — Faucet: fund your Futurenet account
 
 ```bash
