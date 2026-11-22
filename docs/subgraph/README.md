@@ -78,6 +78,28 @@ the contract does not emit.
 > `activate_role`; `RoleGrantPendingEvent` fires only when the grant is queued.
 > Dashboard state: cross-link [DASHBOARD_SYNC.md](../DASHBOARD_SYNC.md#abi-event-reference).
 
+> **Role expiry cleanup (Issue #697):** Expired time-bounded role grants
+> (`set_role_with_expiry`) are reclaimed lazily — `get_role` stops reporting
+> them when the clock passes `expires_at`, but their storage entry remains until
+> an explicit `remove_role` call or the keeper's expiry-cleanup sweep. When
+> `remove_role` runs against an already-expired grant it still emits
+> `RoleRevokedEvent` (the same event as a live revocation), so the subgraph
+> handler for `role_revoked_event` covers both live revocations and expiry
+> cleanups. No separate event type exists for expiry cleanup. Subgraph handlers
+> must therefore distinguish the two cases by comparing the event's
+> `ledgerSequence` against the `expires_at` value from the most recent
+> `RoleGrantedEvent` for that address:
+>
+> | Scenario | Event emitted | Handler action |
+> |---|---|---|
+> | Active role explicitly revoked | `role_revoked_event` | Mark role removed; timestamp = event timestamp |
+> | Expired role cleaned up via `remove_role` | `role_revoked_event` | Mark role removed; note: `expires_at` already passed |
+> | `prune_expired_verifiers` removes an allowlist slot | _(no event)_ | No handler; reconcile via `get_verifier_allowlist` read |
+>
+> The `role_revoked_event` waiver row in the explicit waivers table below covers
+> all of these paths. The raw event log (`scripts/event_indexer.sh`) remains the
+> authoritative source for RBAC telemetry including expiry cleanup.
+
 Notes and gotchas:
 
 - **All three events carry `domain`.** `RegisteredEvent` gained `EventDomain`

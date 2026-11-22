@@ -109,6 +109,31 @@ flowchart TD
 constants everything else names. `events.rs` only depends on `domain.rs`
 (the `EventDomain` stamped on each event). Nothing depends on `lib.rs`.
 
+### Shared helper functions (cross-module surface)
+
+No module in `src/` currently uses `pub(crate)` visibility — every item one
+module exposes to another is plain `pub` at the module level, scoped only
+by the fact that the modules themselves (`mod audit; mod storage; …` in
+`lib.rs`) are private to the crate. That makes the function signature, not
+a visibility keyword, the real contract between modules. The helpers below
+are the ones called from outside their own file and are the ones a
+contributor must keep stable (or update every call site for) when editing:
+
+| Helper | Defined in | Called from |
+|--------|-------------|-------------|
+| `is_valid_github_username`, `canonicalize_username`, `eq_ignore_ascii_case`, `is_zero_address` | `src/utils.rs` | `src/lib.rs`, `src/storage.rs`, `src/batch.rs`, `fuzz/fuzz_targets/*.rs` |
+| `is_reserved`, `add_to_reserved`, `remove_from_reserved` | `src/storage.rs` | `src/lib.rs` (`register`, `rename`, `add_reserved`/`remove_reserved`/`is_reserved` entrypoints) |
+| Index/cursor/audit persistence helpers (e.g. `get_health_probes`, pagination cursor codecs) | `src/storage.rs` | `src/lib.rs`, `src/merkle.rs`, `src/batch.rs` |
+| `EventDomain` construction | `src/domain.rs` | `src/events.rs`, `src/lib.rs` (every `#[contractevent]` emission site) |
+| Oracle allowlist / proof checks | `src/oracle_proof.rs` | `src/lib.rs` (`verify_with_oracle_proof`) |
+| Staged-WASM intent slot helpers | `src/staged_wasm.rs` | `src/lib.rs` (`upgrade`, `stage_wasm`) |
+
+When adding a new cross-module helper, put it in the module that owns the
+state it touches (see the module table above), keep it `pub` at module
+scope only — never re-export it from `lib.rs` unless external crates need
+it — and add a row here so the module map stays a true file-ownership
+reference for Wave PR review.
+
 ### Test locations by domain
 
 | Domain | Tests |
@@ -487,6 +512,25 @@ compatibility floor at 1.0.0 for callers that want to assert it explicitly.
 - **TTL extension:** Persistent entries may need periodic TTL extension on mainnet; document in [DEPLOYMENT.md](DEPLOYMENT.md). Estimator TTL schedule: [STORAGE_RENT_ESTIMATOR.md](STORAGE_RENT_ESTIMATOR.md).
 - **Username normalization:** Consider enforcing lowercase GitHub handles off-chain and in client SDKs.
 - **Multisig admin:** Admin address can be a multisig or smart account — no contract changes required.
+
+## Data Migrations — Semver Rejection Rule
+
+`Version::needs_migration(target)` and `CompatibilityInfo::for_upgrade` compare
+the deployed version and the target as a `(major, minor, patch)` tuple, not as
+independent fields. A migration is only valid when `target` is strictly ahead
+of the deployed version:
+
+- **Equal target** (`deployed == target`): rejected as a no-op. Running a
+  migration to the version already deployed must never execute storage
+  changes twice.
+- **Lower target** (`deployed > target` in any tuple position — patch, minor,
+  or major): rejected. There is no supported "downgrade migration" path;
+  attempting one must surface as `InvalidVersion`/no-op rather than silently
+  mutating state backwards.
+
+See `src/version.rs::tests::migrate_rejects_equal_target_tuple_comparison` and
+`migrate_rejects_lower_target_across_all_tuple_positions` for the automated
+proof covering all three tuple positions.
 
 ## Migration Window Reads
 

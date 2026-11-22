@@ -318,6 +318,54 @@ mod tests {
         assert!(!info.data_migration_required);
     }
 
+    // ── Migrate rejection: equal/lower targets must never be treated as a
+    // valid forward migration (would otherwise let an operator "migrate"
+    // to the version already deployed, or silently downgrade). ──────────
+
+    #[test]
+    fn migrate_rejects_equal_target_tuple_comparison() {
+        // Semver tuple comparison: (major, minor, patch) == (major, minor, patch)
+        // must never register as a migration that needs to run.
+        let cases = [
+            Version::new(1, 0, 0),
+            Version::new(1, 1, 0),
+            Version::new(2, 3, 4),
+        ];
+        for v in cases {
+            assert!(
+                !v.needs_migration(v),
+                "equal target {v} must be rejected as a no-op, not a migration"
+            );
+            let info = CompatibilityInfo::for_upgrade(v, v);
+            assert!(
+                !info.migration_required,
+                "CompatibilityInfo must agree: equal target {v} requires no migration"
+            );
+        }
+    }
+
+    #[test]
+    fn migrate_rejects_lower_target_across_all_tuple_positions() {
+        // Lower patch, lower minor (same major), and lower major must all be
+        // rejected — tuple comparison, not just a single-field check.
+        let lower_patch = (Version::new(1, 0, 5), Version::new(1, 0, 4));
+        let lower_minor = (Version::new(1, 2, 0), Version::new(1, 1, 9));
+        let lower_major = (Version::new(2, 0, 0), Version::new(1, 9, 9));
+
+        for (deployed, target) in [lower_patch, lower_minor, lower_major] {
+            assert!(
+                !deployed.needs_migration(target),
+                "deployed={deployed} must reject lower target={target}"
+            );
+            // is_compatible_with must also independently refuse to treat a
+            // lower target as satisfying forward compatibility.
+            assert!(
+                deployed.is_compatible_with(target),
+                "a strictly newer deployed version remains compatible with an older minimum"
+            );
+        }
+    }
+
     #[test]
     fn test_migration_state_variants_are_distinct() {
         assert_ne!(MigrationState::NotRequired, MigrationState::Pending);

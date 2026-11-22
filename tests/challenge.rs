@@ -192,6 +192,72 @@ fn test_challenge_happy_path_lifecycle() {
     ));
 }
 
+/// The expiry boundary is inclusive: completion fails one second before the
+/// deadline and succeeds at the deadline itself.
+#[test]
+fn test_challenge_expiry_exact_timestamp_boundary() {
+    let (env, admin, user, contract_id) = setup();
+    register(&env, &contract_id, &user, "boundary");
+    start_challenge(&env, &contract_id, &admin, "boundary");
+    let resolve_after = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_challenge(env.clone(), username(&env, "boundary"))
+            .unwrap()
+            .resolve_after
+    });
+
+    env.ledger().set_timestamp(resolve_after - 1);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::complete_challenge(
+                env.clone(), admin.clone(), username(&env, "boundary")
+            ),
+            Err(ContractError::ChallengeNotResolvable)
+        );
+        assert!(
+            TrustBridgeContract::get_address(env.clone(), username(&env, "boundary")).is_some()
+        );
+    });
+
+    env.ledger().set_timestamp(resolve_after);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::complete_challenge(env.clone(), admin.clone(), username(&env, "boundary"))
+            .unwrap();
+        assert!(
+            TrustBridgeContract::get_address(env.clone(), username(&env, "boundary")).is_none()
+        );
+    });
+}
+
+#[test]
+fn test_challenge_exact_expiry_still_respects_pause() {
+    let (env, admin, user, contract_id) = setup();
+    register(&env, &contract_id, &user, "pausededge");
+    start_challenge(&env, &contract_id, &admin, "pausededge");
+    let resolve_after = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_challenge(env.clone(), username(&env, "pausededge"))
+            .unwrap()
+            .resolve_after
+    });
+    env.ledger().set_timestamp(resolve_after);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || TrustBridgeContract::pause(env.clone(), 1).unwrap());
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::complete_challenge(
+                env.clone(),
+                admin.clone(),
+                username(&env, "pausededge")
+            ),
+            Err(ContractError::Paused)
+        );
+        assert!(
+            TrustBridgeContract::get_address(env.clone(), username(&env, "pausededge")).is_some()
+        );
+    });
+}
+
 /// A completed challenge decrements `total` and `verified` exactly like a
 /// `remove` of the same record (Issue #214 count invariants).
 #[test]

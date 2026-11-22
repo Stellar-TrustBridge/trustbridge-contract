@@ -185,6 +185,135 @@ fn test_repair_index_apply_true_corrects_drifted_counters() {
 }
 
 #[test]
+fn test_repair_index_dry_run_never_writes_even_when_only_one_counter_drifts() {
+    // Drift only `verified` while `count` happens to already be correct —
+    // a dry run must still leave BOTH counters untouched, not just skip
+    // writing the one that matches. This guards against an implementation
+    // that only short-circuits the write when every counter is already
+    // correct, rather than never writing at all in dry-run mode.
+    let (env, admin, user1, contract_id) = setup();
+    let user2 = Address::generate(&env);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "alice"),
+            user1,
+            soroban_sdk::Vec::new(&env),
+        )
+        .unwrap();
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "bob"),
+            user2,
+            soroban_sdk::Vec::new(&env),
+        )
+        .unwrap();
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
+    });
+
+    // `count` (2) is correct; only `verified` is drifted (claims 0 verified
+    // instead of the real 1).
+    corrupt_counters(&env, &contract_id, 2, 0);
+
+    env.mock_all_auths();
+    let report = env.as_contract(&contract_id, || {
+        TrustBridgeContract::repair_index(env.clone(), false).unwrap()
+    });
+    assert!(report.drifted);
+    assert_eq!(report.recomputed_verified, 1);
+
+    // Both stored counters must be exactly as corrupted — dry-run never
+    // writes any field, not even the one it recomputed to the same value.
+    env.mock_all_auths();
+    let stats = env.as_contract(&contract_id, || TrustBridgeContract::get_stats(env.clone()));
+    assert_eq!(stats.total, 2, "count must stay untouched by dry run");
+    assert_eq!(
+        stats.verified, 0,
+        "drifted verified counter must stay untouched by dry run"
+    );
+
+    // Run several more dry-run calls in a row: repeated dry runs must be
+    // idempotent no-ops, never accumulating partial writes.
+    for _ in 0..3 {
+        env.mock_all_auths();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::repair_index(env.clone(), false).unwrap()
+        });
+    }
+    env.mock_all_auths();
+    let stats_after = env.as_contract(&contract_id, || TrustBridgeContract::get_stats(env.clone()));
+    assert_eq!(stats_after.total, 2);
+    assert_eq!(stats_after.verified, 0);
+}
+
+#[test]
+fn test_repair_index_apply_is_atomic_per_counter_no_partial_update() {
+    // Corrupt `count` and `verified` to two independently wrong values and
+    // confirm a single apply=true call corrects BOTH together. If apply
+    // were not atomic per counter (e.g. wrote `count` then returned early
+    // before writing `verified` on some error path), this would observe a
+    // half-corrected state: one counter fixed, the other still drifted.
+    let (env, admin, user1, contract_id) = setup();
+    let user2 = Address::generate(&env);
+    let user3 = Address::generate(&env);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "alice"),
+            user1,
+            soroban_sdk::Vec::new(&env),
+        )
+        .unwrap();
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "bob"),
+            user2,
+            soroban_sdk::Vec::new(&env),
+        )
+        .unwrap();
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "carol"),
+            user3,
+            soroban_sdk::Vec::new(&env),
+        )
+        .unwrap();
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "bob")).unwrap();
+    });
+
+    // Drift both counters to distinct wrong values in opposite directions
+    // (count too low, verified too high) so a single-field fix would be
+    // immediately visible as a half-applied state.
+    corrupt_counters(&env, &contract_id, 1, 99);
+
+    env.mock_all_auths();
+    let report = env.as_contract(&contract_id, || {
+        TrustBridgeContract::repair_index(env.clone(), true).unwrap()
+    });
+    assert!(report.drifted);
+
+    // Both counters must land on their recomputed values in the SAME call —
+    // never one corrected while the other remains at its corrupted value.
+    env.mock_all_auths();
+    let stats = env.as_contract(&contract_id, || TrustBridgeContract::get_stats(env.clone()));
+    assert_eq!(stats.total, 3, "count must be corrected");
+    assert_eq!(stats.verified, 2, "verified must be corrected in the same apply call");
+    assert_ne!(
+        stats.total, 1,
+        "count must not be left at its pre-repair corrupted value"
+    );
+    assert_ne!(
+        stats.verified, 99,
+        "verified must not be left at its pre-repair corrupted value"
+    );
+}
+
+#[test]
 fn test_repair_index_requires_admin_auth() {
     let (env, _admin, _user1, contract_id) = setup();
 

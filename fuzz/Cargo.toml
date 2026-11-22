@@ -20,6 +20,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "pending_reverify_page"
+path = "fuzz_targets/pending_reverify_page.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "username_validate"
 path = "fuzz_targets/username_validate.rs"
 test = false
@@ -29,6 +36,13 @@ bench = false
 [[bin]]
 name = "github_username"
 path = "fuzz_targets/github_username.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "username_reserved_consistency"
+path = "fuzz_targets/username_reserved_consistency.rs"
 test = false
 doc = false
 bench = false

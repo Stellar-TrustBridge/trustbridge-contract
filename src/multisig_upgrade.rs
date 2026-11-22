@@ -117,11 +117,25 @@ pub fn get_upgrade_threshold(env: &Env) -> u32 {
 }
 
 /// Sets the approval threshold.  `0` is clamped to `1`.
-pub fn set_upgrade_threshold(env: &Env, threshold: u32) {
+///
+/// Fails closed with [`ContractError::ThresholdExceedsSignerCap`] (Issue #795)
+/// if `threshold` exceeds [`MAX_UPGRADE_SIGNERS`] — the hard cap on the number
+/// of approvers a proposal can ever accumulate. Without this guard, an admin
+/// could set an unreachable threshold and permanently freeze the upgrade path
+/// (no proposal could ever collect enough approvals to execute).
+///
+/// Recovery, if this is ever hit: lower the threshold with another call to
+/// `set_upgrade_threshold` using a value `<= MAX_UPGRADE_SIGNERS`. See
+/// `docs/ADMIN_RUNBOOK.md` for the full recovery runbook.
+pub fn set_upgrade_threshold(env: &Env, threshold: u32) -> Result<(), ContractError> {
+    if threshold > MAX_UPGRADE_SIGNERS {
+        return Err(ContractError::ThresholdExceedsSignerCap);
+    }
     let effective = threshold.max(1);
     env.storage()
         .instance()
         .set(&UPGRADE_THRESHOLD_KEY, &effective);
+    Ok(())
 }
 
 /// The next proposal ID (read without incrementing).
@@ -289,14 +303,14 @@ mod tests {
     #[test]
     fn test_set_threshold_persists() {
         let env = Env::default();
-        set_upgrade_threshold(&env, 3);
+        set_upgrade_threshold(&env, 3).unwrap();
         assert_eq!(get_upgrade_threshold(&env), 3);
     }
 
     #[test]
     fn test_zero_threshold_clamped_to_one() {
         let env = Env::default();
-        set_upgrade_threshold(&env, 0);
+        set_upgrade_threshold(&env, 0).unwrap();
         assert_eq!(get_upgrade_threshold(&env), 1);
     }
 
@@ -412,7 +426,7 @@ mod tests {
     fn test_proposal_not_executable_with_insufficient_approvals() {
         let env = Env::default();
         env.ledger().set_timestamp(1_000);
-        set_upgrade_threshold(&env, 2); // Need 2 approvals.
+        set_upgrade_threshold(&env, 2).unwrap(); // Need 2 approvals.
         let proposer = Address::generate(&env);
         let proposal = create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 0).unwrap();
         // Only 1 approval (the proposer); threshold = 2.
@@ -426,7 +440,7 @@ mod tests {
     fn test_two_of_two_proposal_becomes_executable_after_second_approval() {
         let env = Env::default();
         env.ledger().set_timestamp(1_000);
-        set_upgrade_threshold(&env, 2);
+        set_upgrade_threshold(&env, 2).unwrap();
         let proposer = Address::generate(&env);
         let signer = Address::generate(&env);
         let proposal =
@@ -467,7 +481,7 @@ mod tests {
     #[test]
     fn test_has_enough_approvals_false_until_threshold_met() {
         let env = Env::default();
-        set_upgrade_threshold(&env, 3);
+        set_upgrade_threshold(&env, 3).unwrap();
         env.ledger().set_timestamp(1_000);
         let proposer = Address::generate(&env);
         let signer_a = Address::generate(&env);
@@ -649,7 +663,7 @@ mod tests {
     fn test_threshold_one_means_proposer_alone_is_sufficient() {
         let env = Env::default();
         env.ledger().set_timestamp(1_000);
-        set_upgrade_threshold(&env, 1);
+        set_upgrade_threshold(&env, 1).unwrap();
         let proposer = Address::generate(&env);
         let proposal = create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 0).unwrap();
 
@@ -659,44 +673,53 @@ mod tests {
         );
     }
 
-    /// When the threshold exceeds the hard cap `MAX_UPGRADE_SIGNERS`, the cap
-    /// itself becomes the limit: once `MAX_UPGRADE_SIGNERS` approvers have
-    /// signed, further `record_approval` calls are silently ignored (the
-    /// approver vec does not grow past the cap), so `has_enough_approvals`
-    /// can only become true if `threshold <= MAX_UPGRADE_SIGNERS`.
+    /// A threshold above the hard cap `MAX_UPGRADE_SIGNERS` can never be
+    /// reached (the approver vec never grows past the cap), so
+    /// `set_upgrade_threshold` must fail closed instead of silently
+    /// accepting it (Issue #795).
     #[test]
-    fn test_threshold_above_max_signers_cap_is_never_reachable() {
+    fn test_threshold_above_max_signers_is_rejected() {
         let env = Env::default();
         env.ledger().set_timestamp(1_000);
-        // Set threshold higher than the hard cap — no realistic deployment
-        // would do this, but the system must not panic.
-        set_upgrade_threshold(&env, MAX_UPGRADE_SIGNERS + 1);
+
+        assert_eq!(
+            set_upgrade_threshold(&env, MAX_UPGRADE_SIGNERS + 1),
+            Err(ContractError::ThresholdExceedsSignerCap),
+            "threshold above MAX_UPGRADE_SIGNERS must be rejected, not clamped"
+        );
+        // The previous (default) threshold must be unchanged.
+        assert_eq!(get_upgrade_threshold(&env), 1);
+    }
+
+    /// A threshold exactly at the hard cap is still a legitimate, reachable
+    /// configuration and must be accepted.
+    #[test]
+    fn test_threshold_exactly_at_max_signers_is_accepted() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000);
+
+        set_upgrade_threshold(&env, MAX_UPGRADE_SIGNERS).unwrap();
+        assert_eq!(get_upgrade_threshold(&env), MAX_UPGRADE_SIGNERS);
+    }
+
+    /// Recovery path: after a rejected over-cap attempt, lowering the
+    /// threshold to a reachable value still succeeds and proposals can be
+    /// satisfied normally (matches the recovery steps documented in
+    /// `docs/ADMIN_RUNBOOK.md`).
+    #[test]
+    fn test_recovery_lower_threshold_after_rejected_attempt() {
+        let env = Env::default();
+        env.ledger().set_timestamp(1_000);
+
+        assert!(set_upgrade_threshold(&env, MAX_UPGRADE_SIGNERS + 5).is_err());
+        set_upgrade_threshold(&env, 2).unwrap();
+        assert_eq!(get_upgrade_threshold(&env), 2);
+
         let proposer = Address::generate(&env);
         let proposal = create_upgrade_proposal(&env, proposer, hash(&env, 0x01), 0).unwrap();
-
-        // Fill all MAX_UPGRADE_SIGNERS slots.
-        let mut p = proposal.clone();
-        for _ in 0..(MAX_UPGRADE_SIGNERS - 1) {
-            let signer = Address::generate(&env);
-            p = record_approval(&env, proposal.id, signer).unwrap();
-        }
-        assert_eq!(p.approvers.len(), MAX_UPGRADE_SIGNERS);
-
-        // Even with all slots filled, threshold > MAX_UPGRADE_SIGNERS means
-        // `has_enough_approvals` is false — the threshold is unreachable.
-        assert!(
-            !has_enough_approvals(&env, &p),
-            "threshold above MAX_UPGRADE_SIGNERS must never be reachable"
-        );
-
-        // A further attempt adds nothing past the cap.
-        let extra = Address::generate(&env);
-        let after_extra = record_approval(&env, proposal.id, extra).unwrap();
-        assert_eq!(
-            after_extra.approvers.len(),
-            MAX_UPGRADE_SIGNERS,
-            "approver count must stay at MAX_UPGRADE_SIGNERS after cap is hit"
-        );
+        let signer = Address::generate(&env);
+        let p = record_approval(&env, proposal.id, signer).unwrap();
+        assert!(has_enough_approvals(&env, &p));
     }
 
     /// Duplicate approval by the same address is rejected regardless of how

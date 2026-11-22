@@ -1697,7 +1697,7 @@ impl TrustBridgeContract {
             return Err(ContractError::NotAuthorized);
         }
 
-        crate::multisig_upgrade::set_upgrade_threshold(&env, threshold);
+        crate::multisig_upgrade::set_upgrade_threshold(&env, threshold)?;
 
         let timestamp = env.ledger().timestamp();
         push_audit_entry(
@@ -3586,6 +3586,10 @@ impl TrustBridgeContract {
         require_initialized(&env)?;
         require_not_paused(&env)?;
 
+        if is_zero_address(&env, &caller) {
+            return Err(ContractError::ZeroAddress);
+        }
+
         caller.require_auth();
 
         // Caller must be the admin OR hold the Verifier role.
@@ -3775,6 +3779,10 @@ impl TrustBridgeContract {
             return Err(ContractError::InvalidReasonCode);
         }
 
+        if is_zero_address(&env, &caller) {
+            return Err(ContractError::ZeroAddress);
+        }
+
         caller.require_auth();
 
         // Caller must be the admin OR hold the Revoker role (Issue #212).
@@ -3842,6 +3850,21 @@ impl TrustBridgeContract {
         );
 
         Ok(())
+    }
+
+    /// Returns the bot-account flag for a registered contributor.
+    ///
+    /// Read-only; no auth required and available while paused.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NotRegistered`] if `github_username` has no record.
+    pub fn get_bot_status(env: Env, github_username: String) -> Result<bool, ContractError> {
+        require_initialized(&env)?;
+        get_record(&env, &github_username)
+            .map(|record| record.is_bot)
+            .ok_or(ContractError::NotRegistered)
     }
 
     /// Sets the bot-account flag for a registered contributor.
@@ -4204,6 +4227,10 @@ impl TrustBridgeContract {
         let mut record = get_record(&env, &github_username).ok_or(ContractError::NotRegistered)?;
         let pending = storage_get_pending_rotation(&env, &github_username)
             .ok_or(ContractError::NoRotationPending)?;
+
+        if is_zero_address(&env, &pending.new_address) {
+            return Err(ContractError::ZeroAddress);
+        }
 
         let timestamp = env.ledger().timestamp();
         if timestamp < pending.executable_at {

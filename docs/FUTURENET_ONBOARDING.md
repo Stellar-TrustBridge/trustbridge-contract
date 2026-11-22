@@ -86,6 +86,29 @@ The repository pins the Futurenet RPC and Friendbot endpoints in the Makefile. U
 make futurenet-smoke FUTURENET_DRY_RUN=true
 ```
 
+## Auth Identity Gotchas
+
+- **Identity names are local, not on-chain.** `stellar keys generate contributor --network futurenet --fund` only creates a *local* CLI identity named `contributor`; it does not reserve that name anywhere on-chain. Two contributors on the same machine (CI runner, shared devbox) must use distinct identity names (e.g. `contributor-$USER`) or the second `generate` silently overwrites the first identity's keypair in `~/.config/stellar/identity/`.
+- **`SOURCE` and `ADMIN` must resolve to the same funded identity** the first time you deploy, unless you intentionally want a separate admin. If `ADMIN` is set to an address with no matching local key, `initialize` will deploy fine but every subsequent admin-gated `invoke-*` target fails with a signing error, not an auth error — because the CLI can't find a signer for `ADMIN`, not because the contract rejected the call.
+- **Re-running `stellar keys generate <name> --fund` on an existing identity name is a no-op for the keypair** but still calls Friendbot again, which counts against the rate limit below. Use `stellar keys address <name>` to check if an identity already exists before regenerating.
+
+## Friendbot Rate Limits
+
+- The pinned Futurenet Friendbot (`https://friendbot-futurenet.stellar.org`) rate-limits funding requests **per account and per source IP**, not just per account. Funding several identities back-to-back from the same CI runner or shared network can trip the IP-level limit even though each individual account has only been funded once.
+- A rate-limited Friendbot call returns an HTTP error (commonly 400/429) and the CLI surfaces this as a generic funding failure — it does **not** retry automatically. If `stellar keys generate ... --fund` fails, wait before retrying rather than looping the command, which only adds more rejected requests against the same limit window.
+- Funding is idempotent per account: if an identity is already funded, a repeated `--fund` call is unnecessary. Check balance first with `stellar keys address <name>` + a balance query before re-funding.
+
+## Common RPC Errors Linked From the Smoke Script
+
+`scripts/futurenet_smoke_test.sh` surfaces these failure modes; use this table to map its error output to the fix:
+
+| Smoke script message | Likely cause | Fix |
+|---|---|---|
+| `connection refused` / timeout on RPC calls | `FUTURENET_RPC_URL` points at a stale or unreachable endpoint | Confirm you're using the pinned endpoint (`https://rpc-futurenet.stellar.org`); only override it with a known-compatible service |
+| `tx submission failed: txBadSeq` | The source account's sequence number is stale (e.g. a prior invoke partially submitted) | Re-fetch the account with `stellar keys address <name>` / re-run the smoke script; do not manually bump sequence numbers |
+| `signing key not found for <address>` | `ADMIN` or `SOURCE` resolves to an address with no local identity (see Auth Identity Gotchas above) | Verify `stellar keys address $SOURCE` matches the address you expect, and that `ADMIN` was set from a local identity, not pasted from elsewhere |
+| `account not found` from Friendbot or RPC | The identity was generated but never successfully funded, or funding silently failed under the Friendbot rate limit | Re-check with `stellar keys address <name>`, then retry funding after waiting out the rate-limit window |
+
 ## Step 1 — Faucet: fund your Futurenet account
 
 ```bash
@@ -101,6 +124,67 @@ The equivalent pinned Friendbot endpoint is `https://friendbot-futurenet.stellar
 
 **Expected outcome:** Account exists on Futurenet with enough XLM to cover deploy + invoke fees.
 
+### Faucet rate limits and workarounds
+
+Futurenet Friendbot rate-limits funding per account, per IP, and per time
+window. When the limit is hit, `stellar keys generate ... --fund` or
+`stellar keys fund ...` fails with `429`, `too many requests`, `rate limit
+exceeded`, or a friendbot/funding error. The key itself was still created
+locally — only the funding leg failed.
+
+Work through these workarounds in order:
+
+1. **Reuse an already-funded identity.** You do not need a fresh key for every
+   session. A cheap read against any deployed Futurenet contract proves the
+   account is funded:
+
+   ```bash
+   export CONTRACT_ID=$(cat deployments/futurenet.json | python3 -c "import sys,json; print(json.load(sys.stdin)['contract_id'])")
+   stellar contract invoke --id $CONTRACT_ID --source-account contributor \
+     --network futurenet -- get_stats
+   # Expected: {"total":0,"verified":0} — the account paid no fee, so it is funded
+   ```
+
+   If you have no deployment yet, skip to Step 3 with the existing identity; a
+   successful deploy is the same proof.
+
+2. **Wait, then retry with exponential backoff.** Avoid tight retry loops: they
+   extend the rate-limit window. Use increasing delays and stop as soon as one
+   attempt succeeds:
+
+   ```bash
+   for delay in 30 60 120 240; do
+     if stellar keys fund contributor --network futurenet; then
+       echo "Funded contributor after ${delay}s backoff"
+       break
+     fi
+     echo "Friendbot rate-limited; retrying in ${delay}s"
+     sleep "$delay"
+   done
+   ```
+
+3. **Generate the key first, fund it separately.** Splitting the two operations
+   makes the failure explicit and lets you retry funding without regenerating
+   (and losing) the key:
+
+   ```bash
+   stellar keys generate contributor --network futurenet
+   stellar keys fund contributor --network futurenet
+   ```
+
+4. **Fall back to testnet** if Futurenet funding stays throttled. Testnet has a
+   separate Friendbot quota:
+
+   ```bash
+   stellar keys fund contributor --network testnet
+   NETWORK=testnet SOURCE=contributor ./scripts/deploy.sh
+   ```
+
+`scripts/futurenet_smoke_test.sh` recognises these same error strings during
+the deploy phase and prints the remediation above instead of an opaque deploy
+failure. See [DEPLOYMENT.md § Futurenet smoke test](DEPLOYMENT.md#futurenet-smoke-test).
+
+---
 *No on-chain contract event at this step (account funding is a Horizon operation, not a contract event).*
 
 ## Step 2 — Build the contract
@@ -157,4 +241,172 @@ stellar contract invoke   --id $CONTRACT_ID   --source-account contributor   --n
 Or use the Make target:
 
 ```bash
+make invoke-register \
+  CONTRACT_ID=$CONTRACT_ID \
+  GITHUB_USER=$GITHUB_USER \
+  STELLAR_ADDR=$STELLAR_ADDR \
+  SOURCE=contributor \
+  NETWORK=futurenet
+```
+
+**Expected on-chain event:** `RegisteredEvent`
+
+| Field | Value |
+|-------|-------|
+| Topic symbol | `registered_event` |
+| `github_username` | your username |
+| `stellar_address` | your G-address |
+| `timestamp` | ledger close time (Unix seconds) |
+
+Post-register check:
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source-account contributor \
+  --network futurenet \
+  -- get_address --github-username $GITHUB_USER
+# Expected: {"stellar_address":"G...","verified":false,"timestamp":<n>}
+```
+
+---
+
+## Step 5 — Verify (admin marks contributor as verified)
+
+> In a Wave context, the admin or a Verifier-role key performs this step after confirming your
+> GitHub identity off-chain. For local Futurenet testing, use the same identity as admin.
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source-account contributor \
+  --network futurenet \
+  --send=yes \
+  -- verify \
+  --github-username $GITHUB_USER
+```
+
+Or use the Make target:
+
+```bash
+make invoke-verify \
+  CONTRACT_ID=$CONTRACT_ID \
+  GITHUB_USER=$GITHUB_USER \
+  SOURCE=contributor \
+  NETWORK=futurenet
+```
+
+**Expected on-chain event:** `VerifiedEvent`
+
+| Field | Value |
+|-------|-------|
+| Topic symbol | `verified_event` |
+| `github_username` | your username |
+| `stellar_address` | your G-address |
+| `timestamp` | ledger close time (Unix seconds) |
+
+Post-verify check:
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source-account contributor \
+  --network futurenet \
+  -- get_address --github-username $GITHUB_USER
+# Expected: {"stellar_address":"G...","verified":true,"timestamp":<n>}
+```
+
+---
+
+## Event summary
+
+| Step | Action | Event emitted | Topic symbol |
+|------|--------|---------------|--------------|
+| 1 | Faucet fund | — (Horizon op) | — |
+| 2 | Build | — | — |
+| 3 | Deploy + initialize | — | — |
+| 4 | Register | `RegisteredEvent` | `registered_event` |
+| 5 | Verify | `VerifiedEvent` | `verified_event` |
+
+Indexers and dashboards should subscribe to `registered_event` and `verified_event` topic
+symbols via the Stellar RPC `getEvents` endpoint. See [EVENT_INDEXING.md](EVENT_INDEXING.md)
+for filter patterns and field layouts.
+
+---
+
+## Makefile targets reference
+
+| Target | Description |
+|--------|-------------|
+| `make build` | Build optimised WASM |
+| `make deploy-testnet` | Deploy to testnet (same flow for futurenet with `NETWORK=futurenet`) |
+| `make invoke-register` | Register a GitHub username |
+| `make invoke-lookup` | Read-only address lookup |
+| `make invoke-verify` | Verify a contributor (admin or Verifier role) |
+| `make invoke-stats` | Read registry statistics |
+| `make futurenet-smoke` | Deploy + run the Futurenet smoke checks (`ADMIN=G...`) |
+
+---
+
+## Troubleshooting
+
+### `NotInitialized` (error code 2)
+
+The contract was deployed but `initialize(admin)` was not called. Run:
+
+```bash
+make invoke-init CONTRACT_ID=$CONTRACT_ID ADMIN=$ADMIN SOURCE=contributor NETWORK=futurenet
+```
+
+### `NotAuthorized` (error code 3) on `verify`
+
+The signing identity does not have admin or Verifier role. For local Futurenet testing,
+ensure `SOURCE` is the same identity used as `ADMIN` during `initialize`.
+
+### `AlreadyRegistered` on `register`
+
+The username is already mapped to an address. Read the current record:
+
+```bash
+stellar contract invoke --id $CONTRACT_ID --source-account contributor \
+  --network futurenet -- get_address --github-username $GITHUB_USER
+```
+
+If the address matches yours, registration succeeded in an earlier session. Proceed to Step 5.
+
+### `wasm32v1-none` target not installed
+
+```bash
+rustup target add wasm32v1-none
+```
+
+### Account not funded / insufficient fee / Friendbot rate limit
+
+If the error mentions `429`, `too many requests`, `rate limit`, or `friendbot`,
+this is a faucet throttle, not a contract bug. Reuse an already-funded identity
+or back off and retry as described in
+[Faucet rate limits and workarounds](#faucet-rate-limits-and-workarounds).
+
+Otherwise, fund the identity explicitly:
+
+```bash
+stellar keys fund contributor --network futurenet
+```
+
+### Futurenet node unavailable
+
+Futurenet is a pre-release network; node availability may be intermittent. Check the
+[Stellar Developer Discord](https://discord.gg/stellardev) `#futurenet` channel for status.
+Use testnet (`NETWORK=testnet`) as a stable fallback.
+
+---
+
+## No mainnet keys required
+
+Every step above runs on `NETWORK=futurenet`. The Futurenet Friendbot (`--fund`) provides
+XLM at no cost. No mainnet keys, no real XLM, and no production contract IDs are needed
+for the full onboarding path.
+
+To graduate to testnet, replace `NETWORK=futurenet` with `NETWORK=testnet` and re-run
+from Step 1. Testnet also provides free XLM via Friendbot.
 make invoke-register   CONTRACT_ID=$CONTRACT_ID   GITHUB_USER=$GITHUB_USER   STELLAR_ADDR=$STELLAR_ADDR

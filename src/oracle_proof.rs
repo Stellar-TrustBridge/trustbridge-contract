@@ -192,14 +192,26 @@ fn is_zero_signature(sig: &BytesN<64>) -> bool {
     true
 }
 
-/// Returns `true` if `sig` is a plausible Ed25519 signature encoding.
-///
-/// Ed25519 signatures are 64 bytes; a signature whose high bit of the last
-/// byte is set is not a canonical scalar encoding and is rejected as a
-/// malformed signature rather than being handed to the host crypto layer.
+/// Returns `true` when the S half of the Ed25519 signature is canonically
+/// encoded (`S < L`). This rejects high-S/malleable presentations before the
+/// host verifier is called. The R point encoding is left to the crypto host.
 fn is_valid_signature_shape(sig: &BytesN<64>) -> bool {
     let bytes = sig.to_array();
-    bytes[63] & 0xE0 == 0
+    const L: [u8; 32] = [
+        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde,
+        0xf9, 0xde, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+    ];
+    let mut i = 32;
+    while i > 0 {
+        i -= 1;
+        if bytes[32 + i] < L[i] {
+            return true;
+        }
+        if bytes[32 + i] > L[i] {
+            return false;
+        }
+    }
+    false
 }
 
 /// Verifies an [`OracleProof`] and, on success, records `subject` as
@@ -434,6 +446,33 @@ mod tests {
                 verify_with_proof(&env, &proof),
                 Err(ContractError::OracleProofBadSignature)
             );
+        });
+    }
+
+    #[test]
+    fn noncanonical_high_s_encoding_is_rejected_before_host_verification() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+            let mut high_s = VALID_SIG;
+            // S == the Ed25519 group order is noncanonical (canonical is S < L).
+            high_s[32..].copy_from_slice(&[
+                0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2,
+                0xde, 0xf9, 0xde, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+            ]);
+            let proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
+                message: Bytes::from_array(&env, &MESSAGE),
+                signature: BytesN::from_array(&env, &high_s),
+                expires_at: 0,
+            };
+            assert_eq!(verify_with_proof(&env, &proof), Err(ContractError::OracleProofBadSignature));
         });
     }
 

@@ -164,7 +164,7 @@ fn test_integration_guardian_pause_is_allowed_for_admin_or_guardian() {
 
 #[test]
 fn test_integration_emergency_pause_blocks_verify_and_clears() {
-    let (env, _admin, user1, _user2, contract_id) = setup_test_env();
+    let (env, admin, user1, user2, contract_id) = setup_test_env();
     let guardian = Address::generate(&env);
 
     env.mock_all_auths();
@@ -206,8 +206,48 @@ fn test_integration_emergency_pause_blocks_verify_and_clears() {
         TrustBridgeContract::clear_emergency_pause(env.clone()).unwrap();
         assert!(!TrustBridgeContract::is_emergency_paused(env.clone()));
         assert_eq!(
-            TrustBridgeContract::verify(env.clone(), user1.clone(), s(&env, "octocat")),
+            TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "octocat")),
             Ok(())
+        );
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "newuser"),
+            user2.clone(),
+            Vec::new(&env),
+        )
+        .unwrap();
+        assert_eq!(
+            TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "newuser")),
+            Ok(())
+        );
+    });
+}
+
+#[test]
+fn test_integration_bot_status_read() {
+    let (env, admin, user1, _user2, contract_id) = setup_test_env();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::get_bot_status(env.clone(), s(&env, "missing")),
+            Err(ContractError::NotRegistered)
+        );
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "ci-bot"),
+            user1.clone(),
+            Vec::new(&env),
+        )
+        .unwrap();
+        assert_eq!(
+            TrustBridgeContract::get_bot_status(env.clone(), s(&env, "ci-bot")),
+            Ok(false)
+        );
+        TrustBridgeContract::set_bot_status(env.clone(), admin.clone(), s(&env, "ci-bot"), true)
+            .unwrap();
+        assert_eq!(
+            TrustBridgeContract::get_bot_status(env.clone(), s(&env, "ci-bot")),
+            Ok(true)
         );
     });
 }
@@ -4255,6 +4295,7 @@ fn test_batch_register_at_max_write_batch_ceiling() {
                 "registered address mismatch"
             );
         }
+
         let stats = TrustBridgeContract::get_stats(env.clone());
         assert_eq!(stats.total, MAX_WRITE_BATCH);
         assert_eq!(stats.verified, 0);
@@ -4343,6 +4384,54 @@ fn test_batch_verify_at_ceiling_exceeds_verify_rate_limit_writes_nothing() {
         })
         .unwrap();
     assert_eq!(summary.successful, MAX_WRITE_BATCH);
+}
+
+#[test]
+#[ignore = "opt-in register/verify soak; run with make soak-register-verify"]
+fn test_soak_register_verify_pairs() {
+    let iterations = std::env::var("REGISTER_VERIFY_SOAK_ITERATIONS")
+        .unwrap_or_else(|_| "100".to_owned())
+        .parse::<u32>()
+        .expect("REGISTER_VERIFY_SOAK_ITERATIONS must be a positive integer");
+    assert!(iterations > 0, "soak iteration count must be positive");
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+    let mut max_register_cpu = 0;
+    let mut max_register_mem = 0;
+    let mut max_verify_cpu = 0;
+    let mut max_verify_mem = 0;
+
+    for i in 0..iterations {
+        let username = s(&env, &std::format!("soak-{i:05}"));
+        let user = Address::generate(&env);
+        env.mock_all_auths();
+        env.cost_estimate().budget().reset_default();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(env.clone(), username.clone(), user, Vec::new(&env))
+                .unwrap();
+        });
+        let budget = env.cost_estimate().budget();
+        max_register_cpu = max_register_cpu.max(budget.cpu_instruction_cost());
+        max_register_mem = max_register_mem.max(budget.memory_bytes_cost());
+
+        env.cost_estimate().budget().reset_default();
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), username).unwrap();
+        });
+        let budget = env.cost_estimate().budget();
+        max_verify_cpu = max_verify_cpu.max(budget.cpu_instruction_cost());
+        max_verify_mem = max_verify_mem.max(budget.memory_bytes_cost());
+    }
+
+    env.as_contract(&contract_id, || {
+        let stats = TrustBridgeContract::get_stats(env.clone());
+        assert_eq!(stats.total, iterations);
+        assert_eq!(stats.verified, iterations);
+    });
+    std::println!(
+        "register_verify_soak,iterations={iterations},register_max_cpu={max_register_cpu},register_max_mem={max_register_mem},verify_max_cpu={max_verify_cpu},verify_max_mem={max_verify_mem}"
+    );
+    assert!(max_register_cpu < 25_000_000 && max_verify_cpu < 25_000_000);
+    assert!(max_register_mem < 3_000_000 && max_verify_mem < 3_000_000);
 }
 
 /// Assert ContractError::InvalidBatchSize when attempting oversized bulk register helper path.

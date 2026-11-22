@@ -14,6 +14,7 @@
 //! - `src/storage.rs` — Underlying index implementation
 
 #![cfg(test)]
+extern crate alloc;
 
 use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
 use trustbridge_contract::TrustBridgeContract;
@@ -677,6 +678,92 @@ fn test_parity_return_type_get_public_paginated() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// § Merkle Root Parity Across Admin / Public Pages (Issue #797)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// For the *same* cursor/limit window, `get_registered_paginated` (admin) and
+/// `get_public_paginated` must produce the identical `merkle_root`. The root
+/// is computed over the page's records, not over which API fetched them, so
+/// divergence would mean the two APIs disagree about what's actually in the
+/// registry for that window — breaking any Wave audit that cross-checks an
+/// admin export against the public export.
+#[test]
+fn test_parity_merkle_root_identical_same_window() {
+    let (env, admin, contract_id) = setup();
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+    let user3 = Address::generate(&env);
+
+    register_user(&env, &contract_id, "alice", &user1);
+    register_user(&env, &contract_id, "bob", &user2);
+    register_user(&env, &contract_id, "carol", &user3);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let admin_page =
+            TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
+        let public_page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
+
+        assert_eq!(
+            admin_page.merkle_root, public_page.merkle_root,
+            "admin and public pages over the identical window must share merkle_root"
+        );
+        assert_eq!(admin_page.total, public_page.total);
+        assert_eq!(admin_page.has_more, public_page.has_more);
+    });
+
+    // Same assertion holds across a second, non-first page.
+    env.as_contract(&contract_id, || {
+        let admin_page1 =
+            TrustBridgeContract::get_registered_paginated(env.clone(), None, 2).unwrap();
+        let public_page1 =
+            TrustBridgeContract::get_public_paginated(env.clone(), None, 2).unwrap();
+        assert_eq!(admin_page1.merkle_root, public_page1.merkle_root);
+        assert_eq!(admin_page1.next_cursor, public_page1.next_cursor);
+
+        let cursor = admin_page1.next_cursor.clone();
+        let admin_page2 =
+            TrustBridgeContract::get_registered_paginated(env.clone(), cursor.clone(), 2).unwrap();
+        let public_page2 =
+            TrustBridgeContract::get_public_paginated(env.clone(), cursor, 2).unwrap();
+        assert_eq!(
+            admin_page2.merkle_root, public_page2.merkle_root,
+            "second-page merkle_root must also be identical across APIs"
+        );
+    });
+}
+
+/// A removal mid-registry must shift *both* APIs' merkle_root identically —
+/// the roots diverging after a removal would mean one API's index skipped
+/// the hole while the other didn't (Issue #52-style divergence).
+#[test]
+fn test_parity_merkle_root_identical_after_removal() {
+    let (env, admin, contract_id) = setup();
+    let user1 = Address::generate(&env);
+    let user2 = Address::generate(&env);
+    let user3 = Address::generate(&env);
+
+    register_user(&env, &contract_id, "alice", &user1);
+    register_user(&env, &contract_id, "bob", &user2);
+    register_user(&env, &contract_id, "carol", &user3);
+    remove_user(&env, &contract_id, &admin, "bob");
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let admin_page =
+            TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
+        let public_page = TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap();
+
+        assert_eq!(
+            admin_page.merkle_root, public_page.merkle_root,
+            "merkle_root must stay identical across APIs after a middle removal"
+        );
+        assert_eq!(admin_page.records.len(), 2);
+        assert_eq!(public_page.records.len(), 2);
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // § Coverage Summary
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -691,6 +778,132 @@ fn test_parity_return_type_get_public_paginated() {
 /// - Authorization differences
 /// - Pause behavior (Issue #294)
 /// - Return type differences
+// ═══════════════════════════════════════════════════════════════════════════
+// § Randomized Cursor Walk Soak (fuzz-like)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Walks `get_registered_paginated` (admin) and `get_public_paginated`
+// (public) over the same seeded registry using randomized page limits, and
+// asserts the full ordered sequence of usernames collected by each API is
+// identical. Cursors are documented as interchangeable between the two APIs
+// (see `get_public_paginated` doc comment); this soak exercises that claim
+// under varied limits rather than a single fixed page size.
+//
+// Run locally with more iterations via:
+//   SOAK_ITERATIONS=20 cargo test test_parity_soak_random_cursor_walk -- --nocapture
+// (falls back to a fixed default of 6 seeded runs if unset, so default `cargo
+// test` stays fast and deterministic in CI.)
+
+/// Minimal deterministic xorshift PRNG — no external fuzz/rand dependency,
+/// just enough to vary page limits across soak iterations reproducibly.
+struct Xorshift32(u32);
+
+impl Xorshift32 {
+    fn new(seed: u32) -> Self {
+        Xorshift32(if seed == 0 { 0xdead_beef } else { seed })
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.0 = x;
+        x
+    }
+
+    /// Random limit in `[min, max]` inclusive.
+    fn range(&mut self, min: u32, max: u32) -> u32 {
+        min + (self.next_u32() % (max - min + 1))
+    }
+}
+
+/// Walk one API end-to-end with randomized per-call limits, returning the
+/// full ordered list of usernames collected across all pages.
+fn walk_registered_paginated(env: &Env, contract_id: &Address, rng: &mut Xorshift32) -> Vec<String> {
+    let mut all = Vec::new(env);
+    let mut cursor = None;
+    loop {
+        let limit = rng.range(1, 7);
+        let page = env.as_contract(contract_id, || {
+            TrustBridgeContract::get_registered_paginated(env.clone(), cursor.clone(), limit)
+                .unwrap()
+        });
+        for (username, _record) in page.records.iter() {
+            all.push_back(username.clone());
+        }
+        if !page.has_more {
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+    all
+}
+
+fn walk_public_paginated(env: &Env, contract_id: &Address, rng: &mut Xorshift32) -> Vec<String> {
+    let mut all = Vec::new(env);
+    let mut cursor = None;
+    loop {
+        let limit = rng.range(1, 7);
+        let page = env.as_contract(contract_id, || {
+            TrustBridgeContract::get_public_paginated(env.clone(), cursor.clone(), limit).unwrap()
+        });
+        for (username, _record) in page.records.iter() {
+            all.push_back(username.clone());
+        }
+        if !page.has_more {
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+    all
+}
+
+/// Fuzz-like soak: seeded registry, randomized cursor walk, parity assertion
+/// repeated across multiple seeds so a single lucky limit sequence can't mask
+/// a parity bug (Wave export patterns vary limit sizes unpredictably).
+#[test]
+fn test_parity_soak_random_cursor_walk() {
+    let (env, admin, contract_id) = setup();
+
+    const REGISTRY_SIZE: usize = 23; // deliberately not a multiple of common limits
+    for i in 0..REGISTRY_SIZE {
+        let user = Address::generate(&env);
+        register_user(&env, &contract_id, &alloc::format!("soak_user_{i}"), &user);
+    }
+
+    // Admin-only removal mid-registry to also exercise tombstone handling
+    // under randomized limits, matching the "middle removal" parity scenario
+    // but now combined with varied page sizes.
+    remove_user(&env, &contract_id, &admin, "soak_user_7");
+
+    let iterations: u32 = option_env!("SOAK_ITERATIONS")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(6);
+
+    for seed in 1..=iterations {
+        let mut rng_admin = Xorshift32::new(seed.wrapping_mul(2_654_435_761));
+        let mut rng_public = Xorshift32::new(seed.wrapping_mul(2_654_435_761));
+
+        let admin_result = walk_registered_paginated(&env, &contract_id, &mut rng_admin);
+        let public_result = walk_public_paginated(&env, &contract_id, &mut rng_public);
+
+        assert_eq!(
+            admin_result.len(),
+            public_result.len(),
+            "seed {seed}: admin and public walks collected different counts"
+        );
+        assert_eq!(
+            admin_result, public_result,
+            "seed {seed}: admin and public cursor walks diverged in order/content"
+        );
+        // Removed user must never surface in either walk.
+        for name in admin_result.iter() {
+            assert_ne!(name, s(&env, "soak_user_7"));
+        }
+    }
+}
+
 #[test]
 fn test_parity_coverage_complete() {
     // This is a documentation test. If it compiles and runs, all parity

@@ -20,6 +20,7 @@ USERNAMES   ?=
 FUZZ_SEEDS  ?=
 FUZZ_RUNS   ?= 1000
 CURSOR_SOAK_ITERATIONS ?= 512
+REGISTER_VERIFY_SOAK_ITERATIONS ?= 100
 BENCH_OUT   ?= bench-results.txt
 NORM_BENCH_OUT ?= bench-username-normalization.txt
 REGISTER_BUDGET_CPU_MAX ?= 25000000
@@ -28,7 +29,11 @@ BINDINGS_DIR ?= bindings/typescript
 PKG_MANAGER  ?= pnpm
 EXPORT_FILE ?= registry-export-$(NETWORK).json
 ADMIN_SOURCE ?=
+REPORT_FILE ?=
 WASM_SIZE_LIMIT ?= 204800
+
+.PHONY: help build build-legacy test fuzz bench bench-export bench-username bench-double-verify bench-register-budget fmt lint docs docs-check check ci clean \
+        futurenet-smoke check-export-layout \
 # Set to 1 (as CI does) to fail `wasm-hash-pin` while wasm-hash.pin is still PLACEHOLDER.
 WASM_HASH_STRICT ?= 0
 FUTURENET_RPC_URL ?= https://rpc-futurenet.stellar.org
@@ -36,7 +41,7 @@ FUTURENET_FRIENDBOT_URL ?= https://friendbot-futurenet.stellar.org
 FUTURENET_IDENTITY ?= $(SOURCE)
 FUTURENET_DRY_RUN ?= false
 
-.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser soak-cursor storage-keys-check storage-footprint-check storage-rent-check storage-rent-estimator storage-rent-estimator-golden bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-batch-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
+.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser soak-cursor soak-register-verify storage-keys-check storage-footprint-check storage-rent-check storage-rent-estimator storage-rent-estimator-golden bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-batch-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
         invoke-verify invoke-revoke-verification invoke-get-all-registered invoke-export-paginated \
@@ -92,6 +97,9 @@ fuzz-parser: ## Fuzz export cursor parsing (install cargo-fuzz + nightly; FUZZ_R
 
 soak-cursor: ## Run the deterministic export_cursor soak property test (CURSOR_SOAK_ITERATIONS=20000 for a long local soak)
 	CURSOR_SOAK_ITERATIONS="$(CURSOR_SOAK_ITERATIONS)" cargo test --test cursor_pagination soak -- --nocapture
+
+soak-register-verify: ## Soak repeated register/verify pairs (REGISTER_VERIFY_SOAK_ITERATIONS=1000 for Wave rehearsal)
+	REGISTER_VERIFY_SOAK_ITERATIONS="$(REGISTER_VERIFY_SOAK_ITERATIONS)" cargo test --test integration test_soak_register_verify_pairs -- --ignored --nocapture --test-threads=1
 
 storage-keys-check: ## Fail if a storage.rs key is missing from docs/STORAGE_KEYS.md
 	./scripts/check_storage_keys.sh
@@ -257,7 +265,10 @@ subgraph-parity: ## Check Graph schema/entity coverage, waivers, and the EVENT_I
 event-topics: ## Verify the indexer's topic table matches src/events.rs (Issue #399)
 	./scripts/check_event_topics.sh
 
-check: fmt lint error-codes event-topics subgraph-parity abi-check test build docs-check wasm-size ## Run full local quality gate
+event-topics-message-test: ## Pin the collision failure message format (Issue #794)
+	bash scripts/test_check_event_topics_message.sh
+
+check: fmt lint error-codes event-topics event-topics-message-test subgraph-parity abi-check test build docs-check wasm-size ## Run full local quality gate
 
 wasm-hash-pin: build ## Verify release WASM hash matches wasm-hash.pin (mirrors CI hash gate)
 	@if [ -f $(WASM_V1) ]; then WASM=$(WASM_V1); elif [ -f $(WASM_LEGACY) ]; then WASM=$(WASM_LEGACY); else echo "ERROR: No WASM artifact found. Run 'make build' first."; exit 1; fi; \
@@ -316,6 +327,12 @@ deploy-mainnet: build ## Deploy to Stellar Mainnet (requires explicit ADMIN and 
 	@if [ -z "$(ADMIN)" ]; then echo "Set ADMIN to the G-address of the contract admin."; exit 1; fi
 	@if [ "$(CONFIRM_MAINNET)" != "yes" ]; then echo "ERROR: CONFIRM_MAINNET=yes is required for mainnet deployment to prevent accidental mainnet deploys."; exit 1; fi
 	NETWORK=mainnet ADMIN=$(ADMIN) ./scripts/deploy.sh
+
+futurenet-smoke: ## Deploy + smoke-check a fresh Futurenet instance (ADMIN required)
+	@if [ -z "$(ADMIN)" ]; then \
+		echo "ERROR: set ADMIN to a funded Futurenet G-address."; exit 1; \
+	fi
+	ADMIN=$(ADMIN) SOURCE=$(SOURCE) NETWORK=futurenet ./scripts/futurenet_smoke_test.sh
 
 require-contract-id:
 	@if [ -z "$(CONTRACT_ID)" ]; then \
@@ -609,6 +626,14 @@ ttl-keeper: require-contract-id ## Extend TTL for all registry records — see d
 export-registry: require-contract-id ## Export full registry to JSON (admin) — see docs/DEPLOYMENT.md#registry-export--import (SOURCE=admin, CONTRACT_ID, EXPORT_FILE)
 	CONTRACT_ID=$(CONTRACT_ID) SOURCE=$(SOURCE) NETWORK=$(NETWORK) OUTPUT_FILE=$(EXPORT_FILE) ./scripts/export_registry.sh
 
+check-export-layout: ## Verify an export JSON matches the v1 layout snapshot (FILE=...)
+	@if [ -z "$(FILE)" ]; then \
+		echo "ERROR: set FILE=<export.json> to check the export layout."; exit 1; \
+	fi
+	./scripts/check_export_layout.sh $(FILE)
+
+validate-registry: require-contract-id ## Validate a registry export JSON against live state, no writes (CONTRACT_ID, EXPORT_FILE, ADMIN_SOURCE=admin, REPORT_FILE=optional JSON report)
+	CONTRACT_ID=$(CONTRACT_ID) SOURCE=$(SOURCE) ADMIN_SOURCE=$(ADMIN_SOURCE) REPORT_FILE=$(REPORT_FILE) NETWORK=$(NETWORK) ./scripts/validate_registry.sh $(EXPORT_FILE)
 validate-registry: require-contract-id ## Validate a registry export JSON against live state, no writes (CONTRACT_ID, EXPORT_FILE, ADMIN_SOURCE=admin for full diff)
 	CONTRACT_ID=$(CONTRACT_ID) SOURCE=$(SOURCE) ADMIN_SOURCE=$(ADMIN_SOURCE) NETWORK=$(NETWORK) ./scripts/validate_registry.sh $(EXPORT_FILE)
 

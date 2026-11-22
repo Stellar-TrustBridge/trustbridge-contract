@@ -17,6 +17,9 @@ set_role,admin,
 remove_role,admin,
 adopt_network_tag,admin,
 set_cooldown,admin,
+set_attestation_required,admin,
+set_attestation_required,random,NotAuthorized
+get_attestation_required,random,
 attest_upgrade,admin,
 clear_attestation,admin,
 upgrade,admin,
@@ -63,6 +66,7 @@ revoke_verification,verifier,NotAuthorized
 set_bot_status,admin,
 set_bot_status,user,
 set_bot_status,random,NotAuthorized
+get_bot_status,random,
 rename,user,
 set_rotation_delay,admin,
 request_address_rotation,user,
