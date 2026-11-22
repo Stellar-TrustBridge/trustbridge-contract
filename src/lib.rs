@@ -599,6 +599,9 @@ impl TrustBridgeContract {
     pub fn set_role(env: Env, target: Address, role: Role) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
+        if is_zero_address(&env, &target) {
+            return Err(ContractError::ZeroAddress);
+        }
 
         let admin = get_admin(&env)?;
         admin.require_auth();
@@ -886,6 +889,9 @@ impl TrustBridgeContract {
     ) -> Result<(), ContractError> {
         require_initialized(&env)?;
         require_not_paused(&env)?;
+        if is_zero_address(&env, &target) {
+            return Err(ContractError::ZeroAddress);
+        }
 
         let admin = get_admin(&env)?;
         admin.require_auth();

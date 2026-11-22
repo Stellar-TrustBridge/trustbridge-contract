@@ -291,6 +291,35 @@ cause. A cost increase that cannot be explained is a bug.
 
 ---
 
+## Recalibrating after protocol or SDK upgrades
+
+When Soroban protocol versions, `soroban-sdk` in `Cargo.toml`, or Stellar CLI
+versions change, host metering costs can shift across all operations even when
+contract logic is unchanged. Follow this process in the upgrade PR so Wave CI
+does not false-fail on stale baselines:
+
+1. **Observe deltas first:** Run `make bench-budget-ci` before updating
+   baselines to see which operations exceed the 15% regression threshold or
+   approach hard caps (25M CPU / 3M mem).
+2. **Run protocol rehearsal (if applicable):** Run `make test-rehearsal`
+   (`test_protocol_upgrade_rehearsal --features wasm-test`) to verify upgrade
+   compatibility.
+3. **Regenerate baselines:** Run `make bench-update-samples`. This executes
+   `test_bench_username_case_normalization`, `test_bench_export_cpu_cost`,
+   `test_bench_double_verify_rejection`, and `test_report_register_budget_samples`
+   with `--nocapture --test-threads=1` and rewrites `ci/bench-samples.csv`,
+   including the `# LAST UPDATED: <date> (soroban-sdk <version>, stable toolchain)`
+   header.
+4. **Review tables & caps:** Inspect `git diff ci/bench-samples.csv` and check
+   whether any hard caps, recommended page sizes (`DEFAULT_PAGE_LIMIT` /
+   `MAX_PAGE_LIMIT`), or `MAX_WRITE_BATCH` in this document need adjustment.
+5. **PR expectations:** Commit `ci/bench-samples.csv` (and any updated tables in
+   `docs/BENCHMARK_BUDGETS.md`) in the same upgrade PR, and include a
+   before/after cost table noting the old and new protocol/`soroban-sdk`
+   versions.
+
+---
+
 ## Storage footprint budget
 
 CPU/memory budgets above do not cover **bytes stored**, which drive rent.

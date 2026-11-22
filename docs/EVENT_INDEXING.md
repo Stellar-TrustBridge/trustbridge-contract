@@ -224,6 +224,7 @@ from `TOPIC_TABLE`, or if the Subgraph column disagrees with the README.
 | `batch_remove_executed_event` | `batch_remove_executed` | `batch` | waived |
 | `batch_remove_cancelled_event` | `batch_remove_cancelled` | `batch` | waived |
 | `audit_config_changed_event` | `audit_config_changed` | `audit` | waived |
+| `oracle_allowlist_rotated_event` | `oracle_allowlist_rotated` | `admin` | `OracleAllowlistRotatedEvent` |
 
 An event whose `topic[0]` does not match any row is written with
 `event_kind: "unknown"` and `category: "unclassified"`. This is intentional: an

@@ -427,3 +427,53 @@ fn test_remove_verifier_twice_fails_typed_without_second_event() {
     );
     assert_eq!(role_revoked_events(&f), 0);
 }
+
+#[test]
+fn test_set_role_rejects_zero_address() {
+    let f = setup();
+    let zero = Address::from_str(
+        &f.env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+
+    assert_eq!(
+        f.client.try_set_role(&zero, &Role::Verifier),
+        Err(Ok(ContractError::ZeroAddress))
+    );
+    assert_eq!(f.client.get_role(&zero), None);
+    assert_eq!(f.client.get_pending_role(&zero), None);
+}
+
+#[test]
+fn test_set_role_timelocked_rejects_zero_address() {
+    let f = setup();
+    f.client.set_role_delay(&60);
+    let zero = Address::from_str(
+        &f.env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+
+    assert_eq!(
+        f.client.try_set_role(&zero, &Role::Admin),
+        Err(Ok(ContractError::ZeroAddress))
+    );
+    assert_eq!(f.client.get_role(&zero), None);
+    assert_eq!(f.client.get_pending_role(&zero), None);
+}
+
+#[test]
+fn test_set_role_with_expiry_rejects_zero_address() {
+    let f = setup();
+    let zero = Address::from_str(
+        &f.env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+
+    assert_eq!(
+        f.client
+            .try_set_role_with_expiry(&zero, &Role::Verifier, &Some(NOW + 100)),
+        Err(Ok(ContractError::ZeroAddress))
+    );
+    assert_eq!(f.client.get_role(&zero), None);
+    assert_eq!(f.client.get_role_expiry(&zero), None);
+}

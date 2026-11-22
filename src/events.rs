@@ -217,6 +217,17 @@ pub struct RotationCancelledEvent {
     pub timestamp: u64,
 }
 
+/// Emitted when the oracle public key allowlist is rotated or replaced.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleAllowlistRotatedEvent {
+    #[topic]
+    pub admin: Address,
+    pub previous_count: u32,
+    pub new_count: u32,
+    pub timestamp: u64,
+}
+
 /// Emitted when a WASM hash is staged ahead of an upgrade.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]

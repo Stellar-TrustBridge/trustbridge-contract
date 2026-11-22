@@ -2312,6 +2312,17 @@ stellar contract invoke --id $ID --source deployer --network testnet \
   -- version
 ```
 
+#### Tuple vs. String Formatting
+
+On-chain storage and ABI entrypoints (`version()`, `get_version()`, `migrate()`)
+use the `(u32, u32, u32)` tuple (rendered as `[1, 1, 0]` by `stellar contract invoke`).
+For CLI operator logs and upgrade diagnostics, `src/version.rs` provides `Display`
+implementations:
+
+- `Version`: `"<major>.<minor>.<patch>"` (e.g. `"1.1.0"`).
+- `MigrationState`: `"not_required"`, `"pending"`, `"in_progress"`, `"completed"`, `"failed"`.
+- `CompatibilityInfo`: `"current=<v> target=<v> migration_required=<bool> breaking_changes=<bool> data_migration_required=<bool>"`.
+
 ---
 
 ### `is_compatible(major: u32, minor: u32, patch: u32) -> bool`
