@@ -99,6 +99,11 @@ uses the stable Rust image to match CI.
 ### Rust / Soroban
 
 - Match existing module structure (`lib.rs`, `storage.rs`, `events.rs`, `error.rs`)
+- Before filing a PR that touches `src/*.rs`, check the module-ownership
+  table and the "Shared helper functions" section in `ARCHITECTURE.md` —
+  it names which file owns each entrypoint and which cross-module helpers
+  a change must keep in sync, so changes land in the right module instead
+  of duplicating logic
 - Use `ContractError` for recoverable errors; `require_auth()` for auth failures
 - Add unit tests in `#[cfg(test)] mod test` within `lib.rs`
 - Keep functions focused; storage helpers belong in `storage.rs`
@@ -368,6 +373,7 @@ cargo install --locked cargo-fuzz
 | Target | Path | What it fuzzes |
 |---|---|---|
 | `export_cursor` | `fuzz/fuzz_targets/export_cursor.rs` | Paginated-export cursor parsing (`get_public_paginated`) |
+| `pending_reverify_page` | `fuzz/fuzz_targets/pending_reverify_page.rs` | Hostile `offset` / `limit` values for `get_pending_reverify` and its bounded storage scan |
 | `username_validate` | `fuzz/fuzz_targets/username_validate.rs` | `is_valid_github_username` — no-panic guarantee |
 | `github_username` | `fuzz/fuzz_targets/github_username.rs` | `is_valid_github_username` — non-ASCII rejection invariant |
 
@@ -376,6 +382,7 @@ cargo install --locked cargo-fuzz
 ```bash
 # Run the github_username target for 1 000 iterations (smoke test)
 cargo +nightly fuzz run github_username -- -max_total_time=10
+cargo +nightly fuzz run pending_reverify_page -- -max_total_time=10
 
 # Longer soak (10 million inputs)
 cargo +nightly fuzz run github_username -- -runs=10000000
@@ -387,6 +394,13 @@ The `github_username` target asserts two invariants on every input:
 2. **Non-ASCII rejection** — any byte ≥ 0x80 must cause the validator
    to return `false`.  This rules out homoglyph substitution via
    multi-byte UTF-8 (Cyrillic, Arabic, CJK, accented Latin, emoji).
+
+The `pending_reverify_page` target decodes arbitrary byte strings into
+32-bit offset and limit values. Limits over 100 must return
+`InvalidBatchSize`; all other values must return a bounded page without a
+panic. A zero limit exercises the documented default of 20, and offsets past
+the three-record fixture must return an empty page. No environment variables
+are required.
 
 ### Adding a new target
 
@@ -430,6 +444,47 @@ Undocumented exceptions are rejected in code review.
 - CI runs `cargo fmt --check` and `cargo test`.
 - Prefer fixing clippy warnings locally before opening a PR.
 - Any `#[allow(clippy::*)]` attribute should include a short rationale comment.
+
+### Intentional clippy allow inventory (Issue #696)
+
+Wave reviews enforce strict clippy compliance. Any `#[allow(clippy::*)]`
+suppression that is intentional and not a quick fix must be justified here so
+reviewers can verify intent and future contributors do not silently remove it.
+
+**Rules:**
+
+1. Add a row to the table below when you introduce a new `#[allow(clippy::*)]`
+   that you cannot or deliberately choose not to fix.
+2. The inline comment on the attribute and the table row must agree on the
+   reason. The table is the durable record; the inline comment is the
+   point-of-use reminder.
+3. Remove the row (and the attribute) when the suppression is no longer needed.
+   Stale rows are rejected in code review just like undocumented ones.
+4. Crate-level `#![allow(clippy::*)]` suppressions are banned. Use per-item
+   attributes only, so the scope is as narrow as possible.
+
+**Current intentional allowlist:**
+
+| File | Line (approx.) | Lint | Reason |
+|---|---|---|---|
+| _(none at this time)_ | — | — | — |
+
+**Example** — adding a new entry:
+
+```rust
+// src/batch.rs
+
+// clippy::too_many_arguments: this function mirrors the on-chain ABI exactly;
+// splitting it would require a builder struct that obscures the call surface
+// visible to off-chain tooling. Tracked: N/A (ABI-stable).
+#[allow(clippy::too_many_arguments)]
+pub fn batch_remove(...) { ... }
+```
+
+```markdown
+<!-- docs/CONTRIBUTING.md intentional allowlist row -->
+| `src/batch.rs` | ~42 | `clippy::too_many_arguments` | Mirrors on-chain ABI exactly; splitting requires a builder that obscures the ABI surface |
+```
 
 ---
 

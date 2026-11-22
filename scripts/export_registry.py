@@ -48,10 +48,11 @@ def main() -> int:
     output = Path(args.output or f"registry-export-{args.network}.json")
     client = TrustBridgeClient(args.contract, args.source, args.network)
     records = []
+    pages = []
     cursor = 0
     for _ in range(100_000):
         page = client.get_registered_page(cursor, args.page_limit)
-        records.extend(
+        page_records = [
             {
                 "github_username": record.github_username,
                 "stellar_address": record.stellar_address,
@@ -59,6 +60,14 @@ def main() -> int:
                 "registered_at": record.registered_at,
             }
             for record in page.records
+        ]
+        records.extend(page_records)
+        pages.append(
+            {
+                "cursor": cursor,
+                "merkle_root": page.merkle_root,
+                "records": page_records,
+            }
         )
         if not page.has_more or page.next_cursor is None:
             break
@@ -75,6 +84,7 @@ def main() -> int:
         "exported_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "count": len(records),
         "records": records,
+        "pages": pages,
     }
     if args.dry_run:
         digest = verify_export_attestation(records)

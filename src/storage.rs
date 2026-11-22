@@ -1414,6 +1414,9 @@ pub fn clear_pending_reverify(env: &Env, github_username: &String) {
 /// # Errors
 ///
 /// - [`ContractError::InvalidBatchSize`] if `limit > MAX_PAGE_LIMIT`.
+/// - Offsets are treated as an empty page once they reach the index length;
+///   the underlying index scan uses saturating end arithmetic so a hostile
+///   `u32::MAX` offset cannot wrap into an earlier page (Issue #757).
 pub fn get_pending_reverify_page(
     env: &Env,
     offset: u32,
@@ -2977,6 +2980,28 @@ mod pending_reverify_tests {
             assert!(!get_pending_reverify(&env, &octocat));
             assert!(removed, "first false write must have removed the key");
             assert!(!env.storage().persistent().has(&key));
+        });
+    }
+
+    /// Hostile page boundaries stay bounded: zero uses the default cap, an
+    /// offset beyond the index returns empty, and an oversized limit fails
+    /// before scanning (Issue #757).
+    #[test]
+    fn test_pending_reverify_page_hostile_offsets_and_limits() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        for username in ["alice", "bob", "carol"] {
+            register_flagged(&env, &contract_id, username, &Address::generate(&env));
+        }
+
+        env.as_contract(&contract_id, || {
+            let default_page = get_pending_reverify_page(&env, 0, 0).unwrap();
+            assert_eq!(default_page.len(), 3);
+            assert!(get_pending_reverify_page(&env, u32::MAX, 1).unwrap().is_empty());
+            assert_eq!(
+                get_pending_reverify_page(&env, 0, MAX_PAGE_LIMIT + 1),
+                Err(ContractError::InvalidBatchSize)
+            );
         });
     }
 }

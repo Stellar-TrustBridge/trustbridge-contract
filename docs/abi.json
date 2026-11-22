@@ -51,6 +51,10 @@
       "signature": "get_address_if_verified(github_username: String) -> Result<ContributorRecord, ContractError>"
     },
     {
+      "name": "get_bot_status",
+      "signature": "get_bot_status(github_username: String) -> Result<bool, ContractError>"
+    },
+    {
       "name": "remove",
       "signature": "remove(caller: Address, github_username: String) -> Result<(), ContractError>"
     },

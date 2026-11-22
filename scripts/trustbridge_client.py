@@ -147,6 +147,7 @@ class RegistryRecord:
 @dataclass(frozen=True)
 class RegistryPage:
     records: list[RegistryRecord]
+    merkle_root: object
     next_cursor: object | None
     total: int
     has_more: bool
@@ -249,6 +250,7 @@ class TrustBridgeClient:
         next_cursor = value.get("next_cursor")
         return RegistryPage(
             records=records,
+            merkle_root=value["merkle_root"],
             next_cursor=None if next_cursor is None else int(next_cursor),
             total=int(value["total"]),
             has_more=bool(value["has_more"]),
@@ -267,6 +269,7 @@ class TrustBridgeClient:
         next_cursor = value.get("next_cursor")
         return RegistryPage(
             records=records,
+            merkle_root=value["merkle_root"],
             next_cursor=None if next_cursor is None else next_cursor,
             total=int(value["total"]),
             has_more=bool(value["has_more"]),

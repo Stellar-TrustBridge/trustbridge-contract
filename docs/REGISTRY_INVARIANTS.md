@@ -84,6 +84,19 @@ compacts, re-registers the exact same names at new addresses, then asserts
 `get_stats().total`, `get_verified_count()`, the chunked index, and a full
 paginated walk all agree with the live record set (I10).
 
+### Admin/public merkle_root parity for the same window (Issue #797)
+
+`get_registered_paginated` (admin) and `get_public_paginated` both return an
+`ExportPage` with a `merkle_root` computed over `records` in page order (see
+`src/merkle.rs`). For the **same** `cursor`/`limit` window they must return
+the identical root — the root is a function of what's in the registry, not
+of which API read it. `test_parity_merkle_root_identical_same_window` and
+`test_parity_merkle_root_identical_after_removal` in
+`tests/pagination_parity.rs` assert this across first/second pages and
+across a middle removal. Divergence here means the two code paths disagree
+about page contents for the same window and breaks any Wave audit that
+cross-checks an admin export digest against the publicly-fetched page.
+
 ### Challenge-period operations preserve count invariants (Issue #214)
 
 The squatter-challenge flow (`start_challenge`, `cancel_challenge`,
@@ -274,6 +287,28 @@ P3 documents the "unregistered verify" edge case: the contract returns
 `ContractError::NotRegistered` before touching any counter, so a verify
 call on a non-existent username cannot inflate `verified_count`. This is
 covered by the property-fuzzing suite (I7) and confirmed by P3 and P6.
+
+### Pagination parity soak (randomized cursor walk)
+
+`tests/pagination_parity.rs::test_parity_soak_random_cursor_walk` seeds a
+23-record registry (deliberately not a multiple of common page sizes),
+removes one middle record, then walks both `get_registered_paginated`
+(admin) and `get_public_paginated` (public) end-to-end with a randomized page
+`limit` per call (1–7), re-seeded per iteration with a small xorshift32 PRNG
+— no external fuzz dependency required. It asserts the full ordered username
+sequence collected by both APIs is identical across all iterations, proving
+cursors stay interchangeable between the admin and public variants (per the
+`get_public_paginated` doc comment) under varied limit sequences, not just
+the fixed limits the other parity tests use.
+
+Run it locally with more iterations than the CI default of 6:
+
+```bash
+SOAK_ITERATIONS=50 cargo test --test pagination_parity test_parity_soak_random_cursor_walk -- --nocapture
+```
+
+Unset `SOAK_ITERATIONS` to fall back to 6 seeded runs, which keeps default
+`cargo test` fast and deterministic.
 
 ### Extending the proof suite
 

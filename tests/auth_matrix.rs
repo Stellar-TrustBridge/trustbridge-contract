@@ -327,6 +327,11 @@ fn plan(fx: &Fixture, op: &str, caller: &Address) -> Call {
         "set_verify_limit" => call("set_verify_limit", vec![env, 5u32.into_val(env)]),
         "adopt_network_tag" => call("adopt_network_tag", vec![env]),
         "set_cooldown" => call("set_cooldown", vec![env, 60u64.into_val(env)]),
+        "set_attestation_required" => call(
+            "set_attestation_required",
+            vec![env, c.into_val(env), true.into_val(env)],
+        ),
+        "get_attestation_required" => call("get_attestation_required", vec![env]),
         "attest_upgrade" => call(
             "attest_upgrade",
             vec![env, fx.hash(1).into_val(env), 10_000u64.into_val(env)],
@@ -452,6 +457,7 @@ fn plan(fx: &Fixture, op: &str, caller: &Address) -> Call {
                 true.into_val(env),
             ],
         ),
+        "get_bot_status" => call("get_bot_status", vec![env, octocat.into_val(env)]),
         "rename" => call(
             "rename",
             vec![

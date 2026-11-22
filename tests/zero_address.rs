@@ -150,6 +150,72 @@ fn test_zero_address_rotation_request_rejected_with_mock_all_auths() {
     });
 }
 
+#[test]
+fn test_zero_address_verification_actors_rejected_before_registry_writes() {
+    let (env, _admin, contract_id) = setup();
+    let owner = Address::generate(&env);
+    let zero_addr = Address::from_string(&s(&env, ZERO_ADDRESS_STRKEY));
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "octocat"),
+            owner,
+            Vec::new(&env),
+        )
+        .unwrap();
+        assert_eq!(
+            TrustBridgeContract::verify(env.clone(), zero_addr.clone(), s(&env, "octocat")),
+            Err(ContractError::ZeroAddress)
+        );
+        assert_eq!(
+            TrustBridgeContract::batch_verify(
+                env.clone(),
+                zero_addr.clone(),
+                Vec::from_array(&env, [s(&env, "octocat")]),
+            ),
+            Err(ContractError::ZeroAddress)
+        );
+        assert!(
+            !TrustBridgeContract::get_address(env.clone(), s(&env, "octocat"))
+                .unwrap()
+                .verified
+        );
+    });
+}
+
+#[test]
+fn test_zero_address_revoke_actor_rejected_without_clearing_verification() {
+    let (env, admin, contract_id) = setup();
+    let owner = Address::generate(&env);
+    let zero_addr = Address::from_string(&s(&env, ZERO_ADDRESS_STRKEY));
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "octocat"),
+            owner,
+            Vec::new(&env),
+        )
+        .unwrap();
+        TrustBridgeContract::verify(env.clone(), admin, s(&env, "octocat")).unwrap();
+        assert_eq!(
+            TrustBridgeContract::revoke_verification(
+                env.clone(),
+                zero_addr,
+                s(&env, "octocat"),
+                1
+            ),
+            Err(ContractError::ZeroAddress)
+        );
+        assert!(
+            TrustBridgeContract::get_address(env.clone(), s(&env, "octocat"))
+                .unwrap()
+                .verified
+        );
+    });
+}
+
 // ── Re-registration with different address (address update) ─────────────────
 
 /// Re-registering an existing username to the zero address must fail with

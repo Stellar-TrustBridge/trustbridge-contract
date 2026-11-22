@@ -20,7 +20,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Admin storage mutated after init | No public setter writes `ADMIN_KEY` — only `initialize` does, gated by `AlreadyInitialized` (Issue #97) |
 | Malformed or oversized username input | `InvalidUsername` error, checked before auth and before any write |
 | Unicode / homoglyph username spoofing | Byte-wise ASCII validation rejects all non-ASCII bytes; see **Unicode Rejection Policy** section |
-| Registering the zero/burn address (reachable under `mock_all_auths` / sandboxes that skip `require_auth`) | `is_zero_address` guard in `register` / `register_sponsored` / `request_address_rotation` returns `ZeroAddress` before any write — pinned by `tests/zero_address.rs` against current SDK mock-auth APIs; removing the guard fails those tests (Issue #300) |
+| Writing registry state using the zero/burn address (reachable under `mock_all_auths` / sandboxes that skip `require_auth`) | `is_zero_address` checks reject zero registration and rotation destinations, verification/revocation/batch actors, and a zero pending rotation destination before mutation. Batch verification skips corrupt zero-bound records. Failures use `ZeroAddress` (code 16), before writes; pinned by `tests/zero_address.rs` (Issues #300, #755) |
 | Consecutive-hyphen username bypass | `InvalidUsername` error — consecutive hyphens now enforced on-chain |
 | Counter drift from rejected calls | Invariant property fuzzing, see [REGISTRY_INVARIANTS](REGISTRY_INVARIANTS.md) |
 | Stale trust surviving a remove → re-register cycle (a new registrant inheriting the previous owner's verified status or address binding) | `remove` unconditionally clears the stored record; `register` on a removed username always starts a fresh, unverified record — see [Re-registration After Remove](#re-registration-after-remove) (Issue #93) |
@@ -191,7 +191,11 @@ Setting `required = true` means:
 - Clearing attestation (`clear_attestation`) and then calling `upgrade` fails with `AttestationRequired`.
 - The cooldown still applies independently.
 
-The `is_attestation_required()` read exposes the current config for monitoring and client-side enforcement.
+The `get_attestation_required()` read (no auth) exposes the current config
+for monitoring and client-side enforcement; `set_attestation_required(caller,
+required)` is admin-only and recorded in `tests/auth_matrix.csv` alongside
+every other setter/getter pair, including an explicit unauthorized-caller
+negative row (Issue #790).
 
 **Threat scenarios:**
 - *Compromised admin key attempts silent upgrade*: `upgrade` fails with `AttestationRequired` unless an attestation for that exact hash was published first (observable on-chain by watchers).
@@ -1087,7 +1091,8 @@ hash for upgrades, not an identity claim.)
   (`OracleProofNotAllowlisted`, 59, including an empty allowlist), the proof
   has not expired (`OracleProofExpired`, 60; `expires_at == 0` disables the
   check — production callers should always set a real value), the signature
-  is a canonical encoding (`OracleProofBadSignature`, 61), and finally that
+  has a canonical Ed25519 scalar encoding (`S < L`; noncanonical/high-S
+  presentations return `OracleProofBadSignature`, 61), and finally that
   `signature` is a valid Ed25519 signature over `message` under
   `oracle_pubkey`.
 
@@ -1550,6 +1555,26 @@ Covered by `tests/repair_index.rs`, which drifts the counters against a
 known-good fixture and checks both the dry-run report and the corrected
 on-chain state after `apply = true`.
 
+**Atomicity guarantee.** `apply = true` writes both `count` and `verified`
+within the same contract invocation — there is no intermediate state an
+observer can read where one counter has been corrected and the other has
+not. `test_repair_index_apply_is_atomic_per_counter_no_partial_update`
+drifts both counters to independently wrong values (in opposite directions)
+and asserts a single `apply = true` call lands both on their recomputed
+values together, never leaving either at its pre-repair corrupted value.
+This is "atomic" in the sense Soroban actually offers: a contract invocation
+either commits all its storage writes or none of them (a trap/abort rolls
+back the whole call), so there is no path within one `repair_index` call
+that persists a write to `count` but not `verified` — correctness here
+means the repair never relies on a second call or any cross-invocation
+state to finish correcting both counters.
+
+**Dry-run write guarantee.** `test_repair_index_dry_run_never_writes_even_when_only_one_counter_drifts`
+drifts only `verified` while `count` is already correct, to rule out an
+implementation that skips the write only when every counter matches rather
+than never writing in dry-run mode at all, and also runs several dry-run
+calls back to back to confirm they never accumulate partial writes.
+
 ## Cross-network misuse (Issue #666)
 
 `initialize` records the executing network id, and every gated entrypoint
@@ -1589,3 +1614,25 @@ coverage of homoglyph handling elsewhere in the registry.
 Covered by `tests/reserved_name_case_fold.rs`, which locks the
 case-insensitive rejection behavior across `register`, `rename`,
 `add_reserved`, `remove_reserved`, and the `is_reserved` query entrypoint.
+
+## Username validation / reserved-list divergence (Issue #793)
+
+Two independent checks gate a `github_username` at registration: the
+syntactic validator `utils::is_valid_github_username` and the
+admin-managed reserved-name list in `storage.rs` (exposed via
+`add_reserved` / `remove_reserved` / `is_reserved`). Because these two
+checks are maintained in separate modules, they could silently diverge —
+for example a reserved entry whose case-folding does not match the
+canonicalization the validator's own helpers use, letting a reserved,
+Wave-sensitive name slip past registration under a different case.
+
+`fuzz/fuzz_targets/username_reserved_consistency.rs` fuzzes this
+boundary: it seeds the reserved list with a known entry, then feeds
+arbitrary byte strings through both `is_valid_github_username` and
+`is_reserved`, asserting neither panics and that `is_reserved` agrees
+with `utils::eq_ignore_ascii_case` for any input that case-folds to a
+reserved name. Corpus seeds live in
+`fuzz/corpus/username_reserved_consistency/` and include exact-case and
+mixed-case reserved names, a non-reserved valid username, an empty
+string, and a syntactically invalid name (consecutive hyphens). Run with
+`cargo +nightly fuzz run username_reserved_consistency` from `fuzz/`.

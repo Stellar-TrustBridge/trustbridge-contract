@@ -19,7 +19,7 @@
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::{Address, BytesN, Env};
 
-use trustbridge_contract::{ContractError, Role, TrustBridgeContract};
+use trustbridge_contract::{ContractError, Role, TrustBridgeContract, MAX_UPGRADE_SIGNERS};
 
 /// Test fixture: an initialized contract where `admin` is the contract admin,
 /// `upgrader` holds `Role::Upgrader`, and `random` holds no role at all.
@@ -731,5 +731,70 @@ fn test_clear_attestation_does_not_disable_required_flag() {
             TrustBridgeContract::get_attestation_required(env.clone()),
             "clear_attestation must not disable the attestation_required flag"
         );
+    });
+}
+
+// ── Threshold above signer set must fail closed (Issue #795) ─────────────────
+
+/// Setting a threshold above `MAX_UPGRADE_SIGNERS` would make the threshold
+/// permanently unreachable — no proposal could ever collect enough distinct
+/// approvers. The contract must fail closed and reject the call rather than
+/// accept a value that freezes all future upgrades.
+#[test]
+fn test_admin_cannot_set_threshold_above_signer_cap() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::set_upgrade_threshold(
+                env.clone(),
+                admin.clone(),
+                MAX_UPGRADE_SIGNERS + 1,
+            ),
+            Err(ContractError::ThresholdExceedsSignerCap),
+            "threshold above MAX_UPGRADE_SIGNERS must be rejected"
+        );
+        // Previous (default) threshold is unchanged after the rejected call.
+        assert_eq!(TrustBridgeContract::get_upgrade_threshold(env.clone()), 1);
+    });
+}
+
+/// A threshold exactly at the hard cap is still reachable and must be
+/// accepted — only values strictly above the cap are rejected.
+#[test]
+fn test_admin_can_set_threshold_exactly_at_signer_cap() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_upgrade_threshold(env.clone(), admin.clone(), MAX_UPGRADE_SIGNERS)
+            .unwrap();
+        assert_eq!(
+            TrustBridgeContract::get_upgrade_threshold(env.clone()),
+            MAX_UPGRADE_SIGNERS
+        );
+    });
+}
+
+/// Recovery: after an over-cap threshold is rejected, the admin can set a
+/// reachable threshold (lower it) and resume normal multisig governance —
+/// the documented recovery path in `docs/ADMIN_RUNBOOK.md`.
+#[test]
+fn test_recovery_set_reachable_threshold_after_rejected_attempt() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::set_upgrade_threshold(
+            env.clone(),
+            admin.clone(),
+            MAX_UPGRADE_SIGNERS + 10,
+        )
+        .is_err());
+
+        // Admin lowers the threshold to a value within the signer cap.
+        TrustBridgeContract::set_upgrade_threshold(env.clone(), admin.clone(), 2).unwrap();
+        assert_eq!(TrustBridgeContract::get_upgrade_threshold(env.clone()), 2);
     });
 }
