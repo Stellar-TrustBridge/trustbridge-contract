@@ -478,3 +478,6 @@ Copyright © 2026 [Stellar-TrustBridge](https://github.com/Stellar-TrustBridge)
 
 <!-- handsoff-issue-589 -->
 - #589: Wire VerificationConfig.threshold into verify policy or document reserved
+
+<!-- handsoff-issue-590 -->
+- #590: Implement timelocked admin transfer propose/execute/get
