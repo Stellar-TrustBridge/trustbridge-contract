@@ -516,7 +516,7 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   -- set_cooldown --cooldown-seconds 86400      # 0 disables the timelock
 ```
 
-- **Auth:** admin only. A non-zero cooldown makes `upgrade` fail
+- **Auth:** admin only. A non-zero cooldown makes both single-admin `upgrade` and multisig `execute_upgrade` fail
   `CooldownActive` until the interval since the last upgrade elapses.
 
 #### `set_attestation_required` — require pre-declared hashes
@@ -658,6 +658,7 @@ Gotchas:
 - Execute fails with `UpgradeProposalDelayActive` while the delay is running and
   `UpgradeProposalInsufficientApprovals` until the threshold is met — both are
   transient, so retrying after more approvals / time is expected.
+- Execute also enforces the upgrade timelock (`set_cooldown`): if a previous upgrade occurred and the cooldown window has not elapsed, `execute_upgrade` fails with `CooldownActive` (code 8). The pending proposal is preserved without corruption or partial state write. Operators can query `get_health` to verify that `cooldown_remaining_secs` decreases monotonically across ledger timestamps towards zero before retrying execution.
 - `set_upgrade_threshold` **fails closed** with `ThresholdExceedsSignerCap`
   (Issue #795) if `--threshold` is greater than `MAX_UPGRADE_SIGNERS` (the
   hard cap on distinct approvers per proposal — currently 20). An impossible

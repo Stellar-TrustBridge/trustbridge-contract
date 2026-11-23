@@ -67,6 +67,7 @@ pub use storage::{
     HealthSnapshot, PauseReason, PendingBatchRemove, PendingRoleGrant, PendingRotation,
     RecordProof, RepairReport, Role, RoleHolder, Stats, VerificationConfig, VerifierAllowEntry,
     WasmAttestation, WasmProvenance, MAX_FALLBACK_ADDRESSES, MAX_VERIFIERS,
+    LAST_UPG_KEY,
 };
 pub use version::Version;
 
@@ -1875,6 +1876,7 @@ impl TrustBridgeContract {
     /// - [`ContractError::NoUpgradeProposalPending`] if no proposal exists.
     /// - [`ContractError::UpgradeProposalDelayActive`] if delay has not elapsed.
     /// - [`ContractError::UpgradeProposalInsufficientApprovals`] if threshold not met.
+    /// - [`ContractError::CooldownActive`] if the configured upgrade cooldown has not elapsed.
     /// - [`ContractError::StagedWasmMismatch`] if a staged hash conflicts.
     pub fn execute_upgrade(
         env: Env,
@@ -1906,6 +1908,7 @@ impl TrustBridgeContract {
         crate::staged_wasm::require_staged_wasm_consistent(&env, &proposal.wasm_hash)?;
 
         let now = env.ledger().timestamp();
+        Self::require_cooldown_elapsed(&env, now)?;
 
         // Capture provenance before the swap (same policy as `upgrade`).
         let previous_wasm_hash = get_wasm_provenance(&env).map(|p| p.wasm_hash);
@@ -4411,8 +4414,12 @@ impl TrustBridgeContract {
         let now = env.ledger().timestamp();
         let cooldown_remaining_secs = if cooldown_secs > 0 {
             let last_upg = get_last_upgrade(&env);
-            let next_allowed = last_upg.saturating_add(cooldown_secs);
-            next_allowed.saturating_sub(now)
+            if last_upg == 0 {
+                0
+            } else {
+                let next_allowed = last_upg.saturating_add(cooldown_secs);
+                next_allowed.saturating_sub(now)
+            }
         } else {
             0
         };
