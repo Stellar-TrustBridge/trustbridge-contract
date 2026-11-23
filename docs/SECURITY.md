@@ -33,6 +33,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Stolen or transferred GitHub account staying `verified` (and payout-eligible) indefinitely | `config_verification`'s `expires_in` now drives an actual expiry, checked via `is_verification_active` — see [Time-Bounded Verification](#time-bounded-verification-issue-218) |
 | Single compromised admin key wiping a large slice of the registry in one `batch_remove` call | Above a configurable size threshold, `batch_remove` requires a second, distinct admin-equivalent signature — see [Dual-Control batch_remove](#dual-control-batch_remove-issue-219) |
 | Auditor trusting an unbound, unsigned `export_registry.sh` JSON dump | `export_attestation` binds a page to a SHA-256 digest, version, and ledger for offline comparison — see [Signed Export Attestation](#signed-export-attestation-issue-223) |
+| Staged malicious WASM hash (operator key compromise, bad artifact, or swapped hash) | Staged slot is admin/Upgrader-only, publicly readable, and upgrade execution requires staged-hash consistency; attestation/provenance checks and dual-control multisig reduce single-key risk. See [Staged WASM malicious-hash threat model](#staged-wasm-malicious-hash-threat-model-issue-804). |
 
 ### Export record binding (Issue #672)
 
@@ -224,11 +225,11 @@ negative row (Issue #790).
 ### Staged WASM slot (Issue #300)
 
 `stage_wasm(caller, hash)` writes the intended next binary to the on-chain
-staged slot before the upgrade transaction is submitted.  Any observer can
+staged slot before the upgrade transaction is submitted. Any observer can
 call `get_staged()` (no auth) to confirm what is coming.
 
 When a hash is staged, `upgrade` and `execute_upgrade` both reject a
-mismatching hash with `StagedWasmMismatch` (code 34).  With nothing staged,
+mismatching hash with `StagedWasmMismatch` (code 34). With nothing staged,
 both paths are unaffected.
 
 **How this differs from attestation:**
@@ -242,6 +243,29 @@ both paths are unaffected.
 
 Use both together for maximum transparency: stage the hash first (public
 notice, no expiry), then attest it (time-bounded, optionally required).
+
+### Staged WASM malicious-hash threat model (Issue #804)
+
+**Threat:** an attacker (or compromised privileged operator) stages or
+executes a malicious WASM hash that contains backdoored verification,
+exfiltration, or registry-corruption logic.
+
+| Stage | Risk | Mitigations / controls | Residual risk / operator action |
+|---|---|---|---|
+| Hash selection/build | Malicious or tampered artifact is produced off-chain | Reproducible builds, pinned toolchain, review release commit, compare `wasm-hash.pin` / SBOM/source digests before install | Supply-chain compromise before hashing; require independent build/review for production |
+| `stage_wasm` | Malicious hash is publicly staged as “next” | Admin or `Role::Upgrader` auth required; paused contracts reject staging; `get_staged()` makes intent observable; `clear_staged()` allows admin retraction | Upgrader key compromise can stage bad hash; monitor `WasmStagedEvent` and alert on unexpected stagers/hashes |
+| `attest_upgrade` / attestation policy | Hash is approved too quickly or without review | `attest_upgrade` is admin-only; `set_attestation_required(true)` enforces pre-declared hash; attestation can expire and be cleared | If admin key is compromised, attestation can also be compromised; use multisig/threshold governance and external review window |
+| `upgrade` / `execute_upgrade` | Malicious hash becomes executable code | `upgrade` checks attestation/cooldown/admin auth; `execute_upgrade` checks staged-hash consistency, delay, threshold approvals, and distinct signers; mismatches fail with typed errors | Single-key admin path remains high risk when threshold/cooldown/attestation are disabled; use multisig threshold >=2 for production |
+| Post-apply | Malicious WASM starts affecting writes or reads | Pause on anomaly, use provenance/health/version probes, rollback/forward-fix to known-good hash, retain audit/event trail | State already mutated by malicious code may need manual incident response; keep backups/exports and rehearsed rollback procedure |
+
+**Required operator controls for Wave upgrades:**
+
+- Keep `set_attestation_required(true)` enabled for production where possible.
+- Use multisig upgrade threshold >= 2 with distinct key holders.
+- Treat `stage_wasm`/attestation events as security alerts, not routine logs.
+- Verify hash provenance (release commit, CI artifact hash, `wasm-hash.pin`,
+  SBOM/source digests) before staging/attesting.
+- Rehearse rollback/forward-fix and keep a known-good hash available.
 
 ### On-chain M-of-N multisig upgrade (Issue #301)
 
@@ -600,13 +624,21 @@ provides an exhaustive test corpus covering additional confusable attack vectors
 - Directional isolates (U+2066–U+2069)
 
 **Advanced confusables:**
-- Full-width Latin forms (U+FF21–U+FF5A, used in Japanese text)
-- Mathematical alphanumeric symbols (U+1D400–U+1D7FF, bold/italic/script variants)
+- Full-width Latin forms (U+FF21�?"U+FF5A, used in Japanese text)
+- Mathematical alphanumeric symbols (U+1D400�?"U+1D7FF, bold/italic/script variants)
 - Superscripts, subscripts, and modifier letters
+- Lookalike digits: fullwidth digits, superscripts/subscripts, Arabic-Indic,
+  extended Arabic-Indic, Devanagari, and mathematical digit forms
+
+**Normalization/rejection policy for lookalike digits:** usernames are validated
+byte-wise and **no Unicode normalization is performed**. ASCII digits (`0-9`)
+remain valid where GitHub username rules allow them; any non-ASCII digit
+lookalike is rejected as `InvalidUsername`. This avoids ambiguous canonicalization
+and prevents numeric-suffix spoofing (for example `alice1` vs fullwidth `alice１`).
 
 **Documented guarantee:** "We reject all non-ASCII." Every codepoint above U+007F
 is blocked before it reaches storage, regardless of how it renders. The corpus
-tests validate this property against 78+ known confusable characters and ensure
+tests validate this property against 100+ known confusable characters and ensure
 no bypass path exists at the `register()` entry point.
 
 Run the full corpus: `cargo test homoglyph` or `cargo test unicode`
@@ -1596,13 +1628,22 @@ implementation that skips the write only when every counter matches rather
 than never writing in dry-run mode at all, and also runs several dry-run
 calls back to back to confirm they never accumulate partial writes.
 
-## Cross-network misuse (Issue #666)
+## Cross-network misuse (Issue #666, #809)
 
 `initialize` records the executing network id, and every gated entrypoint
 re-checks it via `require_initialized`. State initialized on pubnet and
-executed on testnet — or the reverse — fails closed with `NetworkMismatch`
+executed on testnet �?" or the reverse �?" fails closed with `NetworkMismatch`
 (code 30) before any write, so a rejected call leaves no partial state.
-Covered by the pubnet/testnet cases in `tests/network_mismatch.rs`.
+
+This network guard applies to pause-control entrypoints as well: `pause`,
+`unpause`, `set_paused`, `emergency_pause`, and `clear_emergency_pause` all
+route through `require_initialized` (and therefore
+`require_matching_network`) before mutating pause state. A snapshot restored
+on the wrong network cannot be paused, unpaused, or emergency-paused across
+the network boundary.
+
+Covered by the pubnet/testnet cases and pause/unpause mismatch cases in
+`tests/network_mismatch.rs`.
 
 ## Reserved-name rejection is case-insensitive (Issue #781)
 

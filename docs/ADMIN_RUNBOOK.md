@@ -468,8 +468,9 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 The externally callable ABI functions are `stage_wasm`, `get_staged`,
 and `clear_staged`. In particular, `commit_staged_wasm` is **not** an
 exported function; `clear_staged_wasm` is only an internal Rust storage
-helper. See [ABI staged WASM entrypoints](ABI.md#staged-wasm-entrypoints-issue-594)
-and [staged-slot security](SECURITY.md#staged-wasm-slot-issue-300).
+helper. See [ABI staged WASM entrypoints](ABI.md#staged-wasm-entrypoints-issue-594),
+[staged-slot security](SECURITY.md#staged-wasm-slot-issue-300), and
+[malicious-hash threat model](SECURITY.md#staged-wasm-malicious-hash-threat-model-issue-804).
 
 The hash below is the 32-byte hex WASM hash returned by
 `stellar contract install`. `CONTRACT_ID`, `NETWORK`, and `ADMIN`

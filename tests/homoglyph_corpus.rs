@@ -600,6 +600,138 @@ fn test_superscript_subscript_modifier_letters_rejected() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// § Lookalike Digits
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Digit lookalikes can spoof numeric suffixes in usernames (e.g. "alice1" vs
+/// "alice１"). GitHub usernames may include ASCII digits, but any non-ASCII
+/// digit form is rejected by the byte-wise ASCII validation. This corpus makes
+/// the rejection/normalization policy explicit: no normalization, reject all
+/// non-ASCII lookalike digits.
+#[test]
+fn test_lookalike_digit_corpus_all_rejected() {
+    let env = Env::default();
+
+    let corpus = [
+        // Full-width digits (common in CJK text/input)
+        ("Fullwidth digit zero", '\u{FF10}', "U+FF10", "user\u{FF10}"),
+        ("Fullwidth digit one", '\u{FF11}', "U+FF11", "user\u{FF11}"),
+        ("Fullwidth digit two", '\u{FF12}', "U+FF12", "user\u{FF12}"),
+        ("Fullwidth digit nine", '\u{FF19}', "U+FF19", "user\u{FF19}"),
+        // Superscript digits
+        ("Superscript zero", '\u{2070}', "U+2070", "user\u{2070}"),
+        ("Superscript two", '\u{00B2}', "U+00B2", "user\u{00B2}"),
+        ("Superscript three", '\u{00B3}', "U+00B3", "user\u{00B3}"),
+        ("Superscript one", '\u{00B9}', "U+00B9", "user\u{00B9}"),
+        // Subscript digits
+        ("Subscript zero", '\u{2080}', "U+2080", "user\u{2080}"),
+        ("Subscript one", '\u{2081}', "U+2081", "user\u{2081}"),
+        ("Subscript nine", '\u{2089}', "U+2089", "user\u{2089}"),
+        // Arabic-Indic digits (visually distinct in some fonts, non-ASCII)
+        ("Arabic-Indic zero", '\u{0660}', "U+0660", "user\u{0660}"),
+        ("Arabic-Indic one", '\u{0661}', "U+0661", "user\u{0661}"),
+        // Extended Arabic-Indic digits
+        (
+            "Ext Arabic-Indic zero",
+            '\u{06F0}',
+            "U+06F0",
+            "user\u{06F0}",
+        ),
+        ("Ext Arabic-Indic one", '\u{06F1}', "U+06F1", "user\u{06F1}"),
+        // Devanagari digits
+        ("Devanagari zero", '\u{0966}', "U+0966", "user\u{0966}"),
+        ("Devanagari one", '\u{0967}', "U+0967", "user\u{0967}"),
+        // Mathematical bold digits
+        (
+            "Math bold digit zero",
+            '\u{1D7CE}',
+            "U+1D7CE",
+            "user\u{1D7CE}",
+        ),
+        (
+            "Math bold digit one",
+            '\u{1D7CF}',
+            "U+1D7CF",
+            "user\u{1D7CF}",
+        ),
+        // Mathematical double-struck digits
+        (
+            "Math double-struck zero",
+            '\u{1D7D8}',
+            "U+1D7D8",
+            "user\u{1D7D8}",
+        ),
+        (
+            "Math double-struck one",
+            '\u{1D7D9}',
+            "U+1D7D9",
+            "user\u{1D7D9}",
+        ),
+    ];
+
+    for (desc, _char, codepoint, username) in corpus {
+        assert!(
+            !is_valid_github_username(&s(&env, username)),
+            "{desc} ({codepoint}) must be rejected: {username}"
+        );
+    }
+}
+
+/// Lookalike digits must also be rejected when embedded inside otherwise valid
+/// ASCII usernames, preventing numeric-suffix spoofing.
+#[test]
+fn test_lookalike_digits_embedded_rejected() {
+    let env = Env::default();
+
+    let attacks = [
+        ("fullwidth one prefix", "\u{FF11}alice"),
+        ("fullwidth zero infix", "al\u{FF10}ice"),
+        ("superscript two suffix", "alice\u{00B2}"),
+        ("math bold one suffix", "alice\u{1D7CF}"),
+        ("arabic-indic one infix", "dev\u{0661}ops"),
+    ];
+
+    for (desc, username) in attacks {
+        assert!(
+            !is_valid_github_username(&s(&env, username)),
+            "{desc} must be rejected: {username}"
+        );
+    }
+}
+
+/// Register entry points must reject lookalike-digit usernames with the same
+/// `InvalidUsername` error as other non-ASCII input.
+#[test]
+fn test_lookalike_digit_registration_blocked_at_register_entry_point() {
+    use soroban_sdk::{testutils::Address as _, Address, Vec};
+    use trustbridge_contract::{ContractError, TrustBridgeContract};
+
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    let contract_id = env.register(TrustBridgeContract, ());
+
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::initialize(env.clone(), admin).unwrap();
+    });
+    env.mock_all_auths();
+
+    env.as_contract(&contract_id, || {
+        let result = TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "alice\u{FF11}"), // fullwidth digit one
+            user,
+            Vec::new(&env),
+        );
+        assert_eq!(
+            result,
+            Err(ContractError::InvalidUsername),
+            "lookalike digit username must be rejected by register()"
+        );
+    });
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // § Regression: Valid ASCII must still pass
 // ═══════════════════════════════════════════════════════════════════════════
@@ -858,24 +990,25 @@ fn test_read_only_functions_do_not_validate_homoglyph_usernames() {
 /// - Zero-width & invisible (8 characters)
 /// - Bidirectional marks (11 characters)
 /// - Mixed-script confusables
-/// - Full-width / half-width
+/// - Full-width / half-width letters
 /// - Mathematical alphanumeric symbols (6 variants)
 /// - Superscripts / subscripts / modifiers
+/// - Lookalike digits (fullwidth, super/subscript, Arabic-Indic, Devanagari, math)
 /// - Integration test at register() entry point
 /// - Positive control (valid ASCII still works)
 #[test]
 fn test_homoglyph_corpus_coverage_complete() {
-    // This is a documentation test — if it compiles and runs, all corpus
+    // This is a documentation test �?" if it compiles and runs, all corpus
     // tests exist. If a new attack vector is discovered, add it above and
     // increment the count here.
 
-    const EXPECTED_CORPUS_SIZE: usize = 80; // Approximate, update as corpus grows
+    const EXPECTED_CORPUS_SIZE: usize = 100; // Approximate, update as corpus grows
 
     // The real validation is in each corpus test. This just documents the scope.
     const {
         assert!(
-            EXPECTED_CORPUS_SIZE >= 78,
-            "Corpus should cover at least 78 known homoglyph/confusable codepoints"
+            EXPECTED_CORPUS_SIZE >= 100,
+            "Corpus should cover at least 100 known homoglyph/confusable codepoints"
         );
     }
 }
