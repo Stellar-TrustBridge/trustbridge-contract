@@ -42,6 +42,7 @@ FUTURENET_IDENTITY ?= $(SOURCE)
 FUTURENET_DRY_RUN ?= false
 
 .PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser soak-cursor soak-register-verify storage-keys-check storage-footprint-check storage-rent-check storage-rent-estimator storage-rent-estimator-golden bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-batch-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
+        wasm-hash-pin wasm-hash-update wasm-hash-pin-test \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
         invoke-verify invoke-revoke-verification invoke-get-all-registered invoke-export-paginated \
@@ -268,7 +269,10 @@ event-topics: ## Verify the indexer's topic table matches src/events.rs (Issue #
 event-topics-message-test: ## Pin the collision failure message format (Issue #794)
 	bash scripts/test_check_event_topics_message.sh
 
-check: fmt lint error-codes event-topics event-topics-message-test subgraph-parity abi-check test build docs-check wasm-size ## Run full local quality gate
+check: fmt lint error-codes event-topics event-topics-message-test wasm-hash-pin-test subgraph-parity abi-check test build docs-check wasm-size ## Run full local quality gate
+
+wasm-hash-pin-test: ## Automated tests for wasm-hash.pin verification logic and WASM_HASH_STRICT modes (Issue #759)
+	bash scripts/test_wasm_hash_pin.sh
 
 wasm-hash-pin: build ## Verify release WASM hash matches wasm-hash.pin (mirrors CI hash gate)
 	@if [ -f $(WASM_V1) ]; then WASM=$(WASM_V1); elif [ -f $(WASM_LEGACY) ]; then WASM=$(WASM_LEGACY); else echo "ERROR: No WASM artifact found. Run 'make build' first."; exit 1; fi; \
