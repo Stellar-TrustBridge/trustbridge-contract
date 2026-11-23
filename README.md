@@ -475,3 +475,6 @@ Copyright © 2026 [Stellar-TrustBridge](https://github.com/Stellar-TrustBridge)
 
 <!-- handsoff-issue-381 -->
 - #381: Add integration tests for staged WASM flow
+
+<!-- handsoff-issue-589 -->
+- #589: Wire VerificationConfig.threshold into verify policy or document reserved
