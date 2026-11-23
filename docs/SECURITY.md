@@ -20,6 +20,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Admin storage mutated after init | No public setter writes `ADMIN_KEY` — only `initialize` does, gated by `AlreadyInitialized` (Issue #97) |
 | Malformed or oversized username input | `InvalidUsername` error, checked before auth and before any write |
 | Unicode / homoglyph username spoofing | Byte-wise ASCII validation rejects all non-ASCII bytes; see **Unicode Rejection Policy** section |
+| Locale-dependent case-folding impersonation (e.g. Turkish dotted/dotless I, German eszett) | Byte-wise ASCII-true canonicalization (`b'A'..=b'Z' => b + 0x20`), byte-length invariant, independent of host locale rules; non-ASCII rejected; see [Locale-Independent ASCII-True Folding Algorithm](#locale-independent-ascii-true-folding-algorithm-issue-766) (Issue #766) |
 | Writing registry state using the zero/burn address (reachable under `mock_all_auths` / sandboxes that skip `require_auth`) | `is_zero_address` checks reject zero registration and rotation destinations, role grant targets (`set_role`, `set_role_with_expiry`), verification/revocation/batch actors, and a zero pending rotation destination before mutation. Batch verification skips corrupt zero-bound records. Failures use `ZeroAddress` (code 16), before writes; pinned by `tests/zero_address.rs` and `tests/role_lifecycle.rs` (Issues #300, #755, #799) |
 | Public disclosure of unverified contributor addresses | `get_public_paginated` replaces unverified identity and payout addresses with the zero/burn address before export and Merkle hashing; see [Public export address redaction](#public-export-address-redaction-issue-627) |
 | Writing registry state using the zero/burn address (reachable under `mock_all_auths` / sandboxes that skip `require_auth`) | `is_zero_address` checks reject zero registration and rotation destinations, verification/revocation/batch actors, and a zero pending rotation destination before mutation. Batch verification skips corrupt zero-bound records. Failures use `ZeroAddress` (code 16), before writes; pinned by `tests/zero_address.rs` (Issues #300, #755) |
@@ -451,6 +452,56 @@ fold the event's username themselves before comparing.
 `а` vs ASCII `a`) — see **Unicode Rejection Policy** below, which already
 rejects all non-ASCII bytes outright, so homoglyph substitution cannot reach
 the storage layer in the first place.
+
+### Locale-Independent ASCII-True Folding Algorithm (Issue #766)
+
+#### Threat Analysis & Why This Matters
+
+Unicode case folding and language-locale casing rules vary depending on the host
+environment or language settings (`LC_ALL`, `LANG`, OS culture):
+
+- **Turkish & Azeri (`tr_TR`, `az_AZ`)**: Standard Latin uppercase `I` (U+0049) folds
+  to small dotless `ı` (U+0131), and small `i` (U+0069) uppercases to capital dotted `İ` (U+0130).
+  If a contract or off-chain worker used host locale rules, `ALICE` on a Turkish node
+  would fold to `alıce` (byte sequence `[0x61, 0x6C, 0xC4, 0xB1, 0x63, 0x65]`), while on
+  an English/invariant node it folds to `alice` (`[0x61, 0x6C, 0x69, 0x63, 0x65]`).
+  This divergence would allow an attacker to bypass duplicate checks, create separate
+  records on different nodes, or impersonate Wave contributors across off-chain indexers.
+- **German Eszett (`ß`)**: In Unicode full case folding, `ß` (U+00DF) expands to two
+  characters (`ss`). An attacker could attempt to register `groß` to collide with `gross`.
+- **Greek Sigma (`Σ`)**: Capital `Σ` (U+03A3) maps to final small `ς` (U+03C2) or medial
+  small `σ` (U+03C3) based on word-position context.
+- **Letter-like Symbols**: The Kelvin sign `K` (U+212A) or Latin long s `ſ` (U+017F) fold
+  to `k` or `s` under Unicode compatibility folds.
+
+#### The Algorithm
+
+To prevent locale-dependent impersonation and state desynchronization, the contract's
+canonicalization in `src/utils.rs::canonicalize_username` implements a strictly
+**byte-wise ASCII-true fold**:
+
+$$\text{fold}(b) = \begin{cases} b + 0x20 & \text{if } 0x41 \le b \le 0x5A \ (b'A'..=b'Z') \\ b & \text{otherwise} \end{cases}$$
+
+Every byte outside `[0x41, 0x5A]`—including all ASCII numbers, allowed punctuation
+(`-`, `_`), and all non-ASCII bytes ($\ge 0x80$)—is left strictly unmodified.
+
+#### Security Invariants
+
+1. **Host-Environment Invariance**: The algorithm uses no locale tables, no libc calls,
+   and no Unicode case-folding libraries. The output is bit-for-bit identical whether
+   run in WASM on Soroban validators, in local test harnesses, or across off-chain indexers.
+2. **Byte-Length Preservation**: $\text{len}(\text{canonicalize\_username}(s)) \equiv \text{len}(s)$.
+   No input byte ever expands (e.g. `ß` never becomes `ss`) or contracts.
+3. **Defense-in-Depth Non-ASCII Rejection**: All mutations (`register`, `rename`, `add_reserved`)
+   require `is_valid_github_username`, which rejects all non-ASCII bytes ($\ge 0x80$)
+   with `ContractError::InvalidUsername`. Thus, non-ASCII characters (`İ`, `ı`, `ß`, `K`, `ſ`)
+   can never be registered, stored, or indexed.
+4. **Lookup Non-Collision**: Looking up a locale confusable (such as `get_address("alİce")`)
+   evaluates byte-for-byte against the stored canonical keys, returning `None` instead of
+   colliding with the legitimate ASCII `alice` record.
+5. **Idempotence**: $\text{canonicalize\_username}(\text{canonicalize\_username}(s)) == \text{canonicalize\_username}(s)$.
+
+Pinned by `tests/username_case_fold.rs`, `src/utils.rs`, and `tests/homoglyph_corpus.rs`.
 
 **Migration note for a deployment with existing mixed-case keys.** This
 contract has not been deployed to mainnet (see **Audit Status** below), so no

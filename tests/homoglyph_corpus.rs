@@ -846,6 +846,67 @@ fn test_read_only_functions_do_not_validate_homoglyph_usernames() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// § Locale-Specific Mapping & Unicode Case-Fold Impersonation Vectors (Issue #766)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Locale-specific casing mappings and Unicode full-case folding confusables.
+///
+/// In certain language locales (such as Turkish / Azeri), 'i' and 'I' map to
+/// dotted 'İ' (U+0130) and dotless 'ı' (U+0131). In German, 'ß' maps to 'SS'.
+/// In Greek, capital 'Σ' maps to 'ς' or 'σ'.
+/// If folding depended on host locale rules, cross-node consensus divergence
+/// or impersonation attacks would become possible.
+///
+/// Our invariant: the contract strictly enforces byte-wise ASCII folding and
+/// rejects all non-ASCII bytes unconditionally at validation time.
+#[test]
+fn test_homoglyph_corpus_locale_specific_casing_rejected() {
+    let env = Env::default();
+
+    let corpus = [
+        // Turkish/Azeri dotted capital I (U+0130) -> looks like ASCII I with dot
+        ("Turkish dotted capital I", '\u{0130}', "U+0130", "al\u{0130}ce"),
+        // Turkish/Azeri dotless small i (U+0131) -> looks like ASCII i without dot
+        ("Turkish dotless small i", '\u{0131}', "U+0131", "al\u{0131}ce"),
+        // Latin small letter dotless j (U+0237) -> looks like ASCII j without dot
+        ("Latin dotless small j", '\u{0237}', "U+0237", "\u{0237}ane"),
+        // German small eszett (U+00DF) -> uppercase is SS
+        ("German small eszett", '\u{00DF}', "U+00DF", "gro\u{00DF}"),
+        // German capital eszett (U+1E9E)
+        ("German capital eszett", '\u{1E9E}', "U+1E9E", "GRO\u{1E9E}"),
+        // Greek capital sigma (U+03A3)
+        ("Greek capital sigma", '\u{03A3}', "U+03A3", "\u{03A3}mith"),
+        // Greek small final sigma (U+03C2)
+        ("Greek small final sigma", '\u{03C2}', "U+03C2", "chri\u{03C2}"),
+        // Greek small medial sigma (U+03C3)
+        ("Greek small medial sigma", '\u{03C3}', "U+03C3", "\u{03C3}mith"),
+        // Kelvin sign (U+212A) -> looks like ASCII 'K'
+        ("Kelvin sign", '\u{212A}', "U+212A", "\u{212A}ate"),
+        // Angstrom sign (U+212B) -> looks like 'Å'
+        ("Angstrom sign", '\u{212B}', "U+212B", "\u{212B}lice"),
+        // Micro sign (U+00B5) -> looks like 'µ'
+        ("Micro sign", '\u{00B5}', "U+00B5", "\u{00B5}ser"),
+        // Latin small letter long s (U+017F) -> looks like 'f' or 's'
+        ("Latin small letter long s", '\u{017F}', "U+017F", "alif\u{017F}e"),
+        // Ligatures
+        ("Latin small ligature ae", '\u{00E6}', "U+00E6", "d\u{00E6}mon"),
+        ("Latin small ligature oe", '\u{0153}', "U+0153", "ph\u{0153}nix"),
+        ("Latin small ligature fi", '\u{FB01}', "U+FB01", "\u{FB01}le"),
+        ("Latin small ligature fl", '\u{FB02}', "U+FB02", "\u{FB02}ag"),
+        // Ogonek variants
+        ("Latin capital I with ogonek", '\u{012E}', "U+012E", "\u{012E}an"),
+        ("Latin small i with ogonek", '\u{012F}', "U+012F", "\u{012F}an"),
+    ];
+
+    for (desc, _char, codepoint, username) in corpus {
+        assert!(
+            !is_valid_github_username(&s(&env, username)),
+            "{desc} ({codepoint}) must be rejected: {username}"
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // § Coverage Summary
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -861,6 +922,7 @@ fn test_read_only_functions_do_not_validate_homoglyph_usernames() {
 /// - Full-width / half-width
 /// - Mathematical alphanumeric symbols (6 variants)
 /// - Superscripts / subscripts / modifiers
+/// - Locale-specific mappings & case-fold confusables (18 characters)
 /// - Integration test at register() entry point
 /// - Positive control (valid ASCII still works)
 #[test]
@@ -869,13 +931,13 @@ fn test_homoglyph_corpus_coverage_complete() {
     // tests exist. If a new attack vector is discovered, add it above and
     // increment the count here.
 
-    const EXPECTED_CORPUS_SIZE: usize = 80; // Approximate, update as corpus grows
+    const EXPECTED_CORPUS_SIZE: usize = 98; // Approximate, update as corpus grows
 
     // The real validation is in each corpus test. This just documents the scope.
     const {
         assert!(
-            EXPECTED_CORPUS_SIZE >= 78,
-            "Corpus should cover at least 78 known homoglyph/confusable codepoints"
+            EXPECTED_CORPUS_SIZE >= 90,
+            "Corpus should cover at least 90 known homoglyph/confusable codepoints"
         );
     }
 }
