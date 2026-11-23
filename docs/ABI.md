@@ -328,6 +328,40 @@ struct ChallengeRecord {
 }
 ```
 
+### PauseReason (u32 discriminant, Issue #1)
+
+Typed reason codes for `pause`, `unpause`, and `set_paused` (Issue #211). Stored
+on-chain alongside the pause flag so Wave incident responders can distinguish
+maintenance from a security freeze without replaying event history.
+
+All mutation entry points that flip the pause flag require a valid `PauseReason`;
+unknown codes fail with [`ContractError::InvalidPauseReason`] (code 21).
+
+**Exhaustiveness guarantee**: The discriminant table below is the complete set.
+Adding a new variant breaks `tests/pause_reason_exhaustiveness.rs` until this
+table, `src/storage.rs::PauseReason`, and the test's `DOCUMENTED_VARIANTS` are
+all updated together — so undocumented pause reasons cannot ship.
+
+| Code | Name | When to use |
+|------|------|-------------|
+| 1 | `Maintenance` | Planned upgrade window or routine admin maintenance |
+| 2 | `SecurityIncident` | Freeze after a detected exploit or suspicious activity |
+| 3 | `RegulatoryHold` | Compliance or legal hold requirement |
+| 4 | `Unpause` | Resuming normal operation (used with `unpause`) |
+| 99 | `Other` | Any reason not covered above |
+
+Codes are **append-only**: indexers store the numeric discriminant, so renumbering
+silently re-labels historical entries. New variants must be added with an unused
+code at the end. `PauseReason::is_valid(code)` returns `true` for every code in
+this table and `false` otherwise; `PauseReason::from_code(code)` maps back to the
+variant or `None` for unrecognized codes.
+
+**Wave operator usage**: An unprimed Wave testnet with incident responders unfamiliar
+with these codes may misclassify a `SecurityIncident` pause as routine maintenance
+or vice versa. Document the discriminant-to-meaning table in `docs/TESTNET_CHECKLIST.md`
+and `docs/ADMIN_RUNBOOK.md` so responders have it on hand during an incident (see
+Issue #4).
+
 ### RevokeReason (u32 discriminant)
 
 | Code | Name |
@@ -932,6 +966,13 @@ Remove a registration.
 | **Errors** | `NotInitialized`, `Paused`, `NotRegistered`, `NotAuthorized` |
 | **Events** | `RemovedEvent` |
 
+**Registry hole policy (Issue #3)**: Removal creates a hole in the flat username
+index, which is not compacted automatically. Wave exporters must not assume dense
+indexes after removals. See [REGISTRY_INVARIANTS.md § Hole Policy](./REGISTRY_INVARIANTS.md#hole-policy)
+for the exact semantics and [DASHBOARD_SYNC.md § Handling Removals](./DASHBOARD_SYNC.md#handling-removals)
+for exporter guidance. The paginated export APIs (`get_registered_paginated`,
+`get_public_paginated`) handle holes correctly and never skip or duplicate records.
+
 ```bash
 # Self-removal (registrant signs)
 stellar contract invoke --id $ID --source registrant --network testnet --send=yes \
@@ -1023,6 +1064,13 @@ This is the batched form of `remove`, intended for admin workflows that need to 
 **Partial success is the point.** A username that cannot be removed (e.g., not registered) does not abort the batch; it is counted as a failure in the returned `BatchSummary` and the rest proceed. A cleanup of 100 contributors must not be lost wholesale because one entry was already removed.
 
 Unlike the single `remove` function which allows registrants to self-remove, `batch_remove` is strictly admin-only.
+
+**Registry hole policy (Issue #3)**: Batch removals create multiple holes in the
+username index. Wave exporters must not assume the index remains dense. After a
+batch remove, the flat index may have gaps where removed usernames were. See
+[REGISTRY_INVARIANTS.md § Hole Policy](./REGISTRY_INVARIANTS.md#hole-policy) for
+export implications and [DASHBOARD_SYNC.md § Handling Removals](./DASHBOARD_SYNC.md#handling-removals)
+for the recovery procedure after detecting a hole.
 
 | Outcome | Counted as | Notes |
 |---------|------------|-------|
