@@ -481,3 +481,6 @@ Copyright © 2026 [Stellar-TrustBridge](https://github.com/Stellar-TrustBridge)
 
 <!-- handsoff-issue-590 -->
 - #590: Implement timelocked admin transfer propose/execute/get
+
+<!-- handsoff-issue-592 -->
+- #592: Integration tests multisig upgrade cannot disable attestation before execute
