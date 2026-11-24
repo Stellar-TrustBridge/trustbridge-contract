@@ -1687,11 +1687,17 @@ fn test_attest_upgrade_overwrites_previous_attestation() {
 /// After `clear_attestation` the getter returns `None`.
 #[test]
 fn test_clear_attestation_removes_it() {
-    let (env, _admin, _user1, _user2, contract_id) = setup_test_env();
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
     env.ledger().set_timestamp(1_000);
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
+        trustbridge_contract::TrustBridgeContract::set_attestation_required(
+            env.clone(),
+            admin.clone(),
+            true,
+        )
+        .unwrap();
         trustbridge_contract::TrustBridgeContract::attest_upgrade(
             env.clone(),
             make_hash(&env, 0xCC),
@@ -1710,6 +1716,97 @@ fn test_clear_attestation_removes_it() {
             trustbridge_contract::TrustBridgeContract::get_attestation(env.clone()).is_none(),
             "attestation must be absent after clear_attestation"
         );
+        assert!(
+            trustbridge_contract::TrustBridgeContract::get_attestation_required(env.clone()),
+            "clearing an attestation must not disable the required-attestation policy"
+        );
+    });
+}
+
+/// The required-attestation flag is opt-in and admin enable/disable changes
+/// round-trip through the public getter.
+#[test]
+fn test_get_attestation_required_defaults_false_and_admin_round_trip() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.as_contract(&contract_id, || {
+        assert!(
+            !TrustBridgeContract::get_attestation_required(env.clone()),
+            "a newly initialized contract must default to optional attestation"
+        );
+    });
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::get_attestation_required(env.clone()));
+    });
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), false).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        assert!(!TrustBridgeContract::get_attestation_required(env.clone()));
+    });
+}
+
+/// The admin can update and read the policy during normal and emergency
+/// pauses without changing either pause state.
+#[test]
+fn test_attestation_required_policy_is_available_while_paused() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::pause(env.clone(), 1).unwrap();
+    });
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::emergency_pause(env.clone(), admin.clone()).unwrap();
+    });
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+        assert!(TrustBridgeContract::get_attestation_required(env.clone()));
+        assert!(TrustBridgeContract::is_paused(env.clone()));
+        assert!(TrustBridgeContract::is_emergency_paused(env.clone()));
+    });
+}
+
+/// Explicit non-admin callers are rejected and cannot change the stored flag.
+#[test]
+fn test_non_admin_cannot_set_attestation_required() {
+    let (env, _admin, user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::set_attestation_required(env.clone(), user1.clone(), true),
+            Err(ContractError::NotAuthorized)
+        );
+        assert!(!TrustBridgeContract::get_attestation_required(env.clone()));
+    });
+}
+
+/// The setter returns the initialization guard before changing configuration.
+#[test]
+fn test_set_attestation_required_requires_initialization() {
+    let env = Env::default();
+    let caller = Address::generate(&env);
+    let contract_id = env.register(TrustBridgeContract, ());
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::set_attestation_required(env.clone(), caller.clone(), true),
+            Err(ContractError::NotInitialized)
+        );
+        assert!(!TrustBridgeContract::get_attestation_required(env.clone()));
     });
 }
 
