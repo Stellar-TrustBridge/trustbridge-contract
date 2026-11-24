@@ -44,7 +44,8 @@ build / wasm-size). Every pull request and push to `main` runs these jobs from
 |---|---|
 | `quality` | `cargo test --test homoglyph_corpus` (named blocking step), then `make check` (`make fmt`, `make lint`, `make test`, `make docs-check`, plus error-codes / event-topics / abi-check / wasm-size) |
 | `build` | `make build` (`stellar contract build`), `make wasm-size`, `make wasm-hash-pin WASM_HASH_STRICT=1` |
-| `abi-consistency` | `./scripts/check_error_codes.sh` (`make error-codes`) and `./scripts/check_event_topics.sh` (`make event-topics`) — fails on any `ContractError` / event-topic drift |
+| `abi-consistency` | `./scripts/check_error_codes.sh` (`make error-codes`) and `./scripts/check_event_topics.sh` (`make event-topics`) — fails on any `ContractError` / event-topic drift; `make storage-rent-estimator` also checks golden output and stable invalid-input errors |
+| `storage-budgets` | `make storage-help-check`, `make storage-footprint-check`, and `make storage-rent-check` |
 | `oracle-proof-tests` | `cargo test --lib oracle_proof` |
 | `cargo-deny` | `cargo deny --config deny.toml check` (see [Supply-chain checks](#supply-chain-checks)) |
 | `mutants` | `cargo mutants --config mutants.toml --file src/utils.rs` — nightly and `workflow_dispatch` only (see [Mutation Testing](#mutation-testing--utilsrs-issue-243)) |
@@ -634,6 +635,33 @@ Cross-ABI goldens that follow the same "regenerate + commit" rule:
 `abi/export_page.layout.golden` (export page layout). The
 `abi` make target checks the error-code golden; see `make help` for the
 individual targets.
+
+### Storage footprint and rent preflight
+
+Run these CI-equivalent targets before opening a storage or TTL pull request:
+
+```bash
+make storage-help-check            # verify make help lists all storage targets
+make storage-footprint-check       # cargo test --lib storage_footprint_budget_tests
+make storage-rent-check            # cargo test --lib storage_rent_playbook_tests
+make storage-rent-estimator        # golden output + invalid-input/failure cases
+```
+
+`make help` documents the purpose and CI role of each target. The footprint
+check reads the budget markers in `docs/STORAGE_FOOTPRINT.md` and requires
+Cargo/Rust. The rent playbook check reads `docs/STORAGE_RENT.md` and
+requires Cargo/Rust. The estimator uses only Python 3.8+ and the standard
+library, but requires `bash` to run its golden-test wrapper. Neither check
+accepts or prints wallet credentials; keeper addresses and other identifying
+values belong in operator secrets and must not be committed or pasted into
+PR output.
+
+The footprint and rent checks preserve existing contract pause/freeze and
+dry-run semantics: they do not invoke a contract or move funds. Keeper
+operations remain opt-in and must use `TTL_KEEPER_DRY_RUN=true` for a
+simulation-first run. An increase in a footprint budget or a TTL constant is
+not silent: the corresponding test fails and the intentional change must be
+reviewed and documented in the same PR.
 
 ### Storage rent estimator golden refresh
 

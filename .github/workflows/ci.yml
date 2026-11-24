@@ -106,7 +106,10 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # Same targets as `make storage-footprint-check` / `make storage-rent-check`.
+      # Same targets documented by `make help`.
+      - name: Make help storage target coverage
+        run: make storage-help-check
+
       - name: Storage footprint budget (Issue #661)
         run: cargo test --lib storage_footprint_budget_tests
 
