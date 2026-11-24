@@ -32,6 +32,10 @@ pub struct BotStatusChangedEvent {
 }
 
 /// Emitted when a registration is removed by the registrant or admin.
+/// Removal also advances the pagination index generation in `storage.rs`; the
+/// bump is observable via `get_health_probes().index_gen`, while this event
+/// remains the consumer-facing tombstone for the removed username. No separate
+/// `IndexGenerationBumpedEvent` is emitted.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemovedEvent {
