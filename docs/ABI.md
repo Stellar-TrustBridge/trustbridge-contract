@@ -1600,6 +1600,69 @@ after the record has already been through one full cycle. Covered by
 
 ---
 
+### `set_verify_limit(limit: u32) -> Result<(), ContractError>`
+
+Configure the per-ledger verify/revoke rate limit for non-admin callers (Issue #292).
+
+This caps the number of verify/revoke operations a single Verifier or Revoker can
+perform per ledger, preventing event-stream bloat and instruction-budget exhaustion
+during Wave verification bursts.
+
+| | |
+|---|---|
+| **Auth** | Admin only |
+| **Mutates** | Yes (instance storage) |
+| **Errors** | `NotInitialized`, `NotAuthorized` |
+| **Since** | Contract includes rate limiting from initial release |
+
+**Rate limit semantics:**
+- Counter is keyed per actor address **and** per ledger sequence
+- **Resets automatically on new ledger**: When ledger sequence advances, the first
+  call in the new ledger sees a stale sequence and resets the counter to 0
+- `verify`, `revoke_verification`, and `batch_verify` each spend 1 unit per username
+- Setting `limit = 0` **disables rate limiting entirely**
+- Default when unset: `DEFAULT_VERIFIES_PER_LEDGER` = 20 units per ledger (~4/sec at 5s ledgers)
+
+**Admin bypass:** The admin is **always exempt** from rate limits. Incident response
+must not be throttled. Rate checks only apply to `Role::Verifier` and `Role::Revoker`
+holders.
+
+**Cross-ledger behavior:** There is no carry-over between ledgers. A verifier that
+hits the limit at the end of ledger N can immediately verify again when ledger N+1
+closes, as the counter resets to 0 on ledger rollover.
+
+```bash
+# Set rate limit to 50 verify/revoke operations per ledger
+stellar contract invoke --id $ID --source admin --network testnet --send=yes \
+  -- set_verify_limit --limit 50
+
+# Disable rate limiting entirely (use with caution)
+stellar contract invoke --id $ID --source admin --network testnet --send=yes \
+  -- set_verify_limit --limit 0
+```
+
+---
+
+### `get_verify_limit() -> u32`
+
+Returns the currently configured per-ledger verify/revoke rate limit.
+
+| | |
+|---|---|
+| **Auth** | None (read-only) |
+| **Mutates** | No |
+| **Returns** | `u32` — the active limit, or `DEFAULT_VERIFIES_PER_LEDGER` (20) if never set |
+
+Returns the stored limit when the admin has explicitly set one (including 0, which
+means disabled), otherwise returns `DEFAULT_VERIFIES_PER_LEDGER` (20).
+
+```bash
+stellar contract invoke --id $ID --network testnet \
+  -- get_verify_limit
+```
+
+---
+
 ### `extend_registry_ttl(usernames: Vec<String>) -> Result<u32, ContractError>`
 
 Extends the time-to-live (TTL) for persistent storage entries of multiple
@@ -2959,6 +3022,35 @@ challenge is active. Emits `ChallengeStartedEvent`.
 | **Auth** | Admin |
 | **Errors** | `NotInitialized`, `Paused`, `NotAuthorized`, `NotRegistered`, `ChallengeAlreadyActive` |
 
+**Challenge lifecycle and replay protection:**
+
+- Each challenge is stored per-username, not by a separate ID
+- **Challenges are single-use**: Once `complete_challenge` or `cancel_challenge`
+  consumes a challenge, that challenge is permanently removed and cannot be
+  replayed
+- Attempting to `complete_challenge` on an already-completed challenge returns
+  `NoChallengeActive`, not a fresh removal
+- Attempting to `cancel_challenge` on an already-cancelled challenge returns
+  `NoChallengeActive`, not an idempotent success
+- If a username is **re-registered** after a challenge completes (removes the
+  record), a new `start_challenge` on that re-registered username creates a
+  **fresh, independent challenge** with its own lifecycle and timestamps
+
+**Challenge removal clears the challenge atomically:**
+- `complete_challenge` removes both the registration record and the challenge
+- `cancel_challenge` removes only the challenge; the registration remains
+- Self-remove (`remove` called by the registrant) during an active challenge
+  clears **both** the record and the challenge
+- In all cases, once a challenge is consumed, it cannot be reused. The
+  protection is structural: the challenge record is deleted, so subsequent
+  `complete_challenge` or `cancel_challenge` calls fail with `NoChallengeActive`
+  before attempting any state mutation
+
+Covered by `tests/challenge.rs`: `test_consumed_challenge_cannot_be_reused_via_complete`,
+`test_consumed_challenge_cannot_be_reused_via_cancel`,
+`test_new_challenge_on_re_registered_username_is_independent`, and
+`test_self_remove_during_challenge_clears_challenge`.
+
 #### `cancel_challenge(caller: Address, github_username: String) -> Result<(), ContractError>`
 
 Cancels a pending challenge, restoring normal registration behaviour.
@@ -2968,6 +3060,11 @@ Emits `ChallengeCancelledEvent`.
 |---|---|
 | **Auth** | Admin |
 | **Errors** | `NotInitialized`, `Paused`, `NotAuthorized`, `NoChallengeActive` |
+
+**Idempotency:** `cancel_challenge` is **not** idempotent. The first call succeeds
+and removes the challenge; a second call on the same username returns
+`NoChallengeActive`. This prevents silent double-cancel logic bugs and ensures
+operators know when they're canceling a challenge that no longer exists.
 
 #### `complete_challenge(caller: Address, github_username: String) -> Result<(), ContractError>`
 
@@ -2981,6 +3078,11 @@ The deadline is inclusive: completion returns `ChallengeNotResolvable` while
 | **Auth** | Admin |
 | **Errors** | `NotInitialized`, `Paused`, `NotAuthorized`, `NoChallengeActive`, `ChallengeNotResolvable`, `NotRegistered` |
 
+**Idempotency:** `complete_challenge` is **not** idempotent. The first successful
+call removes both the registration and the challenge; a second call returns
+`NoChallengeActive`. Operators relying on idempotent retry logic should check
+`get_challenge` before retrying a failed completion.
+
 #### `get_challenge(github_username: String) -> Option<ChallengeRecord>`
 
 Returns the active challenge record, or `None`.
@@ -2989,6 +3091,14 @@ Returns the active challenge record, or `None`.
 |---|---|
 | **Auth** | None |
 | **Mutates** | No |
+
+Returns `None` for usernames that:
+- Never had a challenge
+- Had a challenge that was completed (`complete_challenge` consumed it)
+- Had a challenge that was cancelled (`cancel_challenge` consumed it)
+- Had a challenge that was cleared by self-remove (`remove` called by registrant)
+- Were re-registered after challenge completion (old challenge is gone; new challenge
+  only appears after `start_challenge` is called again)
 
 ---
 
