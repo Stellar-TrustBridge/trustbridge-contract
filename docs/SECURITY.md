@@ -77,6 +77,50 @@ cross-contract. `src/version.rs` exposes `CROSS_CONTRACT_READ_MIN_VERSION` /
 `Version::supports_cross_contract_reads()` so such a caller can assert
 compatibility the same way it does for `batch_verify`.
 
+### Cross-Contract Register is Denied (By Design)
+
+**TL;DR:** `register()` has no replay-protecting nonce and **cannot** be called
+cross-contract. A relaying contract can't satisfy `stellar_address.require_auth()`
+for an address it doesn't control, so the call fails closed. This is structural:
+the host authorization model denies it, not an explicit guard we added.
+
+**Why this matters:** Integrators sometimes attempt to build an onboarding or
+payout contract that calls `register` on behalf of contributors. This is
+unsupported and will never work. Understanding why prevents invalid bug reports.
+
+**What happens when a contract tries to call `register` cross-contract:**
+
+1. The relaying contract invokes `registry.register(username, victim_address)`
+2. `register` calls `victim_address.require_auth()`
+3. The Soroban host checks authorization in the **calling contract's** context
+4. The calling contract is **not** `victim_address` — it has no way to sign for
+   an external address it doesn't control
+5. Host aborts the invocation with missing auth (before `register` writes anything)
+
+**Why there's no nonce:** `register` doesn't add a nonce field because
+cross-contract register is already impossible. A nonce would only protect against
+replay if a relaying contract could ever call `register` in the first place —
+which it can't. Adding unused complexity (nonce storage, extra validation) for
+a path that is structurally closed would waste instruction budget and confuse
+integrators.
+
+**Proof:** `tests/cross_contract_register_deny.rs` asserts that:
+- A minimal sibling contract (`CallerContract`) that relays `register` to the
+  registry on behalf of another address **panics** with missing auth
+- The same `register` call succeeds when the real address owner signs directly
+  (proving the denial is about cross-contract auth boundaries, not a broken
+  `register`)
+
+**If cross-contract register is ever introduced:** It would require:
+1. A new `register_via_contract(nonce, proof)` entrypoint with explicit replay
+   protection (a nonce)
+2. An onboarding-contract allowlist or oracle proof of contributor identity
+3. A major-version ABI change and security audit
+
+Until then, **every contract** that attempts to call `register` cross-contract
+fails auth, and that failure is deliberate. See `docs/SECURITY.md` for the
+complete rationale.
+
 ### Read surface exposed to a contract caller (Issue #149)
 
 These functions are read-only (no `.set` / `.remove`) and require **no

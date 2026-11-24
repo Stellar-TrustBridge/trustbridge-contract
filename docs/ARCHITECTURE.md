@@ -491,6 +491,16 @@ any contract can call another contract's public functions directly via
 the registry's existing read functions (`get_address`, `has_record`,
 `get_stats`, `get_role`, …) already satisfy it.
 
+**Cross-contract register is denied by design.** `register` requires
+`stellar_address.require_auth()`, which the host evaluates in the **calling
+contract's** context. A relaying contract cannot supply an external address's
+signature, so it can't ever pass that auth check — the call fails closed before
+writing anything. `register` has no replay-protecting nonce **because**
+cross-contract register is already structurally impossible. Adding unused
+complexity for a path that cannot exist would waste instruction budget and
+mislead integrators. See `docs/SECURITY.md § Cross-Contract Register is Denied`
+for the full rationale and `tests/cross_contract_register_deny.rs` for proof.
+
 The one design decision this forces is which functions are *appropriate* to
 expose that way. A cross-contract call runs in the caller's authorization
 context, so a sibling contract can never supply the registry admin's
