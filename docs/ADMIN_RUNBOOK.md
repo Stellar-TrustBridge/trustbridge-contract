@@ -468,8 +468,9 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 The externally callable ABI functions are `stage_wasm`, `get_staged`,
 and `clear_staged`. In particular, `commit_staged_wasm` is **not** an
 exported function; `clear_staged_wasm` is only an internal Rust storage
-helper. See [ABI staged WASM entrypoints](ABI.md#staged-wasm-entrypoints-issue-594)
-and [staged-slot security](SECURITY.md#staged-wasm-slot-issue-300).
+helper. See [ABI staged WASM entrypoints](ABI.md#staged-wasm-entrypoints-issue-594),
+[staged-slot security](SECURITY.md#staged-wasm-slot-issue-300), and
+[malicious-hash threat model](SECURITY.md#staged-wasm-malicious-hash-threat-model-issue-804).
 
 The hash below is the 32-byte hex WASM hash returned by
 `stellar contract install`. `CONTRACT_ID`, `NETWORK`, and `ADMIN`
@@ -523,11 +524,15 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 
 ```bash
 stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
-  -- set_attestation_required --required true
+  -- set_attestation_required --caller "$ADMIN" --required true
 ```
 
-- **Auth:** admin only. When `true`, `upgrade` without a live matching
-  attestation fails `AttestationRequired` (code 20). Default `false`.
+- **Auth:** admin only. When `true`, an upgrade without an attestation record
+  fails `AttestationRequired` (code 29). The regular `upgrade` path also checks
+  the hash and expiry. Default `false`; available while paused. Clearing an
+  attestation does not disable the flag. Multisig execution checks for a record
+  but does not validate its hash or expiry; verify the proposal and attestation
+  separately before approving or executing.
 
 #### `attest_upgrade` — declare the next hash in advance
 

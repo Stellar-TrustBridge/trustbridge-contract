@@ -567,3 +567,247 @@ fn test_challenge_ops_blocked_while_paused() {
         );
     });
 }
+
+// ── Challenge reuse prevention (Issue #XYZ) ───────────────────────────────────
+
+#[test]
+fn test_consumed_challenge_cannot_be_reused_via_complete() {
+    let (env, admin, user, contract_id) = setup();
+    register(&env, &contract_id, &user, "octocat");
+
+    // Start challenge
+    let started = env.ledger().timestamp();
+    start_challenge(&env, &contract_id, &admin, "octocat");
+
+    // Advance past the delay and complete the challenge
+    env.ledger()
+        .set_timestamp(started.saturating_add(DEFAULT_CHALLENGE_DELAY_SECS + 1));
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::complete_challenge(
+            env.clone(),
+            admin.clone(),
+            username(&env, "octocat"),
+        )
+        .unwrap();
+    });
+
+    // Challenge has been consumed - record and challenge are both gone
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).is_none());
+        assert!(
+            TrustBridgeContract::get_challenge(env.clone(), username(&env, "octocat")).is_none()
+        );
+    });
+
+    // Attempting to complete the same challenge again must fail with NoChallengeActive
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::complete_challenge(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+            ),
+            Err(ContractError::NoChallengeActive),
+            "completing a consumed challenge must fail"
+        );
+    });
+
+    // Attempting to cancel the consumed challenge must also fail
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::cancel_challenge(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+            ),
+            Err(ContractError::NoChallengeActive),
+            "cancelling a consumed challenge must fail"
+        );
+    });
+}
+
+#[test]
+fn test_consumed_challenge_cannot_be_reused_via_cancel() {
+    let (env, admin, user, contract_id) = setup();
+    register(&env, &contract_id, &user, "octocat");
+
+    // Start challenge and immediately cancel it
+    start_challenge(&env, &contract_id, &admin, "octocat");
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::cancel_challenge(
+            env.clone(),
+            admin.clone(),
+            username(&env, "octocat"),
+        )
+        .unwrap();
+    });
+
+    // Challenge has been consumed via cancel - record remains but challenge is gone
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).is_some());
+        assert!(
+            TrustBridgeContract::get_challenge(env.clone(), username(&env, "octocat")).is_none()
+        );
+    });
+
+    // Attempting to cancel the same challenge again must fail
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::cancel_challenge(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+            ),
+            Err(ContractError::NoChallengeActive),
+            "cancelling a consumed challenge must fail"
+        );
+    });
+
+    // Attempting to complete the cancelled challenge must also fail
+    let started = env.ledger().timestamp();
+    env.ledger()
+        .set_timestamp(started.saturating_add(DEFAULT_CHALLENGE_DELAY_SECS + 1));
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::complete_challenge(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+            ),
+            Err(ContractError::NoChallengeActive),
+            "completing a cancelled challenge must fail"
+        );
+    });
+}
+
+#[test]
+fn test_new_challenge_on_re_registered_username_is_independent() {
+    let (env, admin, user1, contract_id) = setup();
+    let user2 = Address::generate(&env);
+
+    // User1 registers, challenge completes (removes record)
+    register(&env, &contract_id, &user1, "octocat");
+    let started1 = env.ledger().timestamp();
+    start_challenge(&env, &contract_id, &admin, "octocat");
+
+    env.ledger()
+        .set_timestamp(started1.saturating_add(DEFAULT_CHALLENGE_DELAY_SECS + 1));
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::complete_challenge(
+            env.clone(),
+            admin.clone(),
+            username(&env, "octocat"),
+        )
+        .unwrap();
+    });
+
+    // Name is now available. User2 registers the same username.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            username(&env, "octocat"),
+            user2.clone(),
+            Vec::new(&env),
+        )
+        .unwrap();
+    });
+
+    // A new challenge can be started on the re-registered username
+    let started2 = env.ledger().timestamp();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::start_challenge(
+            env.clone(),
+            admin.clone(),
+            username(&env, "octocat"),
+        )
+        .unwrap();
+    });
+
+    // This new challenge has its own lifecycle, independent of the previous one
+    env.as_contract(&contract_id, || {
+        let challenge = TrustBridgeContract::get_challenge(env.clone(), username(&env, "octocat"))
+            .expect("new challenge must exist");
+        assert_eq!(challenge.started_at, started2);
+        assert_eq!(
+            challenge.resolve_after,
+            started2.saturating_add(DEFAULT_CHALLENGE_DELAY_SECS)
+        );
+    });
+
+    // Complete the new challenge
+    env.ledger()
+        .set_timestamp(started2.saturating_add(DEFAULT_CHALLENGE_DELAY_SECS + 1));
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::complete_challenge(
+            env.clone(),
+            admin.clone(),
+            username(&env, "octocat"),
+        )
+        .unwrap();
+    });
+
+    // Both the new record and new challenge are now gone
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).is_none());
+        assert!(
+            TrustBridgeContract::get_challenge(env.clone(), username(&env, "octocat")).is_none()
+        );
+        assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 0);
+    });
+}
+
+#[test]
+fn test_self_remove_during_challenge_clears_challenge() {
+    let (env, admin, user, contract_id) = setup();
+    register(&env, &contract_id, &user, "octocat");
+
+    // Start challenge
+    start_challenge(&env, &contract_id, &admin, "octocat");
+
+    // Registrant self-removes during the challenge window
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::remove(env.clone(), user.clone(), username(&env, "octocat")).unwrap();
+    });
+
+    // Both record and challenge are gone
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::get_address(env.clone(), username(&env, "octocat")).is_none());
+        assert!(
+            TrustBridgeContract::get_challenge(env.clone(), username(&env, "octocat")).is_none()
+        );
+    });
+
+    // Attempting to complete the challenge now fails because there's no record
+    let started = env.ledger().timestamp();
+    env.ledger()
+        .set_timestamp(started.saturating_add(DEFAULT_CHALLENGE_DELAY_SECS + 1));
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::complete_challenge(
+                env.clone(),
+                admin.clone(),
+                username(&env, "octocat"),
+            ),
+            Err(ContractError::NoChallengeActive),
+            "completing after self-remove must fail with NoChallengeActive"
+        );
+    });
+}
