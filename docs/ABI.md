@@ -402,7 +402,7 @@ struct ChallengeRecord {
 | 57 | `RoleExpired` | A role-gated privileged invocation was made at or after the role's expiry timestamp |
 | 58 | `OracleProofBadLayout` | `verify_with_proof`: empty `message` or all-zero `signature` (structurally malformed proof) |
 | 59 | `OracleProofNotAllowlisted` | `verify_with_proof`: `oracle_pubkey` is not on the oracle allowlist (always, when it is empty) |
-| 60 | `OracleProofExpired` | `verify_with_proof`: non-zero `expires_at` is earlier than the ledger timestamp |
+| 60 | `OracleProofExpired` | `verify_with_proof`: ledger timestamp exceeds non-zero `expires_at` by more than 30 seconds |
 | 61 | `OracleProofBadSignature` | `verify_with_proof`: signature is not a canonical Ed25519 encoding |
 | 62 | `AddressMismatch` | `verify_with_oracle_proof`: proof message is not bound to the record's current `stellar_address` |
 
@@ -1186,7 +1186,12 @@ and `message` must be exactly
 `<github_username>:<stellar_address strkey>:<expires_at decimal>` for the
 record's current `stellar_address` — see
 [SECURITY.md](SECURITY.md#oracle-signed-proof-interface-signature-check).
-`expires_at = 0` skips the expiry check. On success the record, counters,
+`expires_at = 0` skips the expiry check (not recommended for production).
+For a non-zero expiry, ledger time at or before `expires_at + 30` seconds
+is accepted, including the exact boundary; a difference of 31 seconds or
+more returns `OracleProofExpired` (60). The comparison uses saturating
+subtraction to avoid overflow. The fixed 30-second grace is not configurable
+and does not change the signed message. On success the record, counters,
 `VerifiedEvent`, and audit log update exactly as for `verify`.
 
 **Auth:** the registered `stellar_address`.
