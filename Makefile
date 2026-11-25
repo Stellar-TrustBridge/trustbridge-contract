@@ -41,7 +41,7 @@ FUTURENET_FRIENDBOT_URL ?= https://friendbot-futurenet.stellar.org
 FUTURENET_IDENTITY ?= $(SOURCE)
 FUTURENET_DRY_RUN ?= false
 
-.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser soak-cursor soak-register-verify storage-keys-check storage-footprint-check storage-rent-check storage-rent-estimator storage-rent-estimator-golden bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-batch-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
+.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser soak-cursor soak-register-verify storage-keys-check storage-footprint-check storage-rent-check storage-rent-estimator storage-rent-estimator-golden bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-batch-register-budget bench-pending-reverify bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
         invoke-verify invoke-revoke-verification invoke-get-all-registered invoke-export-paginated \
@@ -133,7 +133,10 @@ bench-username: ## Write username case-normalization benchmark results to $(NORM
 bench-double-verify: ## Report CPU/memory cost of double-verify rejection vs successful verify
 	cargo test test_bench_double_verify_rejection -- --nocapture --test-threads=1
 
-bench-budget-ci: ## Run all bench tests + regression check against ci/bench-samples.csv (mirrors CI bench-budget job)
+bench-pending-reverify: ## Check pending reverify scan budgets and boundary behavior
+	cargo test --lib pending_reverify_scan -- --nocapture --test-threads=1
+
+bench-budget-ci: bench-pending-reverify ## Run all bench tests + regression check against ci/bench-samples.csv (mirrors CI bench-budget job)
 	@echo "Running benchmark tests (--test-threads=1 for stable metering)..."
 	@cargo test \
 		test_bench_username_case_normalization \
