@@ -17,17 +17,21 @@ Before sharing a testnet deployment, confirm the full registry lifecycle. Run ev
    ```bash
    make build
    ```
-2. **Deploy** to Stellar testnet.
+2. **Verify WASM hash pin in strict mode** to ensure release artifact matches `wasm-hash.pin` without PLACEHOLDER drift.
+   ```bash
+   make wasm-hash-pin WASM_HASH_STRICT=1
+   ```
+3. **Deploy** to Stellar testnet.
    ```bash
    make deploy-testnet
    ```
-3. **Verify** the WASM hash from the deployment output and record it.
+4. **Verify** the WASM hash from the deployment output and record it against `wasm-hash.pin`.
    Confirm `deployments/testnet.json` contains the `contract_id`.
-4. **Initialize** the contract with the admin address (if not auto-initialized by deploy).
+5. **Initialize** the contract with the admin address (if not auto-initialized by deploy).
    ```bash
    make invoke-init
    ```
-5. **Prime oracle allowlist** (Issue #4) for Wave verification demos.
+6. **Prime oracle allowlist** (Issue #4) for Wave verification demos.
    
    **Why this matters**: Unprimed oracle allowlists block `verify_with_oracle_proof`
    calls during Wave demos, causing `OracleProofNotAllowlisted` (error code 59)
@@ -91,7 +95,7 @@ Before sharing a testnet deployment, confirm the full registry lifecycle. Run ev
       ```
       If the proof is valid and the oracle key is allowlisted, this succeeds.
       Otherwise, check the error code:
-      - `OracleProofNotAllowlisted` (59): pubkey not in allowlist → repeat step 5b
+      - `OracleProofNotAllowlisted` (59): pubkey not in allowlist → repeat step 6b
       - `OracleProofExpired` (60): proof `expires_at` has passed → regenerate proof
       - `OracleProofBadSignature` (61): signature invalid → check message encoding
       - `AddressMismatch` (62): proof message not bound to this username/address
@@ -111,31 +115,31 @@ Before sharing a testnet deployment, confirm the full registry lifecycle. Run ev
    - `docs/SECURITY.md § Oracle proof verification` — threat model and key management
    - `docs/ADMIN_RUNBOOK.md § Oracle allowlist rotation` — operator recipes
    
-6. **Register** a sample GitHub username with a test Stellar address.
+7. **Register** a sample GitHub username with a test Stellar address.
    ```bash
    make invoke-register GITHUB_USER=testuser STELLAR_ADDR=G... SOURCE=deployer
    ```
-7. **Look up** the registered username to confirm the record is correct.
+8. **Look up** the registered username to confirm the record is correct.
    ```bash
    make invoke-lookup GITHUB_USER=testuser SOURCE=deployer
    ```
-8. **Verify** the sample contributor as admin.
+9. **Verify** the sample contributor as admin.
    ```bash
    make invoke-verify GITHUB_USER=testuser SOURCE=admin CONTRACT_ID=$CONTRACT_ID
    ```
-9. **Check stats** to confirm the verified count incremented.
+10. **Check stats** to confirm the verified count incremented.
    ```bash
    make invoke-stats SOURCE=deployer CONTRACT_ID=$CONTRACT_ID
    ```
-10. **Revoke** verification to confirm the admin can unwrap a verified record.
+11. **Revoke** verification to confirm the admin can unwrap a verified record.
    ```bash
    make invoke-revoke-verification GITHUB_USER=testuser SOURCE=admin CONTRACT_ID=$CONTRACT_ID
    ```
-11. **Remove** the sample registration (admin or registrant).
+12. **Remove** the sample registration (admin or registrant).
     ```bash
     make invoke-remove CALLER=$ADMIN GITHUB_USER=testuser SOURCE=admin CONTRACT_ID=$CONTRACT_ID
     ```
-12. **Confirm** lookup returns empty for the removed username.
+13. **Confirm** lookup returns empty for the removed username.
     ```bash
     make invoke-lookup GITHUB_USER=testuser SOURCE=deployer CONTRACT_ID=$CONTRACT_ID
     ```
