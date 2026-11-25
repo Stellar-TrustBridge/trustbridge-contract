@@ -111,6 +111,9 @@ Unlike `get_health` it never errors, so an uninitialized deployment reports
 stellar contract invoke --id $CONTRACT_ID --network testnet -- get_health_probes
 ```
 
+Copy-paste post-deploy/upgrade steps and failure triage:
+[DEPLOYMENT.md § Post-deploy health probe](DEPLOYMENT.md#post-deploy-health-probe-issue-863).
+
 | Field | Healthy value | Unhealthy → action |
 |-------|---------------|--------------------|
 | `paused` | `false` | `true` → check `get_pause_reason`, then `unpause` per the runbook |
@@ -171,6 +174,33 @@ and cost no fees.
 **Caveat:** `cooldown_remaining_secs` counts from the last upgrade timestamp,
 and that timestamp is `0` on a never-upgraded deployment. On real networks the
 remaining time is therefore `0` until the first upgrade.
+
+### Attestation divergence alert mapping (Issue #848)
+
+`attestation_present` in `HealthSnapshot` is a **live-attestation check only**:
+it is `true` exactly when a stored WASM attestation has `expires_at > ledger
+timestamp`. It does **not** report the attestation policy. The policy is a
+separate public read, `get_attestation_required()` (default `false`), documented
+in [ABI.md § Attestation-Required Config](ABI.md#attestation-required-config-issue-198)
+and changed by the admin-only `set_attestation_required` in
+[ADMIN_RUNBOOK.md](ADMIN_RUNBOOK.md#set_attestation_required--require-pre-declared-hashes).
+Alert on the **pair**, never on `attestation_present: false` alone.
+
+| `get_attestation_required()` | `attestation_present` | Meaning | Alert |
+|---|---|---|---|
+| `false` | `false` | No attestation configured or published; default posture | **None** (healthy baseline) |
+| `false` | `true` | Optional attestation live inside a change window | Info; Warn if outside a scheduled window (existing rule above) |
+| `true` | `true` | Required, unexpired attestation live; upgrade can proceed | Info during a change window; Warn if it lingers after the window |
+| `true` | `false` | **Divergence:** required flag set but no live attestation (never published, cleared, or expired) | **Page** if an upgrade is scheduled/in-flight; otherwise **Warn** and re-attest before the window. `upgrade`/staged-WASM paths fail closed with `AttestationRequired` (code 20), or `AttestationExpired` (code 12) if a stale hash was used |
+
+Operator recovery: read `get_attestation()` for the stored hash/expiry, then
+`attest_upgrade(hash, expires_at)` with the intended hash. Do **not** clear the
+required flag to silence the alert; that would restore the unattested-upgrade
+path. If the divergence appeared without a change record, treat it as a
+potential admin-key or configuration incident and check
+`AdminTransferProposedEvent` / recent upgrade events. The stored attestation is
+cleared by `clear_attestation` and expiry is lazy, so a single `false` reading
+after expiry is expected; the required flag is what makes it actionable.
 
 Behaviour these rules depend on is pinned by
 [`tests/health_probes.rs`](../tests/health_probes.rs):

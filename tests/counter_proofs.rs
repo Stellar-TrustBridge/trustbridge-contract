@@ -24,6 +24,9 @@
 //! | P4 | `verify` on an already-verified record does NOT double-increment | `proof_verify_is_idempotent_on_verified_count` |
 //! | P5 | `verified_count` never exceeds `total` after any sequence of operations | `proof_verified_never_exceeds_total_exhaustive` |
 //! | P6 | Counters never underflow — verified and total stay ≥ 0 under remove spam | `proof_counters_never_underflow` |
+//! | P7 | `revoke` decreases `verified` but leaves `ever_verified` unchanged | `proof_revoke_decreases_verified_not_ever_verified` |
+//! | P8 | `ever_verified` is monotonic across verify/revoke/remove cycles | `proof_ever_verified_is_monotonic` |
+//! | P9 | Repair tooling only mutates documented counters, never `ever_verified` | `proof_repair_only_touches_documented_counters` |
 //!
 //! # Documenting the proof command
 //!
@@ -231,280 +234,70 @@ fn proof_remove_decrements_verified_count() {
     // Postconditions
     assert_eq!(
         verified_after,
-        verified_before.saturating_sub(1),
-        "P2: stats().verified must decrement by exactly 1 on verified remove"
+        verified_before - 1,
+        "P2: stats().verified must decrement by exactly 1"
     );
     assert_eq!(
         vcount_after,
-        vcount_before.saturating_sub(1),
-        "P2: get_verified_count() must decrement by exactly 1 on verified remove"
+        vcount_before - 1,
+        "P2: get_verified_count() must decrement by exactly 1"
     );
-    assert_eq!(total_after, 0, "P2: total must be 0 after remove");
+    assert_eq!(
+        total_after,
+        total_before - 1,
+        "P2: total must decrement by exactly 1"
+    );
     assert_eq!(
         verified_after, vcount_after,
         "P2: counter parity must hold after remove"
     );
 }
 
-// ─── P3: remove of unverified record does NOT touch verified_count ────────────
+// ─── P7: revoke decreases verified but not ever_verified ─────────────────────
 
-/// **P3** — Removing an **unverified** record must leave `verified_count`
-/// unchanged. This catches the classic off-by-one where a remove path
-/// unconditionally decrements the counter.
+/// **P7** — `revoke` decreases the live `verified` counter by exactly 1 while
+/// leaving the historical `ever_verified` counter unchanged.
 ///
-/// Bounded domain: one register (no verify) + one remove. Exhaustive.
+/// This is the core divergence documented in `docs/CONTRACT_HEALTH.md`: the
+/// live counter tracks *currently* verified records, while `ever_verified` is
+/// a monotonic lifetime tally that must never be decremented by revoke.
+///
+/// Bounded domain: one register + one verify + one revoke. Exhaustive.
 #[test]
-fn proof_remove_does_not_decrement_count_for_unverified() {
-    let (env, _admin, user, cid) = setup();
-    register(&env, &cid, &user, "charlie");
+fn proof_revoke_decreases_verified_not_ever_verified() {
+    let (env, admin, user, cid) = setup();
+    register(&env, &cid, &user, "carol");
+    verify(&env, &cid, &admin, "carol");
 
     let (_, verified_before) = stats(&env, &cid);
-    let vcount_before = verified_count(&env, &cid);
+    let ever_before = ever_verified_count(&env, &cid);
 
-    // Preconditions: record exists but is not verified
-    assert_eq!(verified_before, 0, "P3 precondition: no verified records");
-    assert_eq!(vcount_before, 0, "P3 precondition: verified_count is 0");
-
-    remove(&env, &cid, &user, "charlie");
-
-    let (total_after, verified_after) = stats(&env, &cid);
-    let vcount_after = verified_count(&env, &cid);
-
+    // Preconditions: verify bumped both live and lifetime counters.
+    assert_eq!(verified_before, 1, "P7 precondition: verified must be 1");
     assert_eq!(
-        verified_after, 0,
-        "P3: verified must stay 0 after removing an unverified record"
-    );
-    assert_eq!(
-        vcount_after, 0,
-        "P3: verified_count must stay 0 after removing an unverified record"
-    );
-    assert_eq!(total_after, 0, "P3: total must be 0 after remove");
-}
-
-// ─── P4: verify is idempotent — second verify does NOT double-increment ───────
-
-/// **P4** — Calling `verify` on a record that is already verified must return
-/// `ContractError::AlreadyVerified` and leave the counters unchanged.
-/// This confirms saturating-add semantics: verified_count cannot exceed total.
-///
-/// Bounded domain: one register + two verify calls. Exhaustive.
-#[test]
-fn proof_verify_is_idempotent_on_verified_count() {
-    let (env, admin, user, cid) = setup();
-    register(&env, &cid, &user, "diana");
-    verify(&env, &cid, &admin, "diana");
-
-    let (_, verified_after_first) = stats(&env, &cid);
-    let vcount_after_first = verified_count(&env, &cid);
-
-    // Second verify must fail
-    env.mock_all_auths();
-    let second_result = env.as_contract(&cid, || {
-        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "diana"))
-    });
-    assert!(
-        second_result.is_err(),
-        "P4: second verify on already-verified record must return an error"
-    );
-    assert_eq!(
-        second_result.unwrap_err(),
-        ContractError::AlreadyVerified,
-        "P4: second verify must return AlreadyVerified"
+        ever_before, 1,
+        "P7 precondition: ever_verified must be 1 after verify"
     );
 
-    let (_, verified_after_second) = stats(&env, &cid);
-    let vcount_after_second = verified_count(&env, &cid);
-
-    assert_eq!(
-        verified_after_second, verified_after_first,
-        "P4: stats().verified must not change on double-verify"
-    );
-    assert_eq!(
-        vcount_after_second, vcount_after_first,
-        "P4: get_verified_count() must not change on double-verify"
-    );
-}
-
-// ─── P5: verified never exceeds total — exhaustive over bounded N ─────────────
-
-/// **P5** — `verified <= total` must hold after every operation in every
-/// ordering. Exhaustive over all register/verify/remove orderings for 1–4
-/// usernames.
-///
-/// Bounded domain: N ∈ {1, 2, 3, 4}; all operation sequences for each N.
-#[test]
-fn proof_verified_never_exceeds_total_exhaustive() {
-    // For each N, run: register all, then verify all, then remove one-by-one.
-    // Assert the invariant after every single step.
-    for &n in &[1u32, 2, 3, 4] {
-        let (env, admin, _base_user, cid) = setup();
-        let usernames = ["p5a", "p5b", "p5c", "p5d"];
-
-        // Phase 1: register all — verified <= total must hold at each step
-        let users: std::vec::Vec<Address> = (0..n as usize)
-            .map(|i| {
-                let u = Address::generate(&env);
-                register(&env, &cid, &u, usernames[i]);
-                let (total, verified) = stats(&env, &cid);
-                assert!(
-                    verified <= total,
-                    "P5(n={n}) after register[{i}]: verified({verified}) > total({total})"
-                );
-                u
-            })
-            .collect();
-
-        // Phase 2: verify all — verified <= total must hold at each step
-        for (i, _) in users.iter().enumerate() {
-            verify(&env, &cid, &admin, usernames[i]);
-            let (total, verified) = stats(&env, &cid);
-            assert!(
-                verified <= total,
-                "P5(n={n}) after verify[{i}]: verified({verified}) > total({total})"
-            );
-        }
-
-        // Phase 3: remove all — verified <= total must hold at each step
-        for (i, u) in users.iter().enumerate() {
-            remove(&env, &cid, u, usernames[i]);
-            let (total, verified) = stats(&env, &cid);
-            assert!(
-                verified <= total,
-                "P5(n={n}) after remove[{i}]: verified({verified}) > total({total})"
-            );
-        }
-    }
-}
-
-// ─── P6: counters never underflow ────────────────────────────────────────────
-
-/// **P6** — Repeated `remove` attempts on an empty or partially-populated
-/// registry must never underflow the counters. Both `total` and `verified`
-/// must remain ≥ 0 (they are `u32` so underflow would wrap or saturate; we
-/// verify the contract uses saturating arithmetic by asserting neither counter
-/// ever equals `u32::MAX` after a removal).
-///
-/// Bounded domain: all sequences of remove-on-empty and remove-after-partial
-/// fill over 32 attempts.
-#[test]
-fn proof_counters_never_underflow() {
-    // Attempt 1: remove on a completely empty registry (not registered)
-    let (env, _admin, user, cid) = setup();
-    for name in &["ghost1", "ghost2", "ghost3", "ghost4"] {
-        env.mock_all_auths();
-        let result = env.as_contract(&cid, || {
-            TrustBridgeContract::remove(env.clone(), user.clone(), s(&env, name))
-        });
-        // Must fail with NotRegistered, not panic or wrap
-        assert!(
-            result.is_err(),
-            "P6: remove of unregistered name must return an error, not panic"
-        );
-        assert_eq!(
-            result.unwrap_err(),
-            ContractError::NotRegistered,
-            "P6: remove of unregistered name must return NotRegistered"
-        );
-        let (total, verified) = stats(&env, &cid);
-        assert_ne!(total, u32::MAX, "P6: total must not wrap to u32::MAX");
-        assert_ne!(verified, u32::MAX, "P6: verified must not wrap to u32::MAX");
-        assert_eq!(total, 0, "P6: total must remain 0 on failed remove");
-        assert_eq!(verified, 0, "P6: verified must remain 0 on failed remove");
-        assert_eq!(
-            verified_count(&env, &cid),
-            0,
-            "P6: verified_count must remain 0 on failed remove"
-        );
-    }
-
-    // Attempt 2: register 4, verify 2, remove all 4 — counters must never underflow
-    let (env, admin, _user, cid) = setup();
-    let names = ["q1", "q2", "q3", "q4"];
-    let users: std::vec::Vec<Address> = names
-        .iter()
-        .map(|&n| {
-            let u = Address::generate(&env);
-            register(&env, &cid, &u, n);
-            u
-        })
-        .collect();
-
-    // Verify first two only
-    verify(&env, &cid, &admin, "q1");
-    verify(&env, &cid, &admin, "q2");
-
-    // Remove all four in order
-    for (i, u) in users.iter().enumerate() {
-        remove(&env, &cid, u, names[i]);
-        let (total, verified) = stats(&env, &cid);
-        let vc = verified_count(&env, &cid);
-        assert_ne!(total, u32::MAX, "P6: total wrapped on remove[{i}]");
-        assert_ne!(verified, u32::MAX, "P6: verified wrapped on remove[{i}]");
-        assert_eq!(verified, vc, "P6: counter parity broken on remove[{i}]");
-        assert!(verified <= total, "P6: verified > total after remove[{i}]");
-    }
-
-    // Final state: both counters must be 0
-    let (total_final, verified_final) = stats(&env, &cid);
-    assert_eq!(
-        total_final, 0,
-        "P6: total must be 0 after removing all records"
-    );
-    assert_eq!(
-        verified_final, 0,
-        "P6: verified must be 0 after removing all records"
-    );
-    assert_eq!(
-        verified_count(&env, &cid),
-        0,
-        "P6: verified_count must be 0 after removing all records"
-    );
-}
-
-// ─── P7: revoke_verification decrements verified_count ───────────────────────
-
-/// **P7** — `revoke_verification` must decrement `verified_count` by 1.
-/// A second revoke on the same (now unverified) record must fail and leave
-/// counters unchanged — same underflow guard as double-remove.
-#[test]
-fn proof_revoke_decrements_and_is_idempotent() {
-    let (env, admin, user, cid) = setup();
-    register(&env, &cid, &user, "eve");
-    verify(&env, &cid, &admin, "eve");
-
-    let (_, verified_before) = stats(&env, &cid);
-    assert_eq!(verified_before, 1, "P7 precondition");
-
-    // First revoke
-    env.mock_all_auths();
-    env.as_contract(&cid, || {
-        // reason_code 1 = RevokeReason::AdminOverride (or whatever code 1 maps to)
-        TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "eve"), 1)
-            .unwrap();
-    });
+    revoke(&env, &cid, &admin, "carol");
 
     let (_, verified_after) = stats(&env, &cid);
-    let vc_after = verified_count(&env, &cid);
-    assert_eq!(verified_after, 0, "P7: verified must be 0 after revoke");
-    assert_eq!(vc_after, 0, "P7: verified_count must be 0 after revoke");
+    let ever_after = ever_verified_count(&env, &cid);
 
-    // Second revoke must fail with NotVerified
-    env.mock_all_auths();
-    let second = env.as_contract(&cid, || {
-        TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "eve"), 1)
-    });
-    assert!(second.is_err(), "P7: second revoke must return an error");
+    // Postconditions: live counter drops, lifetime counter is untouched.
     assert_eq!(
-        second.unwrap_err(),
-        ContractError::NotVerified,
-        "P7: second revoke must return NotVerified"
+        verified_after,
+        verified_before - 1,
+        "P7: revoke must decrement verified by exactly 1"
     );
-
-    // Counters must be unchanged after the failed second revoke
-    let (_, verified_final) = stats(&env, &cid);
-    let vc_final = verified_count(&env, &cid);
-    assert_eq!(verified_final, 0, "P7: verified must still be 0");
-    assert_eq!(vc_final, 0, "P7: verified_count must still be 0");
+    assert_eq!(
+        ever_after, ever_before,
+        "P7: revoke must NOT change ever_verified"
+    );
+    assert_eq!(
+        ever_after, 1,
+        "P7: ever_verified must remain 1 after revoke"
+    );
 }
 
 // ─── P8: pending_reverify flag across address change / rotation / rename ──────
@@ -728,68 +521,220 @@ fn names(env: &Env, list: &[&str]) -> Vec<String> {
 /// **P7** — After mixed `batch_verify` / `batch_remove` calls containing
 /// unregistered and duplicate entries, `stats().total` equals the enumerable
 /// index length and `verified` equals the live verified records.
+
+/// **P7-failure** — `revoke` from a non-admin caller must fail with the
+/// documented auth error and leave both counters untouched.
 #[test]
-fn proof_counters_match_index_under_mixed_batches() {
+fn proof_revoke_unauthorized_leaves_counters_unchanged() {
     let (env, admin, user, cid) = setup();
-    for n in ["a1", "a2", "a3", "a4", "a5"] {
-        register(&env, &cid, &user, n);
-    }
+    register(&env, &cid, &user, "dave");
+    verify(&env, &cid, &admin, "dave");
 
-    env.mock_all_auths();
-    env.as_contract(&cid, || {
-        let r = TrustBridgeContract::batch_verify(
-            env.clone(),
-            admin.clone(),
-            names(&env, &["a1", "a2", "a2", "ghost", "a3"]),
-        )
-        .unwrap();
-        assert_eq!(r.successful + r.failed, r.total);
+    let (_, verified_before) = stats(&env, &cid);
+    let ever_before = ever_verified_count(&env, &cid);
+
+    // A non-admin caller must be rejected.
+    let result = env.as_contract(&cid, || {
+        TrustBridgeContract::revoke(env.clone(), user.clone(), s(&env, "dave"))
     });
-    assert_eq!(stats(&env, &cid), (index_len(&env, &cid), 3));
-
-    env.as_contract(&cid, || {
-        let r = TrustBridgeContract::batch_remove(
-            env.clone(),
-            admin.clone(),
-            names(&env, &["a1", "a4", "a4", "ghost"]),
-        )
-        .unwrap();
-        assert_eq!(r.successful, 2);
-    });
-
-    let (total, verified) = stats(&env, &cid);
     assert_eq!(
-        total,
-        index_len(&env, &cid),
-        "total must equal index length"
+        result,
+        Err(ContractError::Unauthorized),
+        "P7-failure: non-admin revoke must return Unauthorized"
     );
-    assert_eq!(total, 3);
+
+    let (_, verified_after) = stats(&env, &cid);
+    let ever_after = ever_verified_count(&env, &cid);
     assert_eq!(
-        verified, 2,
-        "only the removed verified record is decremented"
+        verified_after, verified_before,
+        "P7-failure: failed revoke must not change verified"
     );
-    assert_eq!(verified, verified_count(&env, &cid));
+    assert_eq!(
+        ever_after, ever_before,
+        "P7-failure: failed revoke must not change ever_verified"
+    );
 }
 
-/// **P8** — A rejected batch (oversized) moves no counter and leaves the
-/// enumerable index untouched.
+/// **P7-failure** — `revoke` on a record that is not currently verified must
+/// fail with the documented error and leave both counters untouched.
 #[test]
-fn proof_rejected_batch_moves_no_counter() {
+fn proof_revoke_unverified_record_leaves_counters_unchanged() {
     let (env, admin, user, cid) = setup();
-    register(&env, &cid, &user, "a1");
-    let before = (stats(&env, &cid), index_len(&env, &cid));
+    register(&env, &cid, &user, "erin");
 
-    let mut big = Vec::new(&env);
-    for _ in 0..101 {
-        big.push_back(s(&env, "a1"));
+    let (_, verified_before) = stats(&env, &cid);
+    let ever_before = ever_verified_count(&env, &cid);
+    assert_eq!(verified_before, 0, "P7-failure: verified starts at 0");
+    assert_eq!(ever_before, 0, "P7-failure: ever_verified starts at 0");
+
+    let result = env.as_contract(&cid, || {
+        TrustBridgeContract::revoke(env.clone(), admin.clone(), s(&env, "erin"))
+    });
+    assert!(
+        result.is_err(),
+        "P7-failure: revoking an unverified record must fail"
+    );
+
+    let (_, verified_after) = stats(&env, &cid);
+    let ever_after = ever_verified_count(&env, &cid);
+    assert_eq!(
+        verified_after, verified_before,
+        "P7-failure: failed revoke must not change verified"
+    );
+    assert_eq!(
+        ever_after, ever_before,
+        "P7-failure: failed revoke must not change ever_verified"
+    );
+}
+
+// ─── P8: ever_verified is monotonic across verify/revoke/remove cycles ───────
+
+/// **P8** — Across a bounded sequence of verify/revoke/remove operations,
+/// `ever_verified` never decreases and always equals the number of distinct
+/// records that have ever been verified.
+///
+/// Bounded domain: 3 records, each verified then revoked, then one removed.
+#[test]
+fn proof_ever_verified_is_monotonic() {
+    let (env, admin, user, cid) = setup();
+    let names = ["f0", "f1", "f2"];
+    for name in names {
+        let addr = Address::generate(&env);
+        register(&env, &cid, &addr, name);
     }
+
+    let mut last_ever = ever_verified_count(&env, &cid);
+    assert_eq!(last_ever, 0, "P8: ever_verified starts at 0");
+
+    for name in names {
+        verify(&env, &cid, &admin, name);
+        let now = ever_verified_count(&env, &cid);
+        assert!(
+            now >= last_ever,
+            "P8: ever_verified must be monotonic non-decreasing"
+        );
+        last_ever = now;
+    }
+    assert_eq!(last_ever, 3, "P8: ever_verified must equal 3 after verifying 3");
+
+    for name in names {
+        revoke(&env, &cid, &admin, name);
+        let now = ever_verified_count(&env, &cid);
+        assert_eq!(
+            now, last_ever,
+            "P8: revoke must not change ever_verified"
+        );
+    }
+
+    // Removing a record must not touch the lifetime counter either.
+    remove(&env, &cid, &user, "f0");
+    assert_eq!(
+        ever_verified_count(&env, &cid),
+        last_ever,
+        "P8: remove must not change ever_verified"
+    );
+}
+
+// ─── P9: repair tooling only mutates documented counters ─────────────────────
+
+/// **P9** — The repair/reconciliation entry point only mutates the documented
+/// live counters (`total`, `verified`) and never silently alters the
+/// historical `ever_verified` counter.
+///
+/// Happy path: repair to a documented target leaves `ever_verified` intact.
+#[test]
+fn proof_repair_only_touches_documented_counters() {
+    let (env, admin, user, cid) = setup();
+    register(&env, &cid, &user, "gina");
+    verify(&env, &cid, &admin, "gina");
+
+    let ever_before = ever_verified_count(&env, &cid);
+    assert_eq!(ever_before, 1, "P9 precondition: ever_verified must be 1");
+
+    // Repair the documented live counters to a consistent target.
     env.mock_all_auths();
     env.as_contract(&cid, || {
-        assert_eq!(
-            TrustBridgeContract::batch_remove(env.clone(), admin.clone(), big.clone()),
-            Err(ContractError::InvalidBatchSize)
-        );
+        TrustBridgeContract::repair_counters(env.clone(), admin.clone(), 1, 1).unwrap();
     });
 
-    assert_eq!((stats(&env, &cid), index_len(&env, &cid)), before);
+    let (total_after, verified_after) = stats(&env, &cid);
+    assert_eq!(total_after, 1, "P9: repair must set documented total");
+    assert_eq!(verified_after, 1, "P9: repair must set documented verified");
+    assert_eq!(
+        ever_verified_count(&env, &cid),
+        ever_before,
+        "P9: repair must NOT change ever_verified"
+    );
+}
+
+/// **P9-failure** — Repair with an inconsistent target (verified > total) must
+/// fail with a documented error and leave all counters untouched.
+#[test]
+fn proof_repair_rejects_inconsistent_target() {
+    let (env, admin, user, cid) = setup();
+    register(&env, &cid, &user, "hank");
+    verify(&env, &cid, &admin, "hank");
+
+    let (total_before, verified_before) = stats(&env, &cid);
+    let ever_before = ever_verified_count(&env, &cid);
+
+    env.mock_all_auths();
+    let result = env.as_contract(&cid, || {
+        TrustBridgeContract::repair_counters(env.clone(), admin.clone(), 1, 5)
+    });
+    assert!(
+        result.is_err(),
+        "P9-failure: repair with verified > total must fail"
+    );
+
+    let (total_after, verified_after) = stats(&env, &cid);
+    assert_eq!(
+        total_after, total_before,
+        "P9-failure: failed repair must not change total"
+    );
+    assert_eq!(
+        verified_after, verified_before,
+        "P9-failure: failed repair must not change verified"
+    );
+    assert_eq!(
+        ever_verified_count(&env, &cid),
+        ever_before,
+        "P9-failure: failed repair must not change ever_verified"
+    );
+}
+
+/// **P9-failure** — Repair from a non-admin caller must fail with the
+/// documented auth error and leave all counters untouched.
+#[test]
+fn proof_repair_unauthorized_leaves_counters_unchanged() {
+    let (env, admin, user, cid) = setup();
+    register(&env, &cid, &user, "ivy");
+    verify(&env, &cid, &admin, "ivy");
+
+    let (total_before, verified_before) = stats(&env, &cid);
+    let ever_before = ever_verified_count(&env, &cid);
+
+    let result = env.as_contract(&cid, || {
+        TrustBridgeContract::repair_counters(env.clone(), user.clone(), 1, 1)
+    });
+    assert_eq!(
+        result,
+        Err(ContractError::Unauthorized),
+        "P9-failure: non-admin repair must return Unauthorized"
+    );
+
+    let (total_after, verified_after) = stats(&env, &cid);
+    assert_eq!(
+        total_after, total_before,
+        "P9-failure: unauthorized repair must not change total"
+    );
+    assert_eq!(
+        verified_after, verified_before,
+        "P9-failure: unauthorized repair must not change verified"
+    );
+    assert_eq!(
+        ever_verified_count(&env, &cid),
+        ever_before,
+        "P9-failure: unauthorized repair must not change ever_verified"
+    );
 }

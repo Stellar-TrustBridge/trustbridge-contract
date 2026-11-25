@@ -6,7 +6,11 @@
 //! added without an entry, and an unrecorded code is exactly the one a later
 //! refactor feels free to renumber.
 
-use trustbridge_contract::{ContractError, ErrorCategory};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger as _, LedgerInfo},
+    Address, Env, String as SString, Vec as SVec,
+};
+use trustbridge_contract::{ContractError, ErrorCategory, TrustBridgeContract};
 
 const GOLDEN: &str = include_str!("../abi/contract_error_codes.golden");
 const ABI_DOCS: &str = include_str!("../docs/ABI.md");
@@ -446,4 +450,132 @@ fn error_category_mapping_matches_abi_documentation() {
         live_count,
         "ABI.md must document every live ContractError exactly once"
     );
+}
+
+#[test]
+fn pending_reverify_pagination_happy_path_and_documented_codes_match_abi() {
+    let error_rs = include_str!("../src/error.rs");
+    let storage_rs = include_str!("../src/storage.rs");
+
+    for (code, name) in [
+        (2u32, "NotInitialized"),
+        (14u32, "InvalidBatchSize"),
+        (30u32, "NetworkMismatch"),
+    ] {
+        let err = ContractError::from_code(code).expect("documented code must exist");
+        assert_eq!(err.code(), code);
+        assert_eq!(err.category(), ErrorCategory::Fatal);
+        assert!(ABI_DOCS.contains(name));
+        assert!(error_rs.contains(name));
+        assert!(storage_rs.contains(name));
+    }
+    assert!(ABI_DOCS.contains("### `get_pending_reverify(offset: u32, limit: u32)"));
+    assert!(ABI_DOCS.contains("Error codes & integrator notes for `get_pending_reverify`"));
+
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let user_a = Address::generate(&env);
+    let user_b = Address::generate(&env);
+    let contract_id = env.register(TrustBridgeContract, ());
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            SString::from_str(&env, "alice"),
+            user_a,
+            SVec::new(&env),
+        )
+        .unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(
+            env.clone(),
+            admin.clone(),
+            SString::from_str(&env, "alice"),
+        )
+        .unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            SString::from_str(&env, "alice"),
+            user_b,
+            SVec::new(&env),
+        )
+        .unwrap();
+    });
+    // Pause must not block get_pending_reverify.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::pause(env.clone(), 1).unwrap();
+    });
+
+    env.as_contract(&contract_id, || {
+        let default_page = TrustBridgeContract::get_pending_reverify(env.clone(), 0, 0).unwrap();
+        assert_eq!(
+            default_page,
+            SVec::from_array(&env, [SString::from_str(&env, "alice")])
+        );
+        let max_page = TrustBridgeContract::get_pending_reverify(env.clone(), 0, 100).unwrap();
+        assert_eq!(max_page, default_page);
+        let past_end =
+            TrustBridgeContract::get_pending_reverify(env.clone(), u32::MAX, 1).unwrap();
+        assert!(past_end.is_empty());
+    });
+}
+
+#[test]
+fn pending_reverify_pagination_uninitialized_returns_code_2() {
+    let env = Env::default();
+    let contract_id = env.register(TrustBridgeContract, ());
+    let res = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_pending_reverify(env.clone(), 0, 20)
+    });
+    assert_eq!(res, Err(ContractError::NotInitialized));
+    assert_eq!(res.unwrap_err().code(), 2);
+}
+
+#[test]
+fn pending_reverify_pagination_oversized_limit_returns_code_14() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(TrustBridgeContract, ());
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::initialize(env.clone(), admin).unwrap();
+    });
+
+    for bad_limit in [101u32, u32::MAX] {
+        let res = env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_pending_reverify(env.clone(), 0, bad_limit)
+        });
+        assert_eq!(res, Err(ContractError::InvalidBatchSize));
+        assert_eq!(res.unwrap_err().code(), 14);
+    }
+}
+
+#[test]
+fn pending_reverify_pagination_wrong_network_returns_code_30() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(TrustBridgeContract, ());
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::initialize(env.clone(), admin).unwrap();
+    });
+
+    let mut mismatched = [0u8; 32];
+    mismatched[0] = 0xAA;
+    let info = env.ledger().get();
+    env.ledger().set(LedgerInfo {
+        network_id: mismatched,
+        ..info
+    });
+
+    let res = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_pending_reverify(env.clone(), 0, 20)
+    });
+    assert_eq!(res, Err(ContractError::NetworkMismatch));
+    assert_eq!(res.unwrap_err().code(), 30);
 }

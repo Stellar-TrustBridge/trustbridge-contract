@@ -4,8 +4,11 @@
 //! never does, and the healthy/unhealthy field values alert rules key on.
 //!
 //! Run with `cargo test --test health_probes`.
+//! Issue #848 adds the attestation-required divergence alert mapping checks.
 
 #![cfg(test)]
+
+const HEALTH_DOC: &str = include_str!("../docs/CONTRACT_HEALTH.md");
 
 use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
@@ -194,4 +197,50 @@ fn cooldown_configured_without_upgrade_reports_zero_remaining() {
     let health = client.get_health();
     assert_eq!(health.cooldown_secs, 86_400);
     assert_eq!(health.cooldown_remaining_secs, 0);
+}
+
+// ── Attestation divergence (Issue #848) ──────────────────────────────────────
+
+/// Happy baseline: no attestation and no required flag is healthy, not a page.
+#[test]
+fn absent_attestation_without_required_flag_is_baseline() {
+    let (_env, client, _admin) = initialized();
+    assert!(!client.get_health().attestation_present);
+    assert!(!client.get_attestation_required());
+}
+
+/// Failure path 1 — the divergence itself: required flag set, no attestation
+/// published. The health field stays false; the policy read must be paired with
+/// it to produce the documented page/warn.
+#[test]
+fn required_flag_with_no_attestation_is_a_divergence() {
+    let (_env, client, admin) = initialized();
+    client.set_attestation_required(&admin, &true);
+
+    assert!(!client.get_health().attestation_present);
+    assert!(client.get_attestation_required());
+}
+
+/// Failure path 2 — a required attestation that expires leaves the same
+/// divergence: presence is false again, while the policy remains required.
+#[test]
+fn required_attestation_expiry_leaves_divergence_visible() {
+    let (env, client, admin) = initialized();
+    client.attest_upgrade(&BytesN::from_array(&env, &[9; 32]), &(NOW + 60));
+    client.set_attestation_required(&admin, &true);
+    assert!(client.get_health().attestation_present);
+
+    env.ledger().set_timestamp(NOW + 60);
+    assert!(!client.get_health().attestation_present);
+    assert!(client.get_attestation_required());
+}
+
+/// The runbook mapping is machine-checked so a doc edit cannot silently drop
+/// the page/warn rule for this divergence.
+#[test]
+fn health_doc_documents_divergence_alert_mapping() {
+    assert!(HEALTH_DOC.contains("Attestation divergence alert mapping (Issue #848)"));
+    assert!(HEALTH_DOC.contains("| `true` | `false` |"));
+    assert!(HEALTH_DOC.contains("AttestationRequired"));
+    assert!(HEALTH_DOC.contains("get_attestation_required()"));
 }

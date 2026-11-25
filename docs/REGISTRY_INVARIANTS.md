@@ -23,6 +23,46 @@ Related docs: [ABI](ABI.md) · [ARCHITECTURE](ARCHITECTURE.md) · [SECURITY](SEC
 
 ---
 
+## Hole policy (Issue #3)
+
+**What is a hole**: When a username is removed from the registry, its position in
+the flat username index is marked empty (a "hole") rather than immediately compacted.
+The chunked index mirrors this: a chunk that held the removed username now has one
+fewer live entry, but the chunk itself is not restructured until an explicit
+`compact_index` call.
+
+**Why holes exist**: Compacting the index on every `remove` would be O(N) —
+every removal would rewrite the entire tail of the index. Instead, `remove` is
+O(1): it marks the slot empty and leaves compaction as a separate, operator-driven
+maintenance step.
+
+**Wave exporter implications**: After one or more removals, the flat index and
+chunked index may contain gaps. Exporters **must not assume dense indexes** —
+iterating by sequential integer offset and expecting a live record at every position
+will skip records after the first hole. Use the paginated export APIs
+(`get_registered_paginated`, `get_public_paginated`), which handle holes correctly
+and never skip or duplicate records across page boundaries.
+
+**Operational guidance**:
+- `remove` and `batch_remove` create holes but do not compact automatically.
+- `compact_index` (admin-callable, permissionless in some configurations) rebuilds
+  the index without holes. Run it after large batch removals to reclaim index space.
+- Paginated exports work correctly with or without compaction — holes are transparent
+  to them, so an exporter does not need to compact before fetching.
+- After `compact_index`, previously issued pagination cursors become invalid
+  (`InvalidCursor` error) because the index generation has changed. Restart from
+  `cursor = None` to resume the export.
+
+**Test coverage**: `tests/registry_hole_policy.rs` asserts the membership property
+(every flat-index entry has a live record and appears in the chunks; every chunked
+entry appears in the flat index) across register / remove / compact sequences, at
+chunk boundaries, and after the registry empties and refills.
+
+See also [DASHBOARD_SYNC.md § Handling Removals](./DASHBOARD_SYNC.md#handling-removals)
+for the exporter recovery procedure after detecting a hole in a local mirror.
+
+---
+
 ## Enumerated Invariants
 
 | ID | Invariant | Enforced by |
@@ -33,6 +73,8 @@ Related docs: [ABI](ABI.md) · [ARCHITECTURE](ARCHITECTURE.md) · [SECURITY](SEC
 | I4 | `verified <= total` at all times | `assert_registry_invariants` |
 | I5 | The export index holds exactly one entry per live record (no leaks, no duplicates) | `assert_registry_invariants` |
 | I6 | Every username resolves to the address last registered for it, with the expected verification flag | `assert_registry_invariants` |
+| I7 | A pending-reverify page scan never exceeds its limit: `0` means 20, `100` is the maximum, `>100` fails with `InvalidBatchSize` before scanning (Issue #847) | `src/storage.rs` boundary tests |
+| I8 | A `PENDING_REVERIFY_KEY` flag is an attribute, not an index filter: flagged users remain in identical positions across all three export walks (Issue #853) | `tests/pagination_parity.rs` |
 | I7 | A rejected operation moves no counter and mutates no record | `test_fuzz_failure_paths_leave_invariants_intact` |
 | I8 | Counters never underflow, including removal attempts against an empty registry | `test_fuzz_counters_never_underflow_on_empty_registry` |
 | I9 | A complete paginated export visits every live username exactly once, with no duplicate, skip, or reorder across chunk boundaries | `test_paginated_export_at_10k_users` |
@@ -40,6 +82,20 @@ Related docs: [ABI](ABI.md) · [ARCHITECTURE](ARCHITECTURE.md) · [SECURITY](SEC
 | I11 | After mixed `batch_verify` / `batch_remove` calls (duplicates, unregistered names), `get_stats().total` equals the enumerable index length and `verified` equals live verified records | `tests/counter_proofs.rs::proof_counters_match_index_under_mixed_batches` |
 | I12 | A rejected batch (`InvalidBatchSize`) moves no counter and leaves the index untouched | `tests/counter_proofs.rs::proof_rejected_batch_moves_no_counter` |
 | I13 | A pagination cursor decodes only against the `INDEX_GEN` it was issued under; a cursor from any other generation (older, newer, or across the `u32::MAX` wrap) returns `InvalidCursor` on both `get_public_paginated` and `get_registered_paginated` | `test_public_paginated_rejects_cursor_from_any_other_generation`, `test_generation_wraps_at_u32_max_and_still_invalidates_cursors` |
+| I14 | `limit == 0` means `DEFAULT_PAGE_LIMIT` (20) on every registry export entrypoint; role enumeration is the sole exception at `MAX_ROLE_PAGE_LIMIT` (50) | `test_limit_zero_defaults_across_export_entrypoints`, `test_limit_zero_defaults_pending_reverify_and_role_holder_cap` |
+| I15 | A `limit == 0` cursor is still generation-checked; stale cursors fail with `InvalidCursor`, over-cap limits fail with `InvalidBatchSize`, and an empty registry fails with `NotInitialized` | `test_limit_zero_failure_paths_reject_stale_cursor_and_bad_config` |
+| I16 | A dual-control batch-remove proposal is live only while `now < proposed_at + BATCH_REMOVE_PROPOSAL_TTL_SECS`; at the exact boundary it is expired, cleared on execute, and replaceable by a fresh proposal | `test_proposal_is_executable_one_second_before_ttl`, `test_proposal_exactly_at_ttl_is_expired_and_cleared`, `test_stale_proposal_replacement_respects_ttl_boundary` |
+| I17 | Pending re-verification flags never gate export or attestation reads; `ExportPage` XDR and `ExportAttestation::digest` are independent of `PENDING_REVERIFY_KEY` except through normal record changes | `tests/export_page_layout.rs::pending_reverify_attestation` |
+
+### Pending reverify flags are advisory (Issue #864)
+
+A Wave address rotation can leave some usernames flagged in
+`PENDING_REVERIFY_KEY` while auditors still need a signed export. The flag is
+a per-username persistent marker, not an `ExportPage` field: `export_attestation`
+succeeds with any subset of records flagged, returns the same page as
+`get_registered_paginated`, and hashes only that page. Admin auth,
+initialization, and cursor validation remain enforced — flags do not weaken
+these checks. See [ABI.md § Signed export attestation](ABI.md#signed-export-attestation-issue-223).
 
 ### Cursors from other index generations (Issue #693)
 
@@ -54,6 +110,27 @@ removal would leave outstanding cursors valid against a shifted index.
 Recovery for clients is unchanged: on `InvalidCursor`, restart from
 `cursor = None` (see [DASHBOARD_SYNC.md](DASHBOARD_SYNC.md)). Covered by the
 I13 tests in `tests/cursor_pagination.rs`.
+
+### Zero-limit defaults (Issue #803)
+
+`limit = 0` is a request for the default page size, not an empty page. The
+registry exports (`get_registered_paginated`, `get_public_paginated`,
+`export_attestation`, `get_registered_page`, `get_pending_reverify`) all use
+`DEFAULT_PAGE_LIMIT = 20`. This does not relax any guard: cursors issued with
+`limit = 0` still carry the index generation and fail with `InvalidCursor`
+after a removal, and the initialization / batch-size checks still apply.
+`get_role_holders` intentionally uses `MAX_ROLE_PAGE_LIMIT = 50`, so its `0`
+is not interchangeable with the registry default — indexers must not assume a
+single zero-limit constant across all paged reads.
+
+### Dual-control proposal expiry (Issue #805)
+
+`is_batch_remove_proposal_expired` uses `>=`, aligning the batch-remove window
+with the upgrade-expiry convention: the exact `proposed_at + 86_400` second is
+already expired. `execute_batch_remove` clears the stale slot and returns
+`NoPendingBatchRemove` without removing records; `propose_batch_remove`
+treats that same slot as replaceable. A proposal kept for audit purposes must
+therefore be read before the boundary, not at it.
 
 ### `get_verified_count()` / `get_stats().verified` parity (Issue #90)
 
@@ -101,6 +178,38 @@ zeroed in the public page, the public root is computed over those redacted
 records, and substituting the private address invalidates that root. Existing
 same-window parity tests cover windows whose exported records match. A consumer
 must use the root from the same API and returned page it is verifying.
+
+### Mid-export reverify flag changes and Wave audit restart requirement
+
+`src/merkle.rs` encodes each leaf from `(github_username, stellar_address,
+verified)` and deliberately excludes `PENDING_REVERIFY_KEY` (`pend_rev`) and
+`ContributorRecord::is_bot`. During a multi-page export (`get_registered_paginated`,
+`get_public_paginated`, or `export_attestation`):
+
+- **Per-page root validity holds:** In-place verification and reverify transitions
+  (`register` / `register_sponsored` address change setting `pend_rev = true` and
+  `verified = false`, `execute_address_rotation`, `verify`, `batch_verify`,
+  `verify_with_oracle_proof`, `revoke_verification`) do **not** bump
+  `INDEX_GEN_KEY` (`idx_gen`). In-flight cursors continue to decode, and each
+  returned `ExportPage::merkle_root` accurately commits to that page's returned
+  `records` as of the ledger at which that page was read.
+- **Torn multi-page audits and stale proofs fail:** Because paginated reads are
+  not snapshot-isolated across multiple ledgers, flipping a record's `verified`
+  or `stellar_address` state mid-export invalidates prior proofs for that record
+  and causes a stitched multi-page export (`page1 ++ page2`) to diverge from a
+  single-shot snapshot root if an already-exported page changed before the walk
+  completed.
+- **Restart requirement for Wave audits:** Any whole-registry Wave audit must
+  either pause writes (`pause` / `set_paused`) for the export window or detect
+  mid-export drift (`get_last_event_ledger()`, `get_stats()`, or
+  `export_attestation().ledger` advancing) and **restart from `cursor = None`**.
+  Index-shifting operations (`remove`, `batch_remove`, `complete_challenge`, and
+  `rename` migrating `pend_rev`) bump `INDEX_GEN_KEY` and enforce restart directly
+  with `ContractError::InvalidCursor` (code `52`).
+
+Covered by `tests/merkle_export.rs` (`test_mid_export_reverify_flag_flip_*`,
+`test_stale_pre_reverify_proof_fails_against_post_reverify_page_root`, and
+`test_mid_export_rename_with_reverify_flag_invalidates_cursor_forcing_restart`).
 
 ### Challenge-period operations preserve count invariants (Issue #214)
 
