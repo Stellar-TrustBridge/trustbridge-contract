@@ -1576,6 +1576,15 @@ Covered by `tests/repair_index.rs`, which drifts the counters against a
 known-good fixture and checks both the dry-run report and the corrected
 on-chain state after `apply = true`.
 
+**Interaction with pending re-verify flags (Issue #857).** `repair_index`
+recomputes **only** `count` and `verified`. It never reads, clears, moves, or
+creates `PENDING_REVERIFY_KEY` flags, in either dry-run or apply mode. A
+flag set after an address change stays set through a dry run, a successful
+apply, and repeated no-op applies. Operators
+must still reconcile flags with `get_pending_reverify(offset, limit)` and
+clear them only through `verify` / `batch_verify` — an index repair must never
+be used as a shortcut to hide a Wave address-change risk.
+
 **Atomicity guarantee.** `apply = true` writes both `count` and `verified`
 within the same contract invocation — there is no intermediate state an
 observer can read where one counter has been corrected and the other has

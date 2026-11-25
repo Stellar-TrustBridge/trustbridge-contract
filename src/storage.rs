@@ -2785,6 +2785,10 @@ pub struct RepairReport {
 ///
 /// Pass `apply = false` for a dry run — nothing is written. Pass `apply = true`
 /// to correct any drift found; a call that finds no drift never writes.
+/// Recomputes only `count` / `verified`; never reads or clears
+/// `PENDING_REVERIFY_KEY` flags (Issue #857). Pending re-verify state stays
+/// authoritative for Wave address changes and is cleared only by `verify` /
+/// `batch_verify` — see `docs/SECURITY.md#index-repair-repair_index`.
 pub fn repair_index(env: &Env, apply: bool) -> RepairReport {
     let index = get_index(env);
     let mut recomputed_count: u32 = 0;

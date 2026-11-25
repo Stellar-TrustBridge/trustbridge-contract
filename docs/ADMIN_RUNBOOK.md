@@ -420,9 +420,13 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   single invocation** — there is no partial state where only one counter
   gets fixed; Soroban commits all of an invocation's storage writes or none
   of it. A call that finds no drift is a no-op even with `apply = true`.
+- **Pending re-verify flags are untouched.** `repair_index` only rewrites
+  `count` / `verified`; it never clears a `PENDING_REVERIFY_KEY` flag. After an
+  index repair, still page through `get_pending_reverify(offset, limit)` and
+  clear flags only with `verify` / `batch_verify`.
 - See [SECURITY.md § Index Repair](SECURITY.md#index-repair-repair_index)
-  for the full atomicity and dry-run-write guarantees, and
-  `tests/repair_index.rs` for the automated proof.
+  for the full atomicity, dry-run-write, and pending-flag guarantees, and
+  `tests/repair_index.rs` for the automated proof (`cargo test --test repair_index`).
 
 #### `set_bot_status` — flag / unflag a CI account
 
