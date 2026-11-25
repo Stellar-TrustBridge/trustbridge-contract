@@ -1,0 +1,37 @@
+[
+  {
+    "name": "dx",
+    "color": "0366d6",
+    "description": "Developer experience improvements"
+  },
+  {
+    "name": "documentation",
+    "color": "0075ca",
+    "description": "Documentation updates and improvements"
+  },
+  {
+    "name": "complexity: high",
+    "color": "b60205",
+    "description": "High complexity task requiring careful implementation"
+  },
+  {
+    "name": "points: 200",
+    "color": "fbca04",
+    "description": "Estimated at 200 story points"
+  },
+  {
+    "name": "wave",
+    "color": "5319e7",
+    "description": "Related to Wave registry system"
+  },
+  {
+    "name": "repo: trustbridge-contract",
+    "color": "1d76db",
+    "description": "Specific to trustbridge-contract repository"
+  },
+  {
+    "name": "category: Events",
+    "color": "cccccc",
+    "description": "Related to event handling and indexing"
+  }
+]

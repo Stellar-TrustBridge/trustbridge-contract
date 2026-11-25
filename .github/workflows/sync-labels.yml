@@ -1,0 +1,33 @@
+name: Sync GitHub Labels
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/labels.json'
+  workflow_dispatch:
+
+jobs:
+  sync-labels:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Sync labels
+        uses: Financial-Times/github-label-sync@v2
+        with:
+          labels: .github/labels.json
+          prune: false
+          delete: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Report sync status
+        if: always()
+        run: |
+          echo "Label sync completed"
+          echo "Check GitHub repository labels for updates"
