@@ -683,6 +683,30 @@ make storage-rent-estimator
 
 ---
 
+## Registering a migration step (Issue #858)
+
+Any change to stored layout or `Version` must add a row to the
+[migration step registry](ARCHITECTURE.md#migration-step-registry-issue-858)
+in `docs/ARCHITECTURE.md` **in the same PR** as the code. Copy this template:
+
+```markdown
+| Step | From → To | Idempotency key | Operator action | Automated test |
+|---|---|---|---|---|
+| `<step-id>` | `<x.y.z>` → `<a.b.c>` | `<storage key / condition>` | `<runbook command or "none">` | `src/version.rs::<test_name>` |
+```
+
+Rules:
+
+- `From → To` must be strictly forward; equal/lower targets are rejected (see
+  `src/version.rs::tests::migrate_rejects_*`).
+- State the idempotency key so a repeated `migrate` cannot double-apply writes.
+- Link at least one test covering the happy path **and** a failure path; a
+  docs-only row is not enough.
+- Update `docs/ARCHITECTURE.md`, `src/version.rs`, `src/storage.rs`, and this
+  file together so operators and reviewers see the same registry.
+- Verify with `cargo test --lib version::tests` before opening the PR; include
+  the output in the PR description.
+
 ## Snapshot Stabilization Policy
 
 ### What are snapshots?

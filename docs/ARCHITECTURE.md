@@ -532,6 +532,30 @@ See `src/version.rs::tests::migrate_rejects_equal_target_tuple_comparison` and
 `migrate_rejects_lower_target_across_all_tuple_positions` for the automated
 proof covering all three tuple positions.
 
+## Migration Step Registry (Issue #858)
+
+`src/version.rs` owns `Version`, `MigrationState`, and `CompatibilityInfo`;
+`src/storage.rs` owns the keys a step touches. Every migration step must be
+registered here before a Wave upgrade. This is a documentation template, not a
+new entry point — `migrate` and `CompatibilityInfo::for_upgrade` remain the
+existing surfaces.
+
+| Step | From → To | Idempotency key | Operator action | Automated test |
+|---|---|---|---|---|
+| `<step-id>` | `<x.y.z>` → `<a.b.c>` | `<storage key / guard>` | `<runbook command or "none">` | `src/version.rs::<test_name>` |
+
+Fill one row per step; do not add a separate subsystem or duplicate the
+semver rules above. `From → To` is strictly forward (equal/lower rejected),
+the idempotency key names the exact storage condition checked before writes,
+and `Operator action` links to the relevant `docs/ADMIN_RUNBOOK.md` section or
+states `none`. Every row must point to a test that exercises the happy path and
+at least one failure path; `src/version.rs` unit tests are the default place.
+Contributor checklist:
+[CONTRIBUTING.md § Registering a migration step](CONTRIBUTING.md#registering-a-migration-step-issue-858).
+
+Proof: `cargo test --lib version::tests`. A missing row is an undocumented
+migration and blocks Wave upgrade review.
+
 ## Migration Window Reads
 
 During a registry migration window, dashboards should treat the on-chain

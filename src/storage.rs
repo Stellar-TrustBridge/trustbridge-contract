@@ -1,6 +1,9 @@
 //! Instance vs. persistent storage layout, TTL constants, and per-key rent
 //! behavior are documented in `docs/STORAGE_RENT.md` — read that before
 //! changing `TTL_THRESHOLD` / `TTL_BUMP` or adding a new persistent key.
+//! A schema change also needs a row in the migration step registry in
+//! `docs/ARCHITECTURE.md` (Issue #858); the idempotency key names the exact
+//! storage condition checked here before a step writes.
 
 use soroban_sdk::{symbol_short, xdr::ToXdr, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
