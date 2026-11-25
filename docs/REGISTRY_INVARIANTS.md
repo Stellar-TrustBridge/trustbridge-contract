@@ -23,6 +23,46 @@ Related docs: [ABI](ABI.md) · [ARCHITECTURE](ARCHITECTURE.md) · [SECURITY](SEC
 
 ---
 
+## Hole policy (Issue #3)
+
+**What is a hole**: When a username is removed from the registry, its position in
+the flat username index is marked empty (a "hole") rather than immediately compacted.
+The chunked index mirrors this: a chunk that held the removed username now has one
+fewer live entry, but the chunk itself is not restructured until an explicit
+`compact_index` call.
+
+**Why holes exist**: Compacting the index on every `remove` would be O(N) —
+every removal would rewrite the entire tail of the index. Instead, `remove` is
+O(1): it marks the slot empty and leaves compaction as a separate, operator-driven
+maintenance step.
+
+**Wave exporter implications**: After one or more removals, the flat index and
+chunked index may contain gaps. Exporters **must not assume dense indexes** —
+iterating by sequential integer offset and expecting a live record at every position
+will skip records after the first hole. Use the paginated export APIs
+(`get_registered_paginated`, `get_public_paginated`), which handle holes correctly
+and never skip or duplicate records across page boundaries.
+
+**Operational guidance**:
+- `remove` and `batch_remove` create holes but do not compact automatically.
+- `compact_index` (admin-callable, permissionless in some configurations) rebuilds
+  the index without holes. Run it after large batch removals to reclaim index space.
+- Paginated exports work correctly with or without compaction — holes are transparent
+  to them, so an exporter does not need to compact before fetching.
+- After `compact_index`, previously issued pagination cursors become invalid
+  (`InvalidCursor` error) because the index generation has changed. Restart from
+  `cursor = None` to resume the export.
+
+**Test coverage**: `tests/registry_hole_policy.rs` asserts the membership property
+(every flat-index entry has a live record and appears in the chunks; every chunked
+entry appears in the flat index) across register / remove / compact sequences, at
+chunk boundaries, and after the registry empties and refills.
+
+See also [DASHBOARD_SYNC.md § Handling Removals](./DASHBOARD_SYNC.md#handling-removals)
+for the exporter recovery procedure after detecting a hole in a local mirror.
+
+---
+
 ## Enumerated Invariants
 
 | ID | Invariant | Enforced by |
@@ -103,6 +143,38 @@ zeroed in the public page, the public root is computed over those redacted
 records, and substituting the private address invalidates that root. Existing
 same-window parity tests cover windows whose exported records match. A consumer
 must use the root from the same API and returned page it is verifying.
+
+### Mid-export reverify flag changes and Wave audit restart requirement
+
+`src/merkle.rs` encodes each leaf from `(github_username, stellar_address,
+verified)` and deliberately excludes `PENDING_REVERIFY_KEY` (`pend_rev`) and
+`ContributorRecord::is_bot`. During a multi-page export (`get_registered_paginated`,
+`get_public_paginated`, or `export_attestation`):
+
+- **Per-page root validity holds:** In-place verification and reverify transitions
+  (`register` / `register_sponsored` address change setting `pend_rev = true` and
+  `verified = false`, `execute_address_rotation`, `verify`, `batch_verify`,
+  `verify_with_oracle_proof`, `revoke_verification`) do **not** bump
+  `INDEX_GEN_KEY` (`idx_gen`). In-flight cursors continue to decode, and each
+  returned `ExportPage::merkle_root` accurately commits to that page's returned
+  `records` as of the ledger at which that page was read.
+- **Torn multi-page audits and stale proofs fail:** Because paginated reads are
+  not snapshot-isolated across multiple ledgers, flipping a record's `verified`
+  or `stellar_address` state mid-export invalidates prior proofs for that record
+  and causes a stitched multi-page export (`page1 ++ page2`) to diverge from a
+  single-shot snapshot root if an already-exported page changed before the walk
+  completed.
+- **Restart requirement for Wave audits:** Any whole-registry Wave audit must
+  either pause writes (`pause` / `set_paused`) for the export window or detect
+  mid-export drift (`get_last_event_ledger()`, `get_stats()`, or
+  `export_attestation().ledger` advancing) and **restart from `cursor = None`**.
+  Index-shifting operations (`remove`, `batch_remove`, `complete_challenge`, and
+  `rename` migrating `pend_rev`) bump `INDEX_GEN_KEY` and enforce restart directly
+  with `ContractError::InvalidCursor` (code `52`).
+
+Covered by `tests/merkle_export.rs` (`test_mid_export_reverify_flag_flip_*`,
+`test_stale_pre_reverify_proof_fails_against_post_reverify_page_root`, and
+`test_mid_export_rename_with_reverify_flag_invalidates_cursor_forcing_restart`).
 
 ### Challenge-period operations preserve count invariants (Issue #214)
 

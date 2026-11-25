@@ -1002,8 +1002,11 @@ pub fn remove_from_index(env: &Env, github_username: &String) {
 // ── Opaque pagination cursors (Issue #215) ───────────────────────────────────
 
 /// Current index generation. Bumped by [`remove_from_index`] every time an
-/// existing entry's position could shift. Instance-scoped, defaulting to `0`
-/// for a fresh or pre-Issue-#215 instance.
+/// existing entry's position could shift (removal, batch removal, challenge
+/// completion, or rename removal). Instance-scoped, defaulting to `0` for a
+/// fresh or pre-Issue-#215 instance. There is intentionally no
+/// `IndexGenerationBumpedEvent`; dashboards detect this change with
+/// `get_health_probes().index_gen` and discard contract pagination cursors.
 pub fn get_index_generation(env: &Env) -> u32 {
     env.storage().instance().get(&INDEX_GEN_KEY).unwrap_or(0)
 }
@@ -1406,17 +1409,26 @@ pub fn clear_pending_reverify(env: &Env, github_username: &String) {
 /// Returns the usernames flagged for re-verification among index entries
 /// `[offset, offset + limit)` (Issue #587).
 ///
+/// Exposed on the contract ABI as `TrustBridgeContract::get_pending_reverify`.
 /// The scan touches at most `limit` index entries, so gas stays bounded no
 /// matter how large the registry is; a page may therefore hold fewer than
 /// `limit` usernames. Callers advance `offset` by `limit` until it reaches
-/// the registry count. `limit == 0` falls back to `DEFAULT_PAGE_LIMIT`.
+/// `get_stats().total`. `limit == 0` falls back to `DEFAULT_PAGE_LIMIT` (`20`).
 ///
 /// # Errors
 ///
-/// - [`ContractError::InvalidBatchSize`] if `limit > MAX_PAGE_LIMIT`.
-/// - Offsets are treated as an empty page once they reach the index length;
-///   the underlying index scan uses saturating end arithmetic so a hostile
-///   `u32::MAX` offset cannot wrap into an earlier page (Issue #757).
+/// - [`ContractError::InvalidBatchSize`] (code `14`, `Fatal`) if
+///   `limit > MAX_PAGE_LIMIT` (`100`).
+/// - [`ContractError::NotInitialized`] (code `2`, `Fatal`) and
+///   [`ContractError::NetworkMismatch`] (code `30`, `Fatal`) are enforced by
+///   `require_initialized` on the public `get_pending_reverify` entrypoint
+///   before calling this helper.
+/// - Offsets are treated as an empty page once they reach the index length
+///   (never `InvalidCursor`, code `52`); the underlying index scan uses
+///   saturating end arithmetic so a hostile `u32::MAX` offset cannot wrap into
+///   an earlier page (Issue #757).
+/// - Read-only, unauthenticated, and pause-exempt (never `NotAuthorized` / `3`
+///   or `Paused` / `7`).
 pub fn get_pending_reverify_page(
     env: &Env,
     offset: u32,
@@ -3063,7 +3075,9 @@ mod pending_reverify_tests {
         env.as_contract(&contract_id, || {
             let default_page = get_pending_reverify_page(&env, 0, 0).unwrap();
             assert_eq!(default_page.len(), 3);
-            assert!(get_pending_reverify_page(&env, u32::MAX, 1).unwrap().is_empty());
+            assert!(get_pending_reverify_page(&env, u32::MAX, 1)
+                .unwrap()
+                .is_empty());
             assert_eq!(
                 get_pending_reverify_page(&env, 0, MAX_PAGE_LIMIT + 1),
                 Err(ContractError::InvalidBatchSize)
@@ -3240,6 +3254,67 @@ mod storage_footprint_budget_tests {
         assert!(parse_budgets(&bad)
             .unwrap_err()
             .contains("not a byte count"));
+        let bad_row = format!("{BEGIN}\n| `reg` |\n{END}");
+        assert!(parse_budgets(&bad_row)
+            .unwrap_err()
+            .contains("malformed budget row"));
+        let inverted = format!("{END}\n{BEGIN}");
+        assert_eq!(
+            parse_budgets(&inverted).unwrap_err(),
+            "footprint-budget markers out of order"
+        );
+    }
+
+    #[test]
+    fn contributor_checklist_and_make_targets_are_documented() {
+        assert!(
+            FOOTPRINT_DOC.contains("## Contributor checklist for adding instance and persistent keys"),
+            "docs/STORAGE_FOOTPRINT.md missing contributor checklist"
+        );
+        assert!(
+            FOOTPRINT_DOC.contains("`make storage-footprint-check`"),
+            "docs/STORAGE_FOOTPRINT.md missing storage-footprint-check"
+        );
+        assert!(
+            FOOTPRINT_DOC.contains("`make storage-keys-check`"),
+            "docs/STORAGE_FOOTPRINT.md missing storage-keys-check"
+        );
+        assert!(
+            FOOTPRINT_DOC.contains("`make storage-rent-check`"),
+            "docs/STORAGE_FOOTPRINT.md missing storage-rent-check"
+        );
+        assert!(
+            FOOTPRINT_DOC.contains("`make storage-rent-estimator`"),
+            "docs/STORAGE_FOOTPRINT.md missing storage-rent-estimator"
+        );
+        assert!(
+            FOOTPRINT_DOC.contains("`make storage-check`"),
+            "docs/STORAGE_FOOTPRINT.md missing storage-check"
+        );
+    }
+
+    #[test]
+    fn instance_storage_growth_budget_ceiling_leaves_safe_headroom() {
+        const MAX_INSTANCE_ENTRY_BYTES: u32 = 65536;
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+        let client = crate::TrustBridgeContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        client.initialize(&admin);
+
+        // Fixed instance keys initialized at genesis must consume under 5 KiB,
+        // leaving substantial headroom (>50 KiB) for growth in idx before
+        // hitting the 64 KiB instance storage ceiling.
+        let estimated_fixed_bytes = 356u32;
+        assert!(
+            estimated_fixed_bytes < 5120,
+            "Fixed instance keys must stay compact"
+        );
+        assert!(
+            MAX_INSTANCE_ENTRY_BYTES - estimated_fixed_bytes > 50000,
+            "Instance entry must maintain > 50 KB headroom for registry growth"
+        );
     }
 }
 

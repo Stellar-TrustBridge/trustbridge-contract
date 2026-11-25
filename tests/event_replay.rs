@@ -72,6 +72,7 @@ const EVENT_TYPES: &[&str] = &[
     "upgrade_proposal_cancelled_event",
     "verification_configured_event",
     "audit_config_changed_event",
+    "oracle_allowlist_rotated_event",
 ];
 
 const NETWORK_ID: &str = "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472";
@@ -143,6 +144,7 @@ fn deliveries() -> Vec<Delivery> {
         Delivery { event_type: "upgrade_proposal_cancelled_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 33 },
         Delivery { event_type: "verification_configured_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 34 },
         Delivery { event_type: "audit_config_changed_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 35 },
+        Delivery { event_type: "oracle_allowlist_rotated_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 36 },
         // Exact reconnect deliveries for every event type.
         Delivery { event_type: "registered_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 1 },
         Delivery { event_type: "bot_status_changed_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 2 },
@@ -179,6 +181,7 @@ fn deliveries() -> Vec<Delivery> {
         Delivery { event_type: "upgrade_proposal_cancelled_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 33 },
         Delivery { event_type: "verification_configured_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 34 },
         Delivery { event_type: "audit_config_changed_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 35 },
+        Delivery { event_type: "oracle_allowlist_rotated_event", github_username: "", stellar_address: "", ledger_sequence: 1_003_000, tx_hash: tx5, event_index: 36 },
     ]
 }
 
@@ -460,4 +463,235 @@ fn index_generation_bumped_rejects_malformed_empty_reason() {
     assert_eq!(consumer.rejected_malformed, 1);
     assert_eq!(consumer.applied, 0);
     assert_eq!(consumer.generation, None);
+
+// ── Reverify event absence & authoritative poll API ──────────────────────────
+
+#[test]
+fn pending_reverify_flag_set_and_clear_emit_no_dedicated_events_and_poll_works() {
+    use soroban_sdk::{
+        testutils::{Address as _, Events as _},
+        xdr::{ContractEventBody, ScVal},
+        Address, Env, String as SString, Symbol, TryFromVal, Vec as SVec,
+    };
+    use trustbridge_contract::TrustBridgeContract;
+
+    // 1. Docs and src/events.rs consistently document absence + poll API.
+    let events_rs = include_str!("../src/events.rs");
+    let indexing_md = include_str!("../docs/EVENT_INDEXING.md");
+    let subgraph_readme = include_str!("../docs/subgraph/README.md");
+    let abi_md = include_str!("../docs/ABI.md");
+    assert!(!EVENT_TYPES.iter().any(|t| t.contains("reverify")));
+    assert!(events_rs.contains("get_pending_reverify"));
+    assert!(indexing_md.contains("Pending Re-verification Signals and Poll API"));
+    assert!(indexing_md.contains("get_pending_reverify"));
+    assert!(subgraph_readme.contains("get_pending_reverify"));
+    assert!(abi_md.contains("get_pending_reverify"));
+
+    // 2. Runtime check: address change on verified user sets pending_reverify
+    // while emitting only `registered_event`, and `verify` clears it while
+    // emitting only `verified_event`.
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let addr_old = Address::generate(&env);
+    let addr_new = Address::generate(&env);
+    let contract_id = env.register(TrustBridgeContract, ());
+    env.mock_all_auths();
+
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            SString::from_str(&env, "alice"),
+            addr_old,
+            SVec::new(&env),
+        )
+        .unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(
+            env.clone(),
+            admin.clone(),
+            SString::from_str(&env, "alice"),
+        )
+        .unwrap();
+    });
+
+    // Re-register to new address -> sets pending_reverify = true, emits ONLY registered_event.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            SString::from_str(&env, "alice"),
+            addr_new,
+            SVec::new(&env),
+        )
+        .unwrap();
+    });
+    let set_filtered = env.events().all().filter_by_contract(&contract_id);
+    let set_events = set_filtered.events();
+    assert_eq!(set_events.len(), 1);
+    let ContractEventBody::V0(v0) = &set_events[0].body;
+    let expected_reg = ScVal::try_from_val(&env, &Symbol::new(&env, "registered_event").to_val()).unwrap();
+    assert_eq!(v0.topics.first(), Some(&expected_reg));
+
+    let pending_after_set = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_pending_reverify(env.clone(), 0, 100).unwrap()
+    });
+    assert_eq!(
+        pending_after_set,
+        SVec::from_array(&env, [SString::from_str(&env, "alice")])
+    );
+
+    // Verify -> clears pending_reverify, emits ONLY verified_event.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(
+            env.clone(),
+            admin.clone(),
+            SString::from_str(&env, "alice"),
+        )
+        .unwrap();
+    });
+    let clear_filtered = env.events().all().filter_by_contract(&contract_id);
+    let clear_events = clear_filtered.events();
+    assert_eq!(clear_events.len(), 1);
+    let ContractEventBody::V0(v0) = &clear_events[0].body;
+    let expected_ver = ScVal::try_from_val(&env, &Symbol::new(&env, "verified_event").to_val()).unwrap();
+    assert_eq!(v0.topics.first(), Some(&expected_ver));
+
+    let pending_after_clear = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_pending_reverify(env.clone(), 0, 100).unwrap()
+    });
+    assert!(pending_after_clear.is_empty());
+}
+
+/// Failure path 1: an event-only indexer relying on `RenamedEvent` sees
+/// `verification_cleared == false` when an already-unverified record with an
+/// active `pending_reverify` flag is renamed, so without polling
+/// `get_pending_reverify` it misses `alice2` in the reverify queue.
+#[test]
+fn event_only_tracking_misses_migrated_reverify_flag_on_rename() {
+    use soroban_sdk::{
+        testutils::{Address as _, Events as _},
+        xdr::{ContractEventBody, ScVal},
+        Address, Env, String as SString, Symbol, TryFromVal, Vec as SVec,
+    };
+    use trustbridge_contract::TrustBridgeContract;
+
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let addr_old = Address::generate(&env);
+    let addr_new = Address::generate(&env);
+    let contract_id = env.register(TrustBridgeContract, ());
+    env.mock_all_auths();
+
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            SString::from_str(&env, "alice"),
+            addr_old,
+            SVec::new(&env),
+        )
+        .unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(
+            env.clone(),
+            admin.clone(),
+            SString::from_str(&env, "alice"),
+        )
+        .unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            SString::from_str(&env, "alice"),
+            addr_new.clone(),
+            SVec::new(&env),
+        )
+        .unwrap();
+    });
+
+    // Rename alice -> alice2 while pending_reverify = true and verified = false.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::rename(
+            env.clone(),
+            addr_new,
+            SString::from_str(&env, "alice"),
+            SString::from_str(&env, "alice2"),
+        )
+        .unwrap();
+    });
+    let rename_filtered = env.events().all().filter_by_contract(&contract_id);
+    let rename_events = rename_filtered.events();
+    assert_eq!(rename_events.len(), 1);
+    let ContractEventBody::V0(v0) = &rename_events[0].body;
+    let expected_topic = ScVal::try_from_val(&env, &Symbol::new(&env, "renamed_event").to_val()).unwrap();
+    assert_eq!(v0.topics.first(), Some(&expected_topic));
+    // `verification_cleared` is false in the event data map, yet `alice2` is
+    // still flagged in `get_pending_reverify`.
+    let key_scval = ScVal::try_from_val(&env, &Symbol::new(&env, "verification_cleared").to_val()).unwrap();
+    let ScVal::Map(Some(map)) = &v0.data else {
+        panic!("expected ScVal::Map for RenamedEvent data");
+    };
+    let cleared_val = map
+        .iter()
+        .find(|entry| entry.key == key_scval)
+        .expect("verification_cleared field present in RenamedEvent")
+        .val
+        .clone();
+    assert_eq!(cleared_val, ScVal::Bool(false));
+
+    let pending = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_pending_reverify(env.clone(), 0, 100).unwrap()
+    });
+    assert_eq!(
+        pending,
+        SVec::from_array(&env, [SString::from_str(&env, "alice2")])
+    );
+}
+
+/// Failure path 2: polling `get_pending_reverify` fails with documented error
+/// codes on uninitialized contracts (`NotInitialized`, code 2), oversized limits
+/// (`InvalidBatchSize`, code 14), and mismatched networks (`NetworkMismatch`, code 30).
+#[test]
+fn pending_reverify_poll_api_rejects_uninitialized_oversized_limit_and_wrong_network() {
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _, LedgerInfo},
+        Address, Env,
+    };
+    use trustbridge_contract::{ContractError, TrustBridgeContract};
+
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(TrustBridgeContract, ());
+
+    let uninit = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_pending_reverify(env.clone(), 0, 20)
+    });
+    assert_eq!(uninit, Err(ContractError::NotInitialized));
+
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::initialize(env.clone(), admin).unwrap();
+    });
+
+    let bad_limit = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_pending_reverify(env.clone(), 0, 101)
+    });
+    assert_eq!(bad_limit, Err(ContractError::InvalidBatchSize));
+
+    let info = env.ledger().get();
+    let mut other_net = [0u8; 32];
+    other_net[0] = 0x55;
+    env.ledger().set(LedgerInfo {
+        network_id: other_net,
+        ..info
+    });
+    let wrong_net = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_pending_reverify(env.clone(), 0, 20)
+    });
+    assert_eq!(wrong_net, Err(ContractError::NetworkMismatch));
 }

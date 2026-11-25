@@ -140,6 +140,35 @@ Restarting the indexer mid-batch is always safe:
 - Removing the cursor forces a full re-scan; removing `seen-*.txt` only widens the
   dedup window slightly at the overlap.
 
+### Contract index-generation restart (dashboard cursor)
+
+The `cursor-<network>.json` above is the Horizon/RPC event-stream cursor and is
+**not** the opaque `get_registered_paginated` / `get_public_paginated` cursor.
+Never delete the Horizon cursor merely because `index_gen` changed. Registry
+pagination has a separate recovery procedure:
+
+1. Poll `get_health_probes().index_gen`. A change means a successful removal
+   shifted the flat index; this bump has no on-chain event.
+2. Stop the page walk and discard every saved `next_cursor` issued under the
+   old generation. A resume attempt returns `ContractError::InvalidCursor`
+   (`invalid cursor`) rather than a deliberately drifted page.
+3. Restart export pagination with `cursor = None` (no CLI `--cursor` or JSON
+   `cursor: null`). Apply each result as an upsert of the complete
+   `(username, record)` pair and commit the database state plus that page's
+   `next_cursor` atomically.
+4. Continue until `has_more == false` and `next_cursor == null`. A short page
+   alone is not proof of completion.
+5. Keep processing `removed_event` deliveries independently and idempotently:
+   topic 0 must be `removed_event`, topic 1 must be `github_username`, and data
+   fields must include `stellar_address`, `timestamp`, and `domain`. Delete or
+   tombstone the username. Replays are safe and out-of-order deliveries must
+   be ordered by ledger, transaction, and event position as described in
+   [DASHBOARD_SYNC.md](DASHBOARD_SYNC.md).
+
+This is also the recovery after stale-cursor failures and is safe while the
+contract is paused. Public and admin page cursors are interchangeable, but both
+must restart from `None` after a generation change.
+
 ---
 
 ## Topic Classification
@@ -224,7 +253,7 @@ from `TOPIC_TABLE`, or if the Subgraph column disagrees with the README.
 | `batch_remove_executed_event` | `batch_remove_executed` | `batch` | waived |
 | `batch_remove_cancelled_event` | `batch_remove_cancelled` | `batch` | waived |
 | `audit_config_changed_event` | `audit_config_changed` | `audit` | waived |
-| `oracle_allowlist_rotated_event` | `oracle_allowlist_rotated` | `admin` | `OracleAllowlistRotatedEvent` |
+| `oracle_allowlist_rotated_event` | `oracle_allowlist_rotated` | `admin` | waived |
 
 ### `AttestationClearedEvent` payload
 
@@ -354,6 +383,47 @@ stream with paginated exports to maintain a consistent local mirror. Key points:
 - `category: "batch"` events (`batch_remove_proposed`, `batch_remove_executed`,
   `batch_remove_cancelled`) indicate bulk removals; reconcile `removed_event` records
   emitted in the same transaction to update the local mirror atomically.
+
+---
+
+## Pending Re-verification Signals and Poll API
+
+**No dedicated event is emitted when the `pending_reverify` flag
+(`PENDING_REVERIFY_KEY` / `pend_rev`) is set or cleared.** `src/events.rs`
+defines no `pending_reverify_*` event, and none of the lifecycle events carry a
+`pending_reverify` field.
+
+### Why event-only tracking is insufficient
+
+Existing lifecycle events only provide indirect hints:
+
+| Action | Storage effect on `pend_rev` | Event emitted | Why events alone are not authoritative |
+|---|---|---|---|
+| `register` / `register_sponsored` (address change on verified user) | Sets `pend_rev = true` | `registered_event` | Payload omits prior `verified` state, so indexers cannot tell from the event alone whether reverify was set without prior state |
+| `execute_address_rotation` (on verified user) | Sets `pend_rev = true` | `rotation_executed_event` | Payload omits prior `verified` state |
+| `rename` | Migrates existing `pend_rev` or sets it if `verification_cleared` | `renamed_event` | `verification_cleared` is `false` if the old handle was already unverified with `pend_rev = true`, yet the flag still moved to `new_username` |
+| `verify` / `batch_verify` / `verify_with_oracle_proof` | Clears `pend_rev` | `verified_event` | Fires on initial verify too, not only reverify clearance |
+| `remove` / `batch_remove` / `complete_challenge` | Clears `pend_rev` | `removed_event` | Fires on all removals regardless of `pend_rev` |
+
+### Recommended poll API
+
+Wave reverify pipelines and indexers must poll the read-only, unauthenticated,
+pause-exempt contract entrypoint:
+
+```bash
+stellar contract invoke --id $CONTRACT_ID --network testnet \
+  -- get_pending_reverify --offset 0 --limit 100
+```
+
+- Start at `offset = 0`, `limit = 100` (`MAX_PAGE_LIMIT`; `limit = 0` uses
+  `DEFAULT_PAGE_LIMIT = 20`) and advance `offset += limit` until
+  `offset >= get_stats().total`.
+- Check `get_health_probes().index_gen` before and after a multi-page poll; if
+  `index_gen` changed mid-scan (from a `remove` or `rename`), restart from
+  `offset = 0`.
+- Handle the three documented `Fatal` errors: `NotInitialized` (`2`),
+  `InvalidBatchSize` (`14`, `limit > 100`), and `NetworkMismatch` (`30`). See
+  [ABI.md § Error codes & integrator notes for `get_pending_reverify`](ABI.md#error-codes--integrator-notes-for-get_pending_reverify).
 
 ---
 
