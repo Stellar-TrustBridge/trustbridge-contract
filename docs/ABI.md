@@ -2404,35 +2404,26 @@ struct AdminTransferProposal {
 
 ## Pending Re-verification Functions (Issue #208)
 
-### `get_pending_reverify(github_username: String) -> Result<bool, ContractError>`
-
-Returns whether `github_username` has a pending re-verification flag.
-
-The flag is set automatically when a verified user re-registers to a different
-Stellar address, invalidating their prior verification. It is cleared once
-the record is `verify`'d again. Returns `false` for unknown usernames and
-removed users. Works while the contract is paused.
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Mutates** | No |
-| **Errors** | `NotInitialized` |
-
-### `get_pending_reverify_page(offset: u32, limit: u32) -> Result<Vec<String>, ContractError>`
-
-Returns a page of usernames that have a pending re-verification flag set.
-`limit` is capped at `MAX_PAGE_LIMIT` (100). Works while the contract is paused.
+The ABI has **one** pending-reverify read:
+[`get_pending_reverify(offset, limit)`](#get_pending_reverifyoffset-u32-limit-u32---resultvecstring-contracterror).
+There is no `get_pending_reverify(github_username) -> bool` contract endpoint
+and no `get_pending_reverify_page` entry point; older docs that named those
+were describing an off-chain projection, not the ABI. Check a single name by
+scanning the paginated username list; the response contains usernames only,
+never Stellar addresses or other sensitive data.
 
 | | |
 |---|---|
-| **Auth** | None |
+| **Auth** | None (public read, no admin credentials) |
 | **Mutates** | No |
-| **Errors** | `NotInitialized` |
+| **Errors** | `NotInitialized`, `InvalidBatchSize` (`limit > 100`) |
+| **Works while paused** | Yes |
 
 **Dashboard sync note:** Poll this endpoint to discover which contributors need
-a fresh off-chain GitHub identity check after an address change. See
-[DASHBOARD_SYNC.md § Pending Re-verification](DASHBOARD_SYNC.md#pending-re-verification-issue-208).
+a fresh off-chain GitHub identity check after an address change. Because the
+list is public, dashboards must follow the redaction policy in
+[SECURITY.md § Public pending re-verification listings](SECURITY.md#public-pending-re-verification-listings-issue-860)
+and [DASHBOARD_SYNC.md § Pending Re-verification](DASHBOARD_SYNC.md#pending-re-verification-issue-208).
 
 ---
 

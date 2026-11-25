@@ -12,6 +12,10 @@ use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Vec};
 
 use trustbridge_contract::{ContractError, TrustBridgeContract};
 
+const SECURITY_DOC: &str = include_str!("../docs/SECURITY.md");
+const ABI_DOC: &str = include_str!("../docs/ABI.md");
+const DASHBOARD_DOC: &str = include_str!("../docs/DASHBOARD_SYNC.md");
+
 fn setup() -> (Env, Address, Address) {
     let env = Env::default();
     let admin = Address::generate(&env);
@@ -666,5 +670,58 @@ fn test_get_pending_reverify_requires_initialized() {
             TrustBridgeContract::get_pending_reverify(env.clone(), 0, 10),
             Err(ContractError::NotInitialized)
         );
+    });
+}
+
+// ── Public pending-reverify listing policy (Issue #860) ──────────────────────
+
+/// Happy path: the public, no-auth page exposes the flagged username and
+/// nothing else. The docs must state the same public-read auth surface.
+#[test]
+fn test_pending_reverify_page_is_public_username_only_listing() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    flag_reverify(&env, &contract_id, &admin, "carol");
+
+    env.as_contract(&contract_id, || {
+        let page = TrustBridgeContract::get_pending_reverify(env.clone(), 0, 10).unwrap();
+        assert_eq!(page, Vec::from_array(&env, [s(&env, "carol")]));
+    });
+
+    assert!(SECURITY_DOC.contains("Public pending re-verification listings (Issue #860)"));
+    assert!(SECURITY_DOC.contains("Auth: None"));
+    assert!(ABI_DOC.contains("**Auth** | None (public read, no admin credentials)"));
+    assert!(DASHBOARD_DOC.contains("Restrict the username list"));
+}
+
+/// Failure path 1 — an unflagged/never-registered name never appears in the
+/// listing, so a public reader cannot invent a pending-reverify target.
+#[test]
+fn test_pending_reverify_page_omits_unflagged_and_unknown_names() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    flag_reverify(&env, &contract_id, &admin, "carol");
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "carol")).unwrap();
+        let page = TrustBridgeContract::get_pending_reverify(env.clone(), 0, 10).unwrap();
+        assert!(page.is_empty(), "removal clears the public pending flag");
+    });
+}
+
+/// Failure path 2 — oversized pages fail with the stable documented reason
+/// code; the public listing never silently returns an unbounded target set.
+#[test]
+fn test_pending_reverify_page_oversized_limit_is_rejected() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    flag_reverify(&env, &contract_id, &admin, "carol");
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::get_pending_reverify(env.clone(), 0, 101),
+            Err(ContractError::InvalidBatchSize)
+        );
+        // The documented bounded retry still works after the rejection.
+        let page = TrustBridgeContract::get_pending_reverify(env.clone(), 0, 100).unwrap();
+        assert_eq!(page.len(), 1);
     });
 }

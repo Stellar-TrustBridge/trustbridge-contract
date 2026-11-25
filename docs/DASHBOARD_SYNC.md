@@ -352,27 +352,34 @@ new Stellar address has not yet been linked to the GitHub account.
 
 ### Reading pending-reverify state
 
-Two public read endpoints expose this flag (no auth required, work while paused):
+One public read endpoint exposes this flag (no auth required, works while paused):
 
 | Endpoint | Use |
 |---|---|
-| `get_pending_reverify(github_username)` | Check a single username — returns `bool` |
-| `get_pending_reverify_page(offset, limit)` | Paginated scan — returns `Vec<String>` of usernames with the flag set |
+| `get_pending_reverify(offset, limit)` | Paginated scan — returns `Vec<String>` of usernames with the flag set |
 
-`get_pending_reverify` returns `false` for:
-- Usernames that have never been registered.
-- Usernames that have been removed.
-- Usernames whose flag was cleared (because they were successfully re-verified).
+This is the only pending-reverify ABI entry point (`docs/abi.json`); there is no
+`get_pending_reverify(github_username) -> bool` or `get_pending_reverify_page`.
+To check a single username, scan the pages and compare canonical (ASCII
+lowercase) usernames locally. The response contains **usernames only** — no
+Stellar addresses or other sensitive data. A username is absent from the pages
+when it was never registered, was removed, or had its flag cleared after
+successful re-verification.
+
+The list is public by design, so public dashboards should show counts only and
+keep usernames behind SSO/ACL; see
+[SECURITY.md § Public pending re-verification listings](SECURITY.md#public-pending-re-verification-listings-issue-860).
 
 ### Dashboard sync workflow
 
-1. **On `RegisteredEvent`** where the old and new `stellar_address` differ, call
-   `get_pending_reverify(username)` to confirm the flag was set. Queue the
+1. **On `RegisteredEvent`** where the old and new `stellar_address` differ, check
+   the `get_pending_reverify` pages for that username to confirm the flag was set. Queue the
    contributor for a re-verification workflow.
 2. **On `VerifiedEvent`**, the flag is cleared automatically — no additional call needed.
-3. **Periodic reconciliation**: Call `get_pending_reverify_page(0, 100)` to build
-   the full list of contributors awaiting re-check. This is cheaper than scanning
-   all registrations individually and is authoritative.
+3. **Periodic reconciliation**: Call `get_pending_reverify(0, 100)` and advance the
+   offset until the queue is drained. This is cheaper than scanning all
+   registrations individually and is authoritative. Restrict the username list
+   to internal tooling; public views should show aggregate counts.
 
 ### Relationship to verification flow
 

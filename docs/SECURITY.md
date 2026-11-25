@@ -243,6 +243,37 @@ both paths are unaffected.
 Use both together for maximum transparency: stage the hash first (public
 notice, no expiry), then attest it (time-bounded, optionally required).
 
+### Public pending re-verification listings (Issue #860)
+
+`get_pending_reverify(offset, limit)` returns a `Vec<String>` of **GitHub
+usernames** whose verified record changed Stellar address and is awaiting
+re-verification. It is an unprotected read (`Auth: None`) in `docs/ABI.md`
+and `docs/abi.json`; there is no admin-only variant and no secret in the
+response — no Stellar addresses, tokens, emails, or attestations are exposed.
+GitHub usernames are already public identity identifiers and are intentionally
+enumerable on-chain so any dashboard can reconcile its queue.
+
+**Policy:** treat the on-chain list as public-but-sensitive operational data.
+The contract cannot hide it; dashboards that consume it must decide how widely
+to display it:
+
+- Internal operator tooling may show the full paginated queue behind its own
+  SSO/ACL. Public status pages should show aggregate counts only, not usernames.
+- Do not join the username list with off-chain payout/KYC data in a public view.
+  A visible "awaiting re-verification" badge can be read as an account in a
+  transitional state and used to target takeover or social-engineering attempts
+  during a Wave.
+- Redact usernames in logs, screenshots, and incident reports unless the
+  audience needs them to complete the re-verification. The list is not a
+  secret, but avoid publishing a ready-made target list.
+- The flag is cleared by `verify`/`batch_verify` and on `remove`, so listings
+  converge; a stale entry is a sync problem, not a permission leak.
+
+This matches the ABI auth surface (no auth, read-only, works while paused) and
+the dashboard workflow in
+[DASHBOARD_SYNC.md § Pending Re-verification](DASHBOARD_SYNC.md#pending-re-verification-issue-208).
+No contract auth or on-chain visibility changes are part of this issue.
+
 ### On-chain M-of-N multisig upgrade (Issue #301)
 
 The `propose_multisig_upgrade` → `approve_upgrade` (×N) → `execute_upgrade`
