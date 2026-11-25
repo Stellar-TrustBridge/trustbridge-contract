@@ -766,3 +766,139 @@ fn test_cancel_event_records_proposer_and_canceller() {
         );
     });
 }
+
+fn mixed_reverify_registry(env: &Env, admin: &Address, contract_id: &Address) -> Vec<String> {
+    let mut names = register_n(env, contract_id, 5);
+    env.as_contract(contract_id, || {
+        for i in [0, 4] {
+            let old = names.get(i).unwrap();
+            let owner = TrustBridgeContract::get_address(env.clone(), old.clone())
+                .unwrap()
+                .stellar_address;
+            TrustBridgeContract::verify(env.clone(), admin.clone(), old.clone()).unwrap();
+            let new = username(env, &format!("renamed{i}"));
+            TrustBridgeContract::rename(env.clone(), owner, old, new.clone()).unwrap();
+            names.set(i, new);
+        }
+        TrustBridgeContract::verify(env.clone(), admin.clone(), names.get(1).unwrap()).unwrap();
+        TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+    });
+    names
+}
+
+fn assert_mixed_registry(env: &Env, names: &Vec<String>) {
+    assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 5);
+    assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 1);
+    let flags = TrustBridgeContract::get_pending_reverify(env.clone(), 0, 100).unwrap();
+    assert_eq!(flags.len(), 2);
+    for i in 0..names.len() {
+        let name = names.get(i).unwrap();
+        let record = TrustBridgeContract::get_address(env.clone(), name.clone()).unwrap();
+        assert_eq!(record.verified, i == 1);
+        assert_eq!(flags.iter().any(|flag| flag == name), i == 0 || i == 4);
+    }
+}
+
+#[test]
+fn test_mixed_reverify_requires_dual_control() {
+    let (env, admin, second, contract_id) = setup();
+    let names = mixed_reverify_registry(&env, &admin, &contract_id);
+    let batch = vec_from(&env, names.clone(), 0, 4);
+    env.as_contract(&contract_id, || {
+        assert_mixed_registry(&env, &names);
+        assert_eq!(
+            TrustBridgeContract::batch_remove(env.clone(), admin.clone(), batch.clone()),
+            Err(ContractError::DualControlRequired)
+        );
+        assert_mixed_registry(&env, &names);
+        assert!(TrustBridgeContract::get_pending_batch_remove(env.clone()).is_none());
+
+        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), batch.clone())
+            .unwrap();
+        assert_mixed_registry(&env, &names);
+        assert_eq!(
+            TrustBridgeContract::execute_batch_remove(env.clone(), admin.clone()),
+            Err(ContractError::NotAuthorized)
+        );
+        assert_mixed_registry(&env, &names);
+        let pending = TrustBridgeContract::get_pending_batch_remove(env.clone()).unwrap();
+        assert_eq!(pending.usernames, batch);
+        assert_eq!(pending.proposed_by, admin);
+
+        let summary =
+            TrustBridgeContract::execute_batch_remove(env.clone(), second.clone()).unwrap();
+        assert_eq!(summary, BatchSummary::new(4, 4));
+        assert!(TrustBridgeContract::get_pending_batch_remove(env.clone()).is_none());
+        assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 1);
+        assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 0);
+        for name in batch.iter() {
+            assert!(TrustBridgeContract::get_address(env.clone(), name).is_none());
+        }
+        let survivor = names.get(4).unwrap();
+        assert!(TrustBridgeContract::get_address(env.clone(), survivor.clone()).is_some());
+        let flags = TrustBridgeContract::get_pending_reverify(env.clone(), 0, 100).unwrap();
+        assert_eq!(flags.len(), 1);
+        assert_eq!(flags.get(0), Some(survivor.clone()));
+
+        TrustBridgeContract::register(
+            env.clone(),
+            names.get(0).unwrap(),
+            Address::generate(&env),
+            Vec::new(&env),
+        )
+        .unwrap();
+        let flags = TrustBridgeContract::get_pending_reverify(env.clone(), 0, 100).unwrap();
+        assert_eq!(flags.len(), 1);
+        assert_eq!(flags.get(0), Some(survivor));
+        assert_eq!(
+            TrustBridgeContract::execute_batch_remove(env.clone(), second.clone()),
+            Err(ContractError::NoPendingBatchRemove)
+        );
+    });
+}
+
+#[test]
+fn test_mixed_reverify_rejects_verifier_and_paused_execution() {
+    let (env, admin, second, contract_id) = setup();
+    let names = mixed_reverify_registry(&env, &admin, &contract_id);
+    let batch = vec_from(&env, names.clone(), 0, 4);
+    let verifier = Address::generate(&env);
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), batch.clone())
+            .unwrap();
+        assert_eq!(
+            TrustBridgeContract::execute_batch_remove(env.clone(), verifier),
+            Err(ContractError::NotAuthorized)
+        );
+        assert_mixed_registry(&env, &names);
+        assert_eq!(
+            TrustBridgeContract::get_pending_batch_remove(env.clone())
+                .unwrap()
+                .usernames,
+            batch
+        );
+
+        TrustBridgeContract::pause(env.clone(), 1).unwrap();
+        assert_eq!(
+            TrustBridgeContract::execute_batch_remove(env.clone(), second.clone()),
+            Err(ContractError::Paused)
+        );
+        assert_mixed_registry(&env, &names);
+        assert_eq!(
+            TrustBridgeContract::get_pending_batch_remove(env.clone())
+                .unwrap()
+                .usernames,
+            batch
+        );
+        TrustBridgeContract::cancel_batch_remove(env.clone(), admin.clone()).unwrap();
+        assert_mixed_registry(&env, &names);
+        assert!(TrustBridgeContract::get_pending_batch_remove(env.clone()).is_none());
+        TrustBridgeContract::unpause(env.clone(), 4).unwrap();
+        assert_eq!(
+            TrustBridgeContract::execute_batch_remove(env.clone(), second.clone()),
+            Err(ContractError::NoPendingBatchRemove)
+        );
+        assert_mixed_registry(&env, &names);
+    });
+}

@@ -188,6 +188,103 @@ Measured at the time of writing: `reg` 220 B, `chunk` 2,412 B,
 
 ---
 
+## Growth budget and instance storage limits
+
+### Why budgeting instance keys matters
+
+In Soroban, all instance storage keys (`env.storage().instance()`) live within a
+**single shared ledger entry** attached to the contract instance. This entry has a
+hard network-enforced size ceiling:
+
+$$\text{Instance Entry Size} \le 64\text{ KiB } (65,536\text{ bytes})$$
+
+Every new instance key—whether a singleton scalar, address, timestamp, or
+vector—directly consumes bytes from this shared 64 KiB pool:
+
+- **Unbudgeted instance keys risk contract-wide failure**: If the shared instance entry
+  reaches 64 KiB, any subsequent transaction attempting to write or expand instance
+  storage (such as `register` writing to `idx`) fails with a host entry-size violation.
+  This bricks critical contract operations.
+- **Wave rent and instance limits**: Persistent keys pay rent per entry and scale with
+  registrations $N$, whereas instance storage is bundled with the contract instance.
+  Placing large, variable-length, or unbounded data in instance storage reduces the
+  headroom for registry scaling and violates Wave registry capacity assumptions.
+- **Fixed keys vs. growing keys**: Fixed-count instance keys (`admin`, `count`, `paused`,
+  etc.) consume ~356 B to ~2 KB total. Growing instance keys (`idx`) consume ~20 B per
+  username, setting the hard ceiling at ~3,259 users before the 64 KiB cap is hit. Any
+  new fixed instance key reduces that ceiling ($N_{\max} \approx (65,536 - \text{fixed\_bytes}) / 20$).
+
+---
+
+## Contributor checklist for adding instance and persistent keys
+
+Follow this checklist whenever adding or altering a storage key to ensure on-chain
+correctness, WASM instance safety, and Wave rent predictability:
+
+### 1. Storage class selection & design
+- [ ] Determine the storage class:
+  - **Instance (`env.storage().instance()`)**: Singleton state only (global configuration,
+    monotonic counters, protocol flags). **Never** store unbounded collections or
+    per-user records in instance storage.
+  - **Persistent (`env.storage().persistent()`)**: Per-user or per-entity records that
+    scale with $N$, requiring TTL management.
+- [ ] Confirm context types for persistent keys (`(Symbol, Context)`) are distinct and
+  collision-free (see [STORAGE_KEYS.md](STORAGE_KEYS.md)).
+
+### 2. Measure serialized footprint
+- [ ] In a test or benchmark, measure the serialized XDR size:
+  ```rust
+  let bytes = value.to_xdr(env).len();
+  ```
+- [ ] Measure using worst-case inputs (e.g. 39-character maximum GitHub username,
+  maximum allowed vector bounds, worst-case strings).
+- [ ] For instance keys, calculate the total impact on the 64 KiB instance ceiling:
+  $\Delta \text{instance} = \text{key XDR} + \text{value XDR}$.
+
+### 3. Update footprint budget table
+- [ ] For keys tracked in the CI footprint budget, update or add the row in
+  [STORAGE_FOOTPRINT.md](#measured-footprint-budget-ci-check) between
+  `<!-- footprint-budget:begin -->` and `<!-- footprint-budget:end -->`.
+- [ ] Apply ~15% headroom above the measured byte size to accommodate minor schema updates.
+- [ ] If changing a schema or key that affects planning estimates, update the
+  [Estimated footprint by registry size](#estimated-footprint-by-registry-size) table and
+  [BENCHMARK_BUDGETS.md](BENCHMARK_BUDGETS.md#storage-footprint-budget).
+
+### 4. Update key inventory & documentation
+- [ ] Document the key in [STORAGE_KEYS.md](STORAGE_KEYS.md) in both the partition
+  table (Instance or Persistent) and the Complete Key Inventory table.
+- [ ] If persistent, document the TTL extension policy and threshold/bump behavior in
+  [STORAGE_RENT.md](STORAGE_RENT.md).
+- [ ] Update [CONTRIBUTING.md](CONTRIBUTING.md#storage-key-best-practices).
+
+### 5. Run CI gate targets
+Run all relevant make targets locally before pushing:
+- [ ] `make storage-footprint-check`: Fails if measured keys exceed their `max_bytes` budget
+  or if budgeted keys are unbudgeted/stale.
+- [ ] `make storage-keys-check`: Fails if any `Symbol` constant in `src/storage.rs` is
+  missing from `docs/STORAGE_KEYS.md`.
+- [ ] `make storage-rent-check`: Fails if TTL constants in `docs/STORAGE_RENT.md` drift
+  from `src/storage.rs`.
+- [ ] `make storage-rent-estimator`: Fails if storage rent projections drift from the golden
+  baseline in `scripts/testdata/storage-rent-estimator.golden.txt`.
+- [ ] `make storage-check`: Composite target running all storage verification gates.
+
+---
+
+## Linked Make Targets
+
+The storage budget and inventory checks are automated via the following `Makefile` targets:
+
+| Make Target | Command | What it enforces | CI Job |
+|---|---|---|---|
+| `make storage-footprint-check` | `cargo test --lib storage_footprint_budget_tests` | Enforces serialized byte budgets in `docs/STORAGE_FOOTPRINT.md` | `storage-budgets` |
+| `make storage-keys-check` | `./scripts/check_storage_keys.sh` | Enforces that all storage constants in `src/storage.rs` are documented in `docs/STORAGE_KEYS.md` | `quality` |
+| `make storage-rent-check` | `cargo test --lib storage_rent_playbook_tests` | Enforces that TTL constants in `docs/STORAGE_RENT.md` match `src/storage.rs` | `storage-budgets` |
+| `make storage-rent-estimator` | `bash scripts/test_storage_rent_estimator.sh` | Validates storage rent estimates and golden outputs for Wave operators | `abi-consistency` |
+| `make storage-check` | `make storage-keys-check storage-footprint-check storage-rent-check storage-rent-estimator` | Composite target running all storage validation gates | Local / CI |
+
+---
+
 ## Recomputing these numbers
 
 Redo this estimate if any of the following change:

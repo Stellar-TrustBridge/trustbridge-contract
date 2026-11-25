@@ -12,7 +12,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 
 | Threat | Mitigation |
 |--------|------------|
-| Impersonation (registering someone else's GitHub username) | `stellar_address.require_auth()` — only the address owner can register |
+| Impersonation (registering someone else's GitHub username) | `stellar_address.require_auth()` — only the address owner can register; cross-contract callers cannot impersonate the target address |
 | Unauthorized removal | `caller` must auth as registrant or admin |
 | Unauthorized admin-only actions | `admin.require_auth()` on `get_all_registered`, `get_registered_paginated`, `set_role`, `pause`/`unpause` |
 | Unauthorized verification actions | `caller.require_auth()` on `verify` / `revoke_verification`; `caller` must be the admin or hold `Role::Verifier` (checked via `has_role_or_admin`) — any other caller gets `NotAuthorized` |
@@ -20,6 +20,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Admin storage mutated after init | No public setter writes `ADMIN_KEY` — only `initialize` does, gated by `AlreadyInitialized` (Issue #97) |
 | Malformed or oversized username input | `InvalidUsername` error, checked before auth and before any write |
 | Unicode / homoglyph username spoofing | Byte-wise ASCII validation rejects all non-ASCII bytes; see **Unicode Rejection Policy** section |
+| Locale-dependent case-folding impersonation (e.g. Turkish dotted/dotless I, German eszett) | Byte-wise ASCII-true canonicalization (`b'A'..=b'Z' => b + 0x20`), byte-length invariant, independent of host locale rules; non-ASCII rejected; see [Locale-Independent ASCII-True Folding Algorithm](#locale-independent-ascii-true-folding-algorithm-issue-766) (Issue #766) |
 | Writing registry state using the zero/burn address (reachable under `mock_all_auths` / sandboxes that skip `require_auth`) | `is_zero_address` checks reject zero registration and rotation destinations, role grant targets (`set_role`, `set_role_with_expiry`), verification/revocation/batch actors, and a zero pending rotation destination before mutation. Batch verification skips corrupt zero-bound records. Failures use `ZeroAddress` (code 16), before writes; pinned by `tests/zero_address.rs` and `tests/role_lifecycle.rs` (Issues #300, #755, #799) |
 | Public disclosure of unverified contributor addresses | `get_public_paginated` replaces unverified identity and payout addresses with the zero/burn address before export and Merkle hashing; see [Public export address redaction](#public-export-address-redaction-issue-627) |
 | Writing registry state using the zero/burn address (reachable under `mock_all_auths` / sandboxes that skip `require_auth`) | `is_zero_address` checks reject zero registration and rotation destinations, verification/revocation/batch actors, and a zero pending rotation destination before mutation. Batch verification skips corrupt zero-bound records. Failures use `ZeroAddress` (code 16), before writes; pinned by `tests/zero_address.rs` (Issues #300, #755) |
@@ -30,9 +31,37 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Compromised Verifier key silently revoking payout eligibility | `Role::Verifier` and `Role::Revoker` are distinct — Issue #212 |
 | Admin force-removing a name without a grace period | Challenge flow enforces on-chain `resolve_after` delay — Issue #214 |
 | Off-boarded contractor or bot key lingering as a live `Verifier`/`Revoker` forever | Optional per-grant expiry via `set_role_with_expiry`, checked lazily by `get_role` — see [Role Expiry](#role-expiry-issue-221) |
+| A mature pending role grant mistaken for an active or expired authorization | `activate_at` is an inclusive activation boundary, not an expiry deadline. Admin activation is still required; explicitly cancel or revoke unwanted queued grants. See [timelocked role grants](ABI.md#timelocked-role-grants-issue-220). |
 | Stolen or transferred GitHub account staying `verified` (and payout-eligible) indefinitely | `config_verification`'s `expires_in` now drives an actual expiry, checked via `is_verification_active` — see [Time-Bounded Verification](#time-bounded-verification-issue-218) |
 | Single compromised admin key wiping a large slice of the registry in one `batch_remove` call | Above a configurable size threshold, `batch_remove` requires a second, distinct admin-equivalent signature — see [Dual-Control batch_remove](#dual-control-batch_remove-issue-219) |
 | Auditor trusting an unbound, unsigned `export_registry.sh` JSON dump | `export_attestation` binds a page to a SHA-256 digest, version, and ledger for offline comparison — see [Signed Export Attestation](#signed-export-attestation-issue-223) |
+| Staged malicious WASM hash (operator key compromise, bad artifact, or swapped hash) | Staged slot is admin/Upgrader-only, publicly readable, and upgrade execution requires staged-hash consistency; attestation/provenance checks and dual-control multisig reduce single-key risk. See [Staged WASM malicious-hash threat model](#staged-wasm-malicious-hash-threat-model-issue-804). |
+
+### Audit ring saturation (Issue #2)
+
+The audit log is a ring buffer capped at `MAX_AUDIT_LOG_ENTRIES` (currently 100).
+When full, new audit entries evict the oldest (FIFO). Stats counters
+(`AuditStats.total_events`, `.registrations`, `.verifications`, etc.) continue
+to increment monotonically even when the ring is saturated — they track all
+events since deployment, not just the retained window.
+
+**Wave attack scenario**: Sustained registration spam that exceeds
+`MAX_AUDIT_LOG_ENTRIES` will fill the ring. The contract continues accepting
+new entries without panic; the oldest entries are evicted; logs stay in
+chronological order; and stats counters reflect the full attack volume.
+An incident responder querying `get_audit_logs` sees only the most recent
+`MAX_AUDIT_LOG_ENTRIES` events, but `get_audit_stats` reveals the total count.
+
+**Operational expectations when saturated**:
+- `get_audit_logs().len()` stays at `MAX_AUDIT_LOG_ENTRIES`.
+- Oldest entries are silently evicted (no event emitted for eviction).
+- `get_audit_stats().total_events` continues to grow beyond the ring size.
+- Paging/sequence stability: logs remain in timestamp order after eviction.
+- Setting `AuditConfig.max_events` to a smaller value caps the returned log
+  size but does not stop stats counters from incrementing.
+
+Covered by `tests/audit_capacity_stress.rs` (capacity, eviction, sequence
+stability, monotonic stats under saturation).
 
 ### Export record binding (Issue #672)
 
@@ -70,12 +99,63 @@ root impact are pinned by
 
 ---
 
+
+**Wave RBAC audit note (Issue #855):** A queued grant does not extend an
+active role's expiry or confer new permissions. At `expires_at`, an active
+role is unavailable even if a replacement is queued. Inspect pending grants
+separately, and cancel stale requests explicitly; elapsed timelocks do not
+purge them. Activation remains admin-only and blocked during pause.
+
 ## Cross-Contract Callers and Admin Exports
 
 A sibling contract (for example, a payout contract) may call this registry
 cross-contract. `src/version.rs` exposes `CROSS_CONTRACT_READ_MIN_VERSION` /
 `Version::supports_cross_contract_reads()` so such a caller can assert
 compatibility the same way it does for `batch_verify`.
+
+### Cross-Contract Register is Denied (By Design)
+
+**TL;DR:** `register()` has no replay-protecting nonce and **cannot** be called
+cross-contract. A relaying contract can't satisfy `stellar_address.require_auth()`
+for an address it doesn't control, so the call fails closed. This is structural:
+the host authorization model denies it, not an explicit guard we added.
+
+**Why this matters:** Integrators sometimes attempt to build an onboarding or
+payout contract that calls `register` on behalf of contributors. This is
+unsupported and will never work. Understanding why prevents invalid bug reports.
+
+**What happens when a contract tries to call `register` cross-contract:**
+
+1. The relaying contract invokes `registry.register(username, victim_address)`
+2. `register` calls `victim_address.require_auth()`
+3. The Soroban host checks authorization in the **calling contract's** context
+4. The calling contract is **not** `victim_address` — it has no way to sign for
+   an external address it doesn't control
+5. Host aborts the invocation with missing auth (before `register` writes anything)
+
+**Why there's no nonce:** `register` doesn't add a nonce field because
+cross-contract register is already impossible. A nonce would only protect against
+replay if a relaying contract could ever call `register` in the first place —
+which it can't. Adding unused complexity (nonce storage, extra validation) for
+a path that is structurally closed would waste instruction budget and confuse
+integrators.
+
+**Proof:** `tests/cross_contract_register_deny.rs` asserts that:
+- A minimal sibling contract (`CallerContract`) that relays `register` to the
+  registry on behalf of another address **panics** with missing auth
+- The same `register` call succeeds when the real address owner signs directly
+  (proving the denial is about cross-contract auth boundaries, not a broken
+  `register`)
+
+**If cross-contract register is ever introduced:** It would require:
+1. A new `register_via_contract(nonce, proof)` entrypoint with explicit replay
+   protection (a nonce)
+2. An onboarding-contract allowlist or oracle proof of contributor identity
+3. A major-version ABI change and security audit
+
+Until then, **every contract** that attempts to call `register` cross-contract
+fails auth, and that failure is deliberate. See `docs/SECURITY.md` for the
+complete rationale.
 
 ### Read surface exposed to a contract caller (Issue #149)
 
@@ -200,14 +280,16 @@ Recommendations:
 The attestation flow (`attest_upgrade` → `upgrade`) is optionally enforceable
 on-chain via `set_attestation_required(true)`.
 
+The table below describes the single-admin `upgrade` path:
+
 | `attestation_required` | No attestation published | Attestation matches | Expired / mismatch |
 |------------------------|--------------------------|--------------------|--------------------|
 | `false` (default) | Upgrade proceeds (unattested) | Upgrade proceeds (attested) | `AttestationExpired` / `UnattestedWasm` |
-| `true` | `AttestationRequired` (code 20) | Upgrade proceeds (attested) | `AttestationExpired` / `UnattestedWasm` |
+| `true` | `AttestationRequired` (code 29) | Upgrade proceeds (attested) | `AttestationExpired` / `UnattestedWasm` |
 
 Setting `required = true` means:
 - A hot admin key cannot swap the WASM binary in a single step — it must first publish the hash via `attest_upgrade`, wait for watchers, then call `upgrade` with the same hash.
-- Clearing attestation (`clear_attestation`) and then calling `upgrade` fails with `AttestationRequired`.
+- Clearing attestation (`clear_attestation`) does not disable the policy; calling either upgrade path without an attestation fails with `AttestationRequired`.
 - The cooldown still applies independently.
 
 The `get_attestation_required()` read (no auth) exposes the current config
@@ -215,6 +297,14 @@ for monitoring and client-side enforcement; `set_attestation_required(caller,
 required)` is admin-only and recorded in `tests/auth_matrix.csv` alongside
 every other setter/getter pair, including an explicit unauthorized-caller
 negative row (Issue #790).
+
+The flag defaults to `false`, and its admin setter remains available while
+paused. The regular `upgrade` path checks the attestation's hash and expiry;
+multisig execution currently checks only that an attestation record exists,
+not that its hash matches the proposal or that it is unexpired. Clearing the
+record does not disable the flag. Wave operators must not treat this flag alone
+as proof that a multisig proposal matches an active attestation; independently
+verify the proposal hash and attestation before approving or executing it.
 
 **Threat scenarios:**
 - *Compromised admin key attempts silent upgrade*: `upgrade` fails with `AttestationRequired` unless an attestation for that exact hash was published first (observable on-chain by watchers).
@@ -224,11 +314,11 @@ negative row (Issue #790).
 ### Staged WASM slot (Issue #300)
 
 `stage_wasm(caller, hash)` writes the intended next binary to the on-chain
-staged slot before the upgrade transaction is submitted.  Any observer can
+staged slot before the upgrade transaction is submitted. Any observer can
 call `get_staged()` (no auth) to confirm what is coming.
 
 When a hash is staged, `upgrade` and `execute_upgrade` both reject a
-mismatching hash with `StagedWasmMismatch` (code 34).  With nothing staged,
+mismatching hash with `StagedWasmMismatch` (code 34). With nothing staged,
 both paths are unaffected.
 
 **How this differs from attestation:**
@@ -242,6 +332,29 @@ both paths are unaffected.
 
 Use both together for maximum transparency: stage the hash first (public
 notice, no expiry), then attest it (time-bounded, optionally required).
+
+### Staged WASM malicious-hash threat model (Issue #804)
+
+**Threat:** an attacker (or compromised privileged operator) stages or
+executes a malicious WASM hash that contains backdoored verification,
+exfiltration, or registry-corruption logic.
+
+| Stage | Risk | Mitigations / controls | Residual risk / operator action |
+|---|---|---|---|
+| Hash selection/build | Malicious or tampered artifact is produced off-chain | Reproducible builds, pinned toolchain, review release commit, compare `wasm-hash.pin` / SBOM/source digests before install | Supply-chain compromise before hashing; require independent build/review for production |
+| `stage_wasm` | Malicious hash is publicly staged as “next” | Admin or `Role::Upgrader` auth required; paused contracts reject staging; `get_staged()` makes intent observable; `clear_staged()` allows admin retraction | Upgrader key compromise can stage bad hash; monitor `WasmStagedEvent` and alert on unexpected stagers/hashes |
+| `attest_upgrade` / attestation policy | Hash is approved too quickly or without review | `attest_upgrade` is admin-only; `set_attestation_required(true)` enforces pre-declared hash; attestation can expire and be cleared | If admin key is compromised, attestation can also be compromised; use multisig/threshold governance and external review window |
+| `upgrade` / `execute_upgrade` | Malicious hash becomes executable code | `upgrade` checks attestation/cooldown/admin auth; `execute_upgrade` checks staged-hash consistency, delay, threshold approvals, and distinct signers; mismatches fail with typed errors | Single-key admin path remains high risk when threshold/cooldown/attestation are disabled; use multisig threshold >=2 for production |
+| Post-apply | Malicious WASM starts affecting writes or reads | Pause on anomaly, use provenance/health/version probes, rollback/forward-fix to known-good hash, retain audit/event trail | State already mutated by malicious code may need manual incident response; keep backups/exports and rehearsed rollback procedure |
+
+**Required operator controls for Wave upgrades:**
+
+- Keep `set_attestation_required(true)` enabled for production where possible.
+- Use multisig upgrade threshold >= 2 with distinct key holders.
+- Treat `stage_wasm`/attestation events as security alerts, not routine logs.
+- Verify hash provenance (release commit, CI artifact hash, `wasm-hash.pin`,
+  SBOM/source digests) before staging/attesting.
+- Rehearse rollback/forward-fix and keep a known-good hash available.
 
 ### On-chain M-of-N multisig upgrade (Issue #301)
 
@@ -406,6 +519,25 @@ If a rightful owner discovers that their GitHub username has been squatted on-ch
 - **How do I reclaim my username?** Open a support ticket / dispute with the TrustBridge administrators. They will remove the squatter's record so you can register your address.
 - **Does the contract verify my GitHub handle automatically?** No. There is **no on-chain verification proof** of GitHub identity at registration time. Verification is entirely off-chain/administrative.
 
+### Username Length/Charset Fuzzing (Issue #848)
+
+`fuzz/fuzz_targets/username_length_charset.rs` drives both `register` and
+`register_sponsored` with `[path_selector][username bytes]`. It checks that
+accepted names are ASCII and at most `MAX_USERNAME_LEN` (39) bytes, that
+rejected names fail with `InvalidUsername` (code 11) before auth or writes,
+and that no input panics. Seed corpus notes are in
+`fuzz/corpus/username_length_charset/NOTES.md` (empty, 39 bytes, 40 bytes,
+non-ASCII, malformed charset).
+
+```bash
+cargo +nightly fuzz run username_length_charset -- -max_total_time=60
+cargo test --test username_case_fold
+```
+
+Wave operator risk: an unvalidated username edge could trap a register
+entrypoint and stall onboarding; these tests pin the stable rejection path so
+operators can retry with a corrected name instead of restarting an indexer.
+
 ### 5. Username Case-Folding (Issue #194)
 
 GitHub logins are case-insensitive: `Alice` and `alice` are the same GitHub
@@ -451,6 +583,56 @@ fold the event's username themselves before comparing.
 `а` vs ASCII `a`) — see **Unicode Rejection Policy** below, which already
 rejects all non-ASCII bytes outright, so homoglyph substitution cannot reach
 the storage layer in the first place.
+
+### Locale-Independent ASCII-True Folding Algorithm (Issue #766)
+
+#### Threat Analysis & Why This Matters
+
+Unicode case folding and language-locale casing rules vary depending on the host
+environment or language settings (`LC_ALL`, `LANG`, OS culture):
+
+- **Turkish & Azeri (`tr_TR`, `az_AZ`)**: Standard Latin uppercase `I` (U+0049) folds
+  to small dotless `ı` (U+0131), and small `i` (U+0069) uppercases to capital dotted `İ` (U+0130).
+  If a contract or off-chain worker used host locale rules, `ALICE` on a Turkish node
+  would fold to `alıce` (byte sequence `[0x61, 0x6C, 0xC4, 0xB1, 0x63, 0x65]`), while on
+  an English/invariant node it folds to `alice` (`[0x61, 0x6C, 0x69, 0x63, 0x65]`).
+  This divergence would allow an attacker to bypass duplicate checks, create separate
+  records on different nodes, or impersonate Wave contributors across off-chain indexers.
+- **German Eszett (`ß`)**: In Unicode full case folding, `ß` (U+00DF) expands to two
+  characters (`ss`). An attacker could attempt to register `groß` to collide with `gross`.
+- **Greek Sigma (`Σ`)**: Capital `Σ` (U+03A3) maps to final small `ς` (U+03C2) or medial
+  small `σ` (U+03C3) based on word-position context.
+- **Letter-like Symbols**: The Kelvin sign `K` (U+212A) or Latin long s `ſ` (U+017F) fold
+  to `k` or `s` under Unicode compatibility folds.
+
+#### The Algorithm
+
+To prevent locale-dependent impersonation and state desynchronization, the contract's
+canonicalization in `src/utils.rs::canonicalize_username` implements a strictly
+**byte-wise ASCII-true fold**:
+
+$$\text{fold}(b) = \begin{cases} b + 0x20 & \text{if } 0x41 \le b \le 0x5A \ (b'A'..=b'Z') \\ b & \text{otherwise} \end{cases}$$
+
+Every byte outside `[0x41, 0x5A]`—including all ASCII numbers, allowed punctuation
+(`-`, `_`), and all non-ASCII bytes ($\ge 0x80$)—is left strictly unmodified.
+
+#### Security Invariants
+
+1. **Host-Environment Invariance**: The algorithm uses no locale tables, no libc calls,
+   and no Unicode case-folding libraries. The output is bit-for-bit identical whether
+   run in WASM on Soroban validators, in local test harnesses, or across off-chain indexers.
+2. **Byte-Length Preservation**: $\text{len}(\text{canonicalize\_username}(s)) \equiv \text{len}(s)$.
+   No input byte ever expands (e.g. `ß` never becomes `ss`) or contracts.
+3. **Defense-in-Depth Non-ASCII Rejection**: All mutations (`register`, `rename`, `add_reserved`)
+   require `is_valid_github_username`, which rejects all non-ASCII bytes ($\ge 0x80$)
+   with `ContractError::InvalidUsername`. Thus, non-ASCII characters (`İ`, `ı`, `ß`, `K`, `ſ`)
+   can never be registered, stored, or indexed.
+4. **Lookup Non-Collision**: Looking up a locale confusable (such as `get_address("alİce")`)
+   evaluates byte-for-byte against the stored canonical keys, returning `None` instead of
+   colliding with the legitimate ASCII `alice` record.
+5. **Idempotence**: $\text{canonicalize\_username}(\text{canonicalize\_username}(s)) == \text{canonicalize\_username}(s)$.
+
+Pinned by `tests/username_case_fold.rs`, `src/utils.rs`, and `tests/homoglyph_corpus.rs`.
 
 **Migration note for a deployment with existing mixed-case keys.** This
 contract has not been deployed to mainnet (see **Audit Status** below), so no
@@ -600,13 +782,21 @@ provides an exhaustive test corpus covering additional confusable attack vectors
 - Directional isolates (U+2066–U+2069)
 
 **Advanced confusables:**
-- Full-width Latin forms (U+FF21–U+FF5A, used in Japanese text)
-- Mathematical alphanumeric symbols (U+1D400–U+1D7FF, bold/italic/script variants)
+- Full-width Latin forms (U+FF21�?"U+FF5A, used in Japanese text)
+- Mathematical alphanumeric symbols (U+1D400�?"U+1D7FF, bold/italic/script variants)
 - Superscripts, subscripts, and modifier letters
+- Lookalike digits: fullwidth digits, superscripts/subscripts, Arabic-Indic,
+  extended Arabic-Indic, Devanagari, and mathematical digit forms
+
+**Normalization/rejection policy for lookalike digits:** usernames are validated
+byte-wise and **no Unicode normalization is performed**. ASCII digits (`0-9`)
+remain valid where GitHub username rules allow them; any non-ASCII digit
+lookalike is rejected as `InvalidUsername`. This avoids ambiguous canonicalization
+and prevents numeric-suffix spoofing (for example `alice1` vs fullwidth `alice１`).
 
 **Documented guarantee:** "We reject all non-ASCII." Every codepoint above U+007F
 is blocked before it reaches storage, regardless of how it renders. The corpus
-tests validate this property against 78+ known confusable characters and ensure
+tests validate this property against 100+ known confusable characters and ensure
 no bypass path exists at the `register()` entry point.
 
 Run the full corpus: `cargo test homoglyph` or `cargo test unicode`
@@ -823,6 +1013,13 @@ To prevent a malicious or erroneous caller from exhausting the network CPU/memor
 ---
 
 ## Dual-Control `batch_remove` Auth Negative Matrix (Issue #219)
+
+Wave operators must not treat pending reverify flags as removal approvals.
+Mixed flagged, verified and unverified registrations remain subject to the same
+threshold and distinct-admin execution checks. Rejected or cancelled removals
+preserve registry records and reverify flags; successful removal clears only
+flags belonging to removed registrations. See the mixed-reverify regression
+cases in `tests/batch_remove_dual_control.rs` (Issue #861).
 
 Dashboard operators and auditors need the full failure surface of the dual-control
 `batch_remove` entrypoints spelled out. The matrix below covers every unauthorized and
@@ -1122,6 +1319,21 @@ canonical ownership message for the **record's** `stellar_address`. A proof
 issued for a different address returns `AddressMismatch` (62) and does not
 update verification state.
 
+**Clock skew (Issue #854).** Ledger time is authoritative. A non-zero signed
+expiry allows a fixed 30-second post-expiry grace, inclusive; 31 seconds
+or more returns `OracleProofExpired` (60). No separate future-expiry cap
+or issued-at field is introduced. The comparison uses saturating subtraction
+and does not alter the signed expiry, message binding, allowlist, signature
+or owner authorization checks. Zero retains the legacy no-expiry behavior;
+production oracles should issue short-lived non-zero expiries, synchronize
+their clocks, and obtain a fresh signed proof if the grace is exhausted.
+The grace extends the usable replay window by at most 30 seconds; it is
+not a substitute for signature or owner authentication. Failed verification
+does not update registry state.
+
+Run `cargo test --lib oracle_proof` and
+`cargo test --test oracle_proof_clock_skew` for the boundary checks.
+
 **Invalid proof fails.** Each rejection above returns its own `Err` code. An
 allowlisted key with a canonically encoded signature that does not verify
 traps the host invocation (`Error(Crypto, InvalidInput)`) instead of
@@ -1167,9 +1379,30 @@ exist, deliberately:
 
 This is enforced by test, not left as a comment:
 `tests/cross_contract_register_deny.rs::cross_contract_register_on_behalf_of_another_address_is_denied`
-(expects a panic — missing auth), with
-`direct_register_by_the_address_owner_still_works` as the positive control
-proving the same call path succeeds for a real, self-signing registrant.
+(expects a panic — missing auth), `::cross_contract_auth_spoof_payload_matrix_is_deterministically_denied`
+for a deterministic 32-payload caller/target matrix, and
+`::malformed_oversized_and_paused_register_leave_no_partial_state` for malformed,
+oversized-fallback, and pause guards. `direct_register_by_the_address_owner_still_works`
+is the positive control proving the same call path succeeds for a real,
+self-signing registrant.
+
+### Spoof threat and reason codes
+
+A hostile sibling contract may vary usernames, target addresses, fallback
+address lists, or caller identity, but it cannot turn a crafted argument into
+an authorization grant. The host authorization context belongs to the invoking
+contract and does not contain a signature for an arbitrary `stellar_address`.
+Consequently, crafted C2C relays fail before `register` changes storage. A
+`#[should_panic]` auth denial is the host-level result; contract-side rejection
+reason codes remain unchanged: `InvalidUsername` (11) for malformed/empty or
+oversized names, `FallbackListFull` (46) for more than five fallback addresses,
+and `Paused` (7) for paused/freeze guards. `ZeroAddress` (16) remains a
+fail-before-write guard for the burn-address form of spoofing.
+
+Operators should treat a successful C2C `register` from an untrusted sibling
+as a protocol regression, not as an expected fallback. There is no trusted
+contract allowlist and no nonce today because C2C registration is intentionally
+absent. Keep it absent unless replay protection is added atomically.
 
 **ABI statement:** `register` is not part of the cross-contract read surface
 documented in [ABI.md § Cross-Contract Read Interface](ABI.md#cross-contract-read-interface)
@@ -1596,13 +1829,22 @@ implementation that skips the write only when every counter matches rather
 than never writing in dry-run mode at all, and also runs several dry-run
 calls back to back to confirm they never accumulate partial writes.
 
-## Cross-network misuse (Issue #666)
+## Cross-network misuse (Issue #666, #809)
 
 `initialize` records the executing network id, and every gated entrypoint
 re-checks it via `require_initialized`. State initialized on pubnet and
-executed on testnet — or the reverse — fails closed with `NetworkMismatch`
+executed on testnet �?" or the reverse �?" fails closed with `NetworkMismatch`
 (code 30) before any write, so a rejected call leaves no partial state.
-Covered by the pubnet/testnet cases in `tests/network_mismatch.rs`.
+
+This network guard applies to pause-control entrypoints as well: `pause`,
+`unpause`, `set_paused`, `emergency_pause`, and `clear_emergency_pause` all
+route through `require_initialized` (and therefore
+`require_matching_network`) before mutating pause state. A snapshot restored
+on the wrong network cannot be paused, unpaused, or emergency-paused across
+the network boundary.
+
+Covered by the pubnet/testnet cases and pause/unpause mismatch cases in
+`tests/network_mismatch.rs`.
 
 ## Reserved-name rejection is case-insensitive (Issue #781)
 

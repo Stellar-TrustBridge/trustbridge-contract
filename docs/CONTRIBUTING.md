@@ -42,7 +42,7 @@ build / wasm-size). Every pull request and push to `main` runs these jobs from
 
 | CI job | Make targets |
 |---|---|
-| `quality` | `cargo test --test homoglyph_corpus` (named blocking step), then `make check` (`make fmt`, `make lint`, `make test`, `make docs-check`, plus error-codes / event-topics / abi-check / wasm-size) |
+| `quality` | `cargo test --test homoglyph_corpus` (named blocking step), then `make check` (`make fmt`, `make lint`, `make test`, `make docs-check`, plus error-codes / event-topics / event-topics-message-test / wasm-hash-pin-test / abi-check / wasm-size) |
 | `build` | `make build` (`stellar contract build`), `make wasm-size`, `make wasm-hash-pin WASM_HASH_STRICT=1` |
 | `abi-consistency` | `./scripts/check_error_codes.sh` (`make error-codes`) and `./scripts/check_event_topics.sh` (`make event-topics`) — fails on any `ContractError` / event-topic drift; `make storage-rent-estimator` also checks golden output and stable invalid-input errors |
 | `storage-budgets` | `make storage-help-check`, `make storage-footprint-check`, and `make storage-rent-check` |
@@ -52,6 +52,9 @@ build / wasm-size). Every pull request and push to `main` runs these jobs from
 
 `make ci` runs the same set with the strict hash gate enabled, so it fails while
 `wasm-hash.pin` still contains `PLACEHOLDER` or does not match the built WASM.
+See [DEPLOYMENT.md § Strict mode checklist (`WASM_HASH_STRICT=1`)](DEPLOYMENT.md#strict-mode-checklist-wasm_hash_strict1)
+for the policy on when strict mode is enforced in CI vs local development, how to rotate pins after
+intentional WASM changes, and triage steps for common failure logs.
 
 ### Codespaces / devcontainer setup
 
@@ -630,6 +633,58 @@ Then, in the same PR:
 CI fails the fixture comparison until the regenerated JSON is committed, so
 an un-bumped golden blocks the pipeline by design.
 
+#### Bindings golden diff tips for module splits (Issue #XYZ)
+
+**TL;DR:** If you move a contract entrypoint (e.g., `verify`) from one Rust
+module to another **without changing its signature**, the bindings golden and
+`docs/abi.json` may show a diff even though the ABI is unchanged. This is an
+**order-only change**, not a real break.
+
+**What happens:**
+- Soroban contract spec generation (`soroban-sdk` macros) orders entrypoints by
+  the order they appear in source code, not alphabetically
+- Moving `verify` from `src/lib.rs` line 500 to a new `src/contract/verify.rs`
+  file shifts its position in the generated contract spec relative to other functions
+- TypeScript bindings generated from that spec may list functions in a different
+  order, changing auto-generated client stub method order
+- The `docs/abi.json` file (which preserves contract spec order) may show
+  reordered function blocks, even though signatures are unchanged
+
+**What to check when you see a bindings golden diff:**
+1. **Signature unchanged?** Compare the function signature in `docs/ABI.md` before
+   and after. If only the order changed (function name, arg names/types, return type
+   all identical), it's **not a breaking change**.
+2. **Bindings still decode correctly?** Run `make diff-test` (TypeScript differential
+   tests in `ts-differential-tests/`). If those pass, the encoding is compatible.
+3. **Golden diff is order-only?** Inspect the bindings golden diff:
+   ```bash
+   git diff tests/testdata/bindings/get_address_simulate.v1.json
+   git diff docs/abi.json
+   ```
+   If field names, types, and nesting are identical and only array indices or
+   function sequence changed, the diff is **cosmetic**.
+
+**When it's a real ABI break (requires version bump):**
+- Function signature changed (added/removed/retyped a parameter or return field)
+- Event topic order changed (breaking indexer event filtering)
+- Error code discriminant changed (breaking error classification logic)
+- Struct field added/removed/retyped (breaking deserialization)
+
+**When it's order-only (no version bump needed):**
+- Module split moved functions to different files in the same `impl` block
+- Refactor reordered methods within a file without signature changes
+- New functions were inserted between existing ones (additive)
+
+**For reviewers:** If a PR moves functions across modules and the bindings golden
+shows a diff, ask: "Did any signature change, or only the order?" If only order,
+approve the golden refresh without bumping `FIXTURE_VERSION`. Check `git diff
+tests/testdata/abi/*.json` to see which functions moved.
+
+**For integrators:** If you consume `trustbridge-action` TypeScript bindings and
+see a contract upgrade that reorders functions, your existing decode logic is
+unaffected — the client stub just lists methods in a different sequence. No
+integrator action required unless function signatures changed.
+
 Cross-ABI goldens that follow the same "regenerate + commit" rule:
 `abi/contract_error_codes.golden` (error-code stability, Issue #402) and
 `abi/export_page.layout.golden` (export page layout). The
@@ -981,6 +1036,7 @@ their own `Env`.
 
 1. **Pick the partition**:
    - **Instance**: Use for singleton state (admin address, pause flag, network ID, etc.). No TTL, no per-entry context.
+     *Important*: All instance keys share a single 64 KiB entry. Never place unbounded collections (such as user lists) in instance storage.
    - **Persistent**: Use for per-entry data (registrations, roles, pending operations). TTL-managed; requires a context type (username, address, etc.).
 
 2. **Pick a unique symbol**:
@@ -1000,16 +1056,23 @@ their own `Env`.
    - Persistent keys reusing an existing discriminator: **Never**. Each persistent namespace must have a unique discriminator.
    - If in doubt, see `docs/STORAGE_KEYS.md` § Key Namespace Diagram.
 
-5. **Document before committing**:
+5. **Measure footprint & verify growth budget**:
+   - Measure serialized XDR byte size (`to_xdr(env).len()`) under worst-case inputs.
+   - Check against the 64 KiB instance storage ceiling or Wave rent budgets.
+   - For keys tracked by CI budgets, add or update the `max_bytes` entry in `docs/STORAGE_FOOTPRINT.md`.
+   - Follow the complete contributor checklist in [STORAGE_FOOTPRINT.md](STORAGE_FOOTPRINT.md#contributor-checklist-for-adding-instance-and-persistent-keys).
+
+6. **Document before committing**:
    - Add a row to the appropriate table in `docs/STORAGE_KEYS.md`.
    - Add a row to the "Complete Key Inventory" section.
    - Run `make storage-keys-check` to confirm both tables are consistent.
-   - If persistent, update the TTL behavior table.
+   - If persistent, update the TTL behavior table in `docs/STORAGE_KEYS.md` and `docs/STORAGE_RENT.md`.
    - Link the issue or feature in the "Purpose" column if applicable.
 
-6. **Update tests**:
+7. **Update tests & run CI storage gates**:
    - Add a test to `tests/storage_keys_collision.rs` (see below) to verify the key is stored/read correctly.
    - If the key participates in a workflow, add an integration test to `tests/integration.rs`.
+   - Run `make storage-check` (runs `storage-keys-check`, `storage-footprint-check`, `storage-rent-check`, `storage-rent-estimator`).
 
 ### Collision detection automation
 

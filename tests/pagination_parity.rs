@@ -863,6 +863,118 @@ fn walk_public_paginated(env: &Env, contract_id: &Address, rng: &mut Xorshift32)
     all
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// § Pending re-verification flags (Issue #853)
+/// Registers, verifies, then re-registers to a different address so the
+/// normal entrypoint sets the pending-reverify flag. Each auth-bearing call
+/// gets its own invocation frame.
+fn flag_verified_user(env: &Env, admin: &Address, contract_id: &Address, username: &str) {
+    let register = || {
+        env.as_contract(contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                s(env, username),
+                Address::generate(env),
+                Vec::new(env),
+            )
+            .unwrap();
+        });
+    };
+    register();
+    env.as_contract(contract_id, || {
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(env, username)).unwrap();
+    });
+    register();
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Flagging a verified user with a different Stellar address must not remove
+/// the record from the index: all three export APIs must still walk the same
+/// registry in the same order, and the pending-reverify page exposes the flag.
+#[test]
+fn test_parity_pending_reverify_flagged_users_stay_in_all_walks() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    flag_verified_user(&env, &admin, &contract_id, "alice");
+    env.as_contract(&contract_id, || {
+        let pending = TrustBridgeContract::get_pending_reverify(env.clone(), 0, 10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending.get(0).unwrap(), s(&env, "alice"));
+    });
+
+    let page = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_page(env.clone(), 0, 10).unwrap()
+    });
+    let admin_page = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap()
+    });
+    let public_page = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap()
+    });
+    let total = env.as_contract(&contract_id, || TrustBridgeContract::get_stats(env.clone()).total);
+    assert_eq!(page.len(), 1);
+    assert_eq!(admin_page.records.len(), 1);
+    assert_eq!(public_page.records.len(), 1);
+    assert_eq!(admin_page.records.len(), public_page.records.len());
+    for i in 0..admin_page.records.len() {
+        assert_eq!(admin_page.records.get(i).unwrap().0, public_page.records.get(i).unwrap().0);
+    }
+    assert_eq!(page.get(0).unwrap().0, s(&env, "alice"));
+    assert!(!admin_page.has_more);
+    assert!(!public_page.has_more);
+    assert_eq!(total, 1);
+}
+
+/// Failure path: an oversized pending-reverify limit is rejected without
+/// mutating the registry or changing the export walks.
+#[test]
+fn test_parity_pending_reverify_over_limit_does_not_disturb_walks() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    flag_verified_user(&env, &admin, &contract_id, "alice");
+    assert_eq!(
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_pending_reverify(env.clone(), 0, 101)
+        }),
+        Err(trustbridge_contract::ContractError::InvalidBatchSize)
+    );
+    let admin_page = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap()
+    });
+    let public_page = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_public_paginated(env.clone(), None, 10).unwrap()
+    });
+    assert_eq!(admin_page.records.len(), public_page.records.len());
+    for i in 0..admin_page.records.len() {
+        assert_eq!(admin_page.records.get(i).unwrap().0, public_page.records.get(i).unwrap().0);
+    }
+    assert_eq!(admin_page.records.len(), 1);
+}
+
+/// Failure path: a hostile offset past the index is an empty page for both
+/// the pending-reverify endpoint and the export walks; no stale flag escapes.
+#[test]
+fn test_parity_pending_reverify_past_end_offset_is_empty_for_all_apis() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    flag_verified_user(&env, &admin, &contract_id, "alice");
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::get_pending_reverify(env.clone(), u32::MAX, 10)
+            .unwrap()
+            .is_empty());
+        assert!(TrustBridgeContract::get_registered_page(env.clone(), u32::MAX, 10)
+            .unwrap()
+            .is_empty());
+        assert!(TrustBridgeContract::get_public_paginated(env.clone(), None, 10)
+            .unwrap()
+            .records
+            .len()
+            == 1);
+    });
+}
+
 /// Fuzz-like soak: seeded registry, randomized cursor walk, parity assertion
 /// repeated across multiple seeds so a single lucky limit sequence can't mask
 /// a parity bug (Wave export patterns vary limit sizes unpredictably).
