@@ -1350,7 +1350,12 @@ the page for integrity verification (Issue #216).
 
 **Opaque cursors:** Never construct or parse `cursor` yourself. Always use
 `None` to start, then pass back `next_cursor` from each page. Cursors become
-invalid after registry mutations (removal) and fail with `InvalidCursor`.
+invalid after registry mutations (removal) and fail with `InvalidCursor` (code
+52). There is deliberately **one** reason code for decode failures: a
+malformed/out-of-range offset and a wrong-generation cursor both return
+`InvalidCursor`; clients must not expect distinct codes (Issue #859). Recovery
+is always to restart from `cursor = None` and replay with idempotent upserts;
+see [DASHBOARD_SYNC.md § Invalid cursor reason codes](DASHBOARD_SYNC.md#invalid-cursor-reason-codes-issue-859).
 
 ```bash
 # Page 1 (cursor = None to start)

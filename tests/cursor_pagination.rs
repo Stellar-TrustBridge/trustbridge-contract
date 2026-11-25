@@ -725,3 +725,76 @@ fn test_pending_reverify_page_oversized_limit_is_rejected() {
         assert_eq!(page.len(), 1);
     });
 }
+
+// ── Invalid-cursor reason differentiation (Issue #859) ───────────────────────
+
+/// Happy path: the current-generation cursor with an in-range offset still
+/// decodes, so the single error code does not mask a working cursor.
+#[test]
+fn test_current_generation_cursor_still_decodes() {
+    let (env, _admin, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 4);
+        set_index_generation(&env, 3);
+        let page = TrustBridgeContract::get_public_paginated(
+            env.clone(),
+            Some(forge_cursor(&env, 2, 3)),
+            2,
+        )
+        .unwrap();
+        assert_eq!(page.records.get(0).unwrap().0, s(&env, "user002"));
+    });
+}
+
+/// Failure path 1 — a malformed/out-of-range offset maps to the documented
+/// single `InvalidCursor` code rather than a new reason code.
+#[test]
+fn test_out_of_range_cursor_offset_maps_to_invalid_cursor() {
+    let (env, _admin, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 4);
+        set_index_generation(&env, 3);
+        for offset in [5u32, u32::MAX] {
+            assert_eq!(
+                TrustBridgeContract::get_public_paginated(
+                    env.clone(),
+                    Some(forge_cursor(&env, offset, 3)),
+                    2,
+                ),
+                Err(ContractError::InvalidCursor),
+                "offset {offset} must not get a distinct reason code"
+            );
+        }
+    });
+}
+
+/// Failure path 2 — a wrong-generation cursor (in-range offset) maps to the
+/// same code as the malformed cursor above.
+#[test]
+fn test_wrong_generation_cursor_maps_to_same_invalid_cursor_code() {
+    let (env, _admin, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 4);
+        set_index_generation(&env, 3);
+        assert_eq!(
+            TrustBridgeContract::get_public_paginated(
+                env.clone(),
+                Some(forge_cursor(&env, 1, 4)),
+                2,
+            ),
+            Err(ContractError::InvalidCursor)
+        );
+    });
+}
+
+/// Docs must keep stating that only one code exists for both decode reasons.
+#[test]
+fn test_invalid_cursor_reason_docs_document_single_code() {
+    assert!(ABI_DOC.contains("**one** reason code for decode failures"));
+    assert!(ABI_DOC.contains("fail with `InvalidCursor` (code"));
+    assert!(DASHBOARD_DOC.contains("Invalid cursor reason codes (Issue #859)"));
+    assert!(DASHBOARD_DOC.contains("`InvalidCursor` (code 52)"));
+}

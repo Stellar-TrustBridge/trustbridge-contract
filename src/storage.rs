@@ -1035,13 +1035,13 @@ fn encode_cursor(env: &Env, offset: u32) -> BytesN<8> {
 ///
 /// # Errors
 ///
-/// - [`ContractError::InvalidCursor`] if the cursor's embedded generation no
-///   longer matches the current one — meaning a username was removed from
-///   the registry (shifting positions) since the cursor was issued — or if
-///   the embedded offset is past the current registry size. Either way, the
-///   safe recovery is to restart pagination from `cursor = None`; existing
-///   idempotent-upsert indexer logic (see `docs/DASHBOARD_SYNC.md`) makes a
-///   restart safe to replay.
+/// - [`ContractError::InvalidCursor`] (code 52) for **every** decode failure:
+///   a wrong index generation (a username was removed, shifting positions),
+///   or a malformed/out-of-range offset. The two reasons are deliberately not
+///   differentiated on-chain (Issue #859). The safe recovery for either is to
+///   restart pagination from `cursor = None`; existing idempotent-upsert
+///   indexer logic (see `docs/DASHBOARD_SYNC.md`) makes a restart safe to
+///   replay.
 fn decode_cursor(env: &Env, cursor: &BytesN<8>) -> Result<u32, ContractError> {
     let bytes = cursor.to_array();
     let offset = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);

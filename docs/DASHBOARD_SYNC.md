@@ -97,6 +97,27 @@ Full budget model, CLI examples, and reproduction commands:
 [BENCHMARK_BUDGETS.md](BENCHMARK_BUDGETS.md). Field semantics:
 [ABI.md § ExportPage](ABI.md#exportpage).
 
+### Invalid cursor reason codes (Issue #859)
+
+The contract deliberately reports **one** reason code for every cursor decode
+failure: `InvalidCursor` (code 52). It does not distinguish a malformed/out-of-
+range offset from a cursor issued against a different `index_gen`; both are
+unsafe to resume and both fail with the same stable code. Do not infer a more
+specific on-chain error than the ABI promises.
+
+For operator triage, compare recent removals with `get_health_probes().index_gen`
+from [CONTRACT_HEALTH.md](CONTRACT_HEALTH.md#pre-wave-probes-issue-668):
+
+- `index_gen` changed since the cursor was issued → stale generation; restart
+  from `cursor = None`. Removal/batch events identify the cause.
+- `index_gen` unchanged but the offset is beyond the registry size → malformed
+  or hand-crafted cursor; restart from `cursor = None` and never construct
+  cursors client-side.
+
+Either way the recovery is identical and idempotent: restart from `None` and
+replay the export with idempotent upserts. `tests/cursor_pagination.rs` pins
+both failure paths to `InvalidCursor`.
+
 ## Event Idempotency & Replay Handling
 ## Event lag signal (Issue #282)
 
