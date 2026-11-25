@@ -97,6 +97,86 @@ Full budget model, CLI examples, and reproduction commands:
 [BENCHMARK_BUDGETS.md](BENCHMARK_BUDGETS.md). Field semantics:
 [ABI.md § ExportPage](ABI.md#exportpage).
 
+## Handling Removals (Issue #3)
+
+### What happens when a username is removed
+
+When `remove` or `batch_remove` removes a username from the registry:
+1. The record is deleted from persistent storage.
+2. The flat username index is **not compacted** — the removed username's position
+   becomes a hole (an empty slot).
+3. The chunked index mirrors this: the chunk that held the removed username now
+   has one fewer live entry, but the chunk structure is not rebuilt.
+4. `count` and `verified` counters decrement immediately.
+
+**Wave exporter implications**: After removals, the index may contain gaps.
+Iterating by sequential integer offset (e.g., `for i in 0..count`) and expecting
+a live record at every position will skip records after the first hole. This is
+a bug in the exporter, not the contract.
+
+### How paginated exports handle holes correctly
+
+Both `get_registered_paginated` (admin) and `get_public_paginated` walk the
+index by **cursor**, not by assuming dense offsets. The returned `next_cursor`
+is an opaque token that embeds the index generation and the next valid position.
+When the contract encounters a hole, it skips it internally and advances to the
+next live record without exposing the gap to the caller. The page never contains
+empty slots; `has_more` and `next_cursor` guide the caller to the next batch.
+
+**Usage**:
+```rust
+let mut cursor = None;
+loop {
+    let page = get_public_paginated(cursor, 50);
+    for (username, record) in page.records {
+        // process record
+    }
+    if !page.has_more {
+        break;
+    }
+    cursor = page.next_cursor;
+}
+```
+
+This walks the entire registry exactly once, regardless of holes, and never
+skips or duplicates records.
+
+### Recovery after detecting a hole in a local mirror
+
+If your exporter built a local mirror by iterating integer offsets (the wrong
+approach) and now discovers missing records:
+
+1. **Clear the local mirror** or mark all entries as stale.
+2. **Restart from `cursor = None`** using the paginated export APIs.
+3. Walk to completion using `next_cursor` and `has_more`.
+4. Mark each record as fresh in the local store.
+5. Purge any stale entries that were not refreshed.
+
+**Do not** try to patch the local mirror by guessing which offsets were holes.
+The contract's internal index layout is not part of the ABI; only the paginated
+export APIs are.
+
+### Compaction (optional, operator-driven)
+
+`compact_index` (admin-callable, permissionless in some configurations) rebuilds
+the flat and chunked indexes without holes, reclaiming space and restoring dense
+sequential iteration. After compaction:
+- Previously issued cursors become invalid (`InvalidCursor` error).
+- Exporters must restart from `cursor = None`.
+- The index generation counter increments, which is how cursors detect staleness.
+
+**When to compact**: After large batch removals (10+ entries, or whenever the
+operator wants to reclaim index space). Compaction is **not required** for
+correctness — paginated exports work with or without it.
+
+**Guidance for Wave operators**: Schedule compaction during low-activity windows
+(maintenance, post-incident cleanup) to avoid invalidating in-flight exporter
+cursors. Document the compaction in the operator runbook so incident responders
+know why cursors were invalidated.
+
+See also: [REGISTRY_INVARIANTS.md § Hole Policy](./REGISTRY_INVARIANTS.md#hole-policy)
+for the full invariant definition and test coverage.
+
 ## Event Idempotency & Replay Handling
 ## Event lag signal (Issue #282)
 

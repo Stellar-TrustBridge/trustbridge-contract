@@ -23,6 +23,46 @@ Related docs: [ABI](ABI.md) · [ARCHITECTURE](ARCHITECTURE.md) · [SECURITY](SEC
 
 ---
 
+## Hole policy (Issue #3)
+
+**What is a hole**: When a username is removed from the registry, its position in
+the flat username index is marked empty (a "hole") rather than immediately compacted.
+The chunked index mirrors this: a chunk that held the removed username now has one
+fewer live entry, but the chunk itself is not restructured until an explicit
+`compact_index` call.
+
+**Why holes exist**: Compacting the index on every `remove` would be O(N) —
+every removal would rewrite the entire tail of the index. Instead, `remove` is
+O(1): it marks the slot empty and leaves compaction as a separate, operator-driven
+maintenance step.
+
+**Wave exporter implications**: After one or more removals, the flat index and
+chunked index may contain gaps. Exporters **must not assume dense indexes** —
+iterating by sequential integer offset and expecting a live record at every position
+will skip records after the first hole. Use the paginated export APIs
+(`get_registered_paginated`, `get_public_paginated`), which handle holes correctly
+and never skip or duplicate records across page boundaries.
+
+**Operational guidance**:
+- `remove` and `batch_remove` create holes but do not compact automatically.
+- `compact_index` (admin-callable, permissionless in some configurations) rebuilds
+  the index without holes. Run it after large batch removals to reclaim index space.
+- Paginated exports work correctly with or without compaction — holes are transparent
+  to them, so an exporter does not need to compact before fetching.
+- After `compact_index`, previously issued pagination cursors become invalid
+  (`InvalidCursor` error) because the index generation has changed. Restart from
+  `cursor = None` to resume the export.
+
+**Test coverage**: `tests/registry_hole_policy.rs` asserts the membership property
+(every flat-index entry has a live record and appears in the chunks; every chunked
+entry appears in the flat index) across register / remove / compact sequences, at
+chunk boundaries, and after the registry empties and refills.
+
+See also [DASHBOARD_SYNC.md § Handling Removals](./DASHBOARD_SYNC.md#handling-removals)
+for the exporter recovery procedure after detecting a hole in a local mirror.
+
+---
+
 ## Enumerated Invariants
 
 | ID | Invariant | Enforced by |
