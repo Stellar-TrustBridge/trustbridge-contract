@@ -243,6 +243,15 @@ both paths are unaffected.
 Use both together for maximum transparency: stage the hash first (public
 notice, no expiry), then attest it (time-bounded, optionally required).
 
+`clear_staged` is admin-only even though `stage_wasm` accepts `Role::Upgrader`.
+A rejected clear records an `UnauthorizedAttempt` audit entry (details
+`"clear_staged"`) under the default audit config and leaves the staged hash in
+place; no `StagedWasmClearedEvent` is emitted. Operators can suppress those
+entries with `set_audit_config(..., log_unauthorized = false)` (see the
+suppression note in the audit section above). Covered by
+`tests/multisig_upgrade.rs::test_clear_staged_by_upgrader_records_unauthorized_attempt`
+and `test_clear_staged_by_random_records_unauthorized_attempt`.
+
 ### On-chain M-of-N multisig upgrade (Issue #301)
 
 The `propose_multisig_upgrade` → `approve_upgrade` (×N) → `execute_upgrade`
@@ -865,6 +874,15 @@ set_batch_remove_threshold:
 get_batch_remove_threshold:         public read — no auth, works while paused
 ```
 
+**Proposal expiry (Issue #805).** `BATCH_REMOVE_PROPOSAL_TTL_SECS = 86_400`
+(24 h) is checked with `>=`, matching the boundary convention used by upgrade
+expiry checks: a proposal is live only while the ledger timestamp is strictly
+less than `proposed_at + TTL`. At the exact boundary `execute_batch_remove`
+returns `NoPendingBatchRemove` and clears the slot without removing anything;
+`propose_batch_remove` may immediately replace an expired slot. Both sides of
+the boundary, the over-TTL path, and stale-proposal replacement are asserted in
+`tests/batch_remove_dual_control.rs`.
+
 ### `propose_batch_remove` — auth matrix
 
 | # | Scenario | Expected error | Code | Test |
@@ -1437,7 +1455,7 @@ is being tested before it is used.
 
 | Property | Decision |
 |---|---|
-| **Gated on `AuditConfig.log_unauthorized`** | Operators can suppress entries during a spam campaign without redeploying. The `AuditStats.unauthorized_attempts` counter still increments regardless. |
+| **Gated on `AuditConfig.log_unauthorized`** | Operators can suppress entries during a spam campaign without redeploying. **Observed behaviour (Issue #812):** `record_unauthorized_attempt` returns before `push_audit_entry`, so with `log_unauthorized = false` neither the log entry nor `AuditStats.unauthorized_attempts` grows. Earlier docs stated the counter still increments; that discrepancy is surfaced separately rather than silently changed here. |
 | **Uses the pre-call config** | An attacker calling `set_audit_config` to disable logging would itself require admin auth; the very failure to pass that check is logged under the current config before the call returns. |
 | **Non-recursive** | `record_unauthorized_attempt` calls `push_audit_entry` directly — no auth check, no re-entry into any role-gated path. |
 | **No reentrant loop** | The helper reads config and appends; it cannot trigger another auth check. |
@@ -1458,9 +1476,18 @@ All public entry points that return `NotAuthorized` are covered:
 The private `require_remove_auth` helper (used by `remove` and `rename`) has
 no `&Env`, so logging is done at the call site rather than inside the helper.
 Admin-gated functions that call `admin.require_auth()` directly (e.g. `pause`,
-`set_role`, `upgrade`) do not need this hook because Soroban's own
-`require_auth` traps the transaction if the signature is missing — there is no
-`NotAuthorized` error path in those functions.
+`set_role`, `upgrade`, `repair_index`) do not need this hook because Soroban's
+own `require_auth` traps the transaction if the signature is missing — there is
+no `NotAuthorized` error path in those functions. `repair_index` therefore has
+**no on-chain audit signal** for a non-admin or unsigned attempt; operators must
+rely on the host-level auth failure and their transaction logs. This is
+pinned by `tests/repair_index.rs` (Issue #801).
+
+`clear_staged` follows the same role-gated pattern as `stage_wasm` (Issue
+#812): a non-admin caller — including a `Role::Upgrader` holder — receives
+`NotAuthorized`, and `record_unauthorized_attempt` appends an
+`UnauthorizedAttempt` entry with `details = "clear_staged"` when
+`log_unauthorized` is true. The staged slot is never cleared on that path.
 
 ### Reading the log
 

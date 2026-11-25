@@ -626,6 +626,10 @@ Public read of the staged slot, returning `None` when empty.
 
 Admin-only, idempotent slot clearing. This is the exported function, not
 the internal `clear_staged_wasm` helper; `commit_staged_wasm` is not exported.
+A non-admin caller (including a `Role::Upgrader`) receives `NotAuthorized`;
+when `AuditConfig.log_unauthorized` is true the rejection appends an
+`UnauthorizedAttempt` audit entry with `details = "clear_staged"` and the
+rejecting actor, while the staged slot remains untouched (Issue #812).
 
 ### `initialize(admin: Address) -> Result<(), ContractError>`
 
@@ -1068,8 +1072,10 @@ should page.
 
 | Constant | Value | Notes |
 |----------|------:|-------|
-| `DEFAULT_PAGE_LIMIT` | `20` | Applied when `limit == 0` |
+| `DEFAULT_PAGE_LIMIT` | `20` | Applied when `limit == 0` by the registry export entrypoints |
 | `MAX_PAGE_LIMIT` | `100` | Enforced by **clamping** (`limit.min(MAX_PAGE_LIMIT)`); over-limit does not error |
+| `MAX_ROLE_PAGE_LIMIT` | `50` | Role enumeration is the deliberate exception: `limit == 0` means 50, not 20 |
+| `BATCH_REMOVE_PROPOSAL_TTL_SECS` | `86_400` | Dual-control batch-remove proposal lifetime (24 h); expiry uses `>=` |
 
 Justification: a single invoke that materializes more than ~100 registry
 reads trips the ledger-entry footprint ceiling (see [Cost and
@@ -1082,6 +1088,15 @@ a measured ceiling. An oversized page fails the entire invocation with a
 budget/footprint error; `limit > 100` is clamped to `100` rather than rejected.
 See [BENCHMARK_BUDGETS.md](BENCHMARK_BUDGETS.md) for the budget model,
 failure symptoms, and `make bench` reproduction commands.
+
+**`limit = 0` (Issue #803).** `get_registered_paginated`,
+`get_public_paginated`, `export_attestation`, `get_registered_page`, and
+`get_pending_reverify` all treat `0` as `DEFAULT_PAGE_LIMIT` (20). The same
+`0` still carries the normal failure semantics: a stale cursor is rejected
+with `InvalidCursor`, an uninitialized registry returns `NotInitialized`, and
+`get_pending_reverify` rejects an over-cap limit with `InvalidBatchSize`.
+`get_role_holders` is the documented exception — it uses
+`MAX_ROLE_PAGE_LIMIT` (50) for both its default and its cap.
 
 ### `ExportPage`
 
@@ -3000,7 +3015,8 @@ Read-only; no auth. One page of `(address, role)` pairs, ordered by grant time
 (oldest first).
 
 - `limit` is capped at `MAX_ROLE_PAGE_LIMIT` (50). `0` or any larger value
-  yields the cap.
+  yields the cap — unlike the registry export entrypoints, this `0` does
+  **not** mean `DEFAULT_PAGE_LIMIT` (20).
 - An `offset` past the end returns an empty page rather than an error.
 - **The admin is included** — `initialize` grants `Role::Admin` through the same
   path that maintains the index.
@@ -3134,7 +3150,9 @@ Admin-only. `0` (default) disables dual control — `batch_remove` always
 executes directly, exactly as before this issue. A non-zero value requires
 any batch **larger** than it (strictly greater — a batch exactly at the
 threshold is unaffected) to go through `propose_batch_remove` /
-`execute_batch_remove` instead.
+`execute_batch_remove` instead. A proposal is accepted only while no live
+proposal exists; a proposal that has reached `BATCH_REMOVE_PROPOSAL_TTL_SECS`
+is replaced by the new one.
 
 #### `get_batch_remove_threshold() -> u32`
 
@@ -3152,10 +3170,12 @@ expired — see below). Emits `BatchRemoveProposedEvent`.
 `caller` must be the contract admin or hold `Role::Admin`, **and** must not
 be the address that proposed the batch — this is what makes it dual
 control. Performs the removals with the same partial-success semantics as
-`batch_remove`. A proposal older than `BATCH_REMOVE_PROPOSAL_TTL_SECS`
-(24h) is treated as gone (`NoPendingBatchRemove`) rather than executed.
-Emits `BatchRemoveExecutedEvent` plus one `RemovedEvent` per removed
-username.
+`batch_remove`. A proposal at or past `BATCH_REMOVE_PROPOSAL_TTL_SECS`
+(24 h, `86_400` seconds) is treated as gone (`NoPendingBatchRemove`) rather
+than executed: the check is `now >= proposed_at + TTL`, so the exact boundary
+is already expired. The stale slot is cleared on that execute attempt and a
+fresh proposal can be made immediately. Emits `BatchRemoveExecutedEvent` plus
+one `RemovedEvent` per removed username.
 
 #### `cancel_batch_remove(caller: Address) -> Result<(), ContractError>`
 

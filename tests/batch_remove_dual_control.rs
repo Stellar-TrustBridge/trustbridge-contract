@@ -101,7 +101,9 @@ fn has_event(env: &Env, contract_id: &Address, symbol: Symbol) -> bool {
 #[test]
 fn test_threshold_zero_disables_dual_control() {
     let (env, admin, _second, contract_id) = setup();
-    let names = register_n(&env, &contract_id, 20);
+    // Eight records keep the fixture inside the test host's footprint budget;
+    // the threshold behaviour under test is independent of batch size.
+    let names = register_n(&env, &contract_id, 8);
 
     env.as_contract(&contract_id, || {
         assert_eq!(
@@ -111,9 +113,11 @@ fn test_threshold_zero_disables_dual_control() {
     });
 
     env.mock_all_auths();
+    let summary = env.as_contract(&contract_id, || {
+        TrustBridgeContract::batch_remove(env.clone(), admin.clone(), names).unwrap()
+    });
+    assert_eq!(summary.successful, 8);
     env.as_contract(&contract_id, || {
-        let summary = TrustBridgeContract::batch_remove(env.clone(), admin.clone(), names).unwrap();
-        assert_eq!(summary.successful, 20);
         assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 0);
     });
 }
@@ -132,19 +136,29 @@ fn test_threshold_above_forces_the_propose_path() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+    });
+    env.as_contract(&contract_id, || {
         assert_eq!(
             TrustBridgeContract::get_batch_remove_threshold(env.clone()),
             3
         );
+    });
 
-        // 4 > 3: rejected with DualControlRequired, registry untouched.
-        let res = TrustBridgeContract::batch_remove(env.clone(), admin.clone(), over);
-        assert_eq!(res, Err(ContractError::DualControlRequired));
+    // 4 > 3: rejected with DualControlRequired, registry untouched.
+    let res = env.as_contract(&contract_id, || {
+        TrustBridgeContract::batch_remove(env.clone(), admin.clone(), over)
+    });
+    assert_eq!(res, Err(ContractError::DualControlRequired));
+    env.as_contract(&contract_id, || {
         assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 4);
+    });
 
-        // 3 == 3: still the direct single-step path.
-        let summary = TrustBridgeContract::batch_remove(env.clone(), admin.clone(), at).unwrap();
-        assert_eq!(summary.successful, 3);
+    // 3 == 3: still the direct single-step path.
+    let summary = env.as_contract(&contract_id, || {
+        TrustBridgeContract::batch_remove(env.clone(), admin.clone(), at).unwrap()
+    });
+    assert_eq!(summary.successful, 3);
+    env.as_contract(&contract_id, || {
         assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 1);
     });
 }
@@ -215,18 +229,25 @@ fn test_second_proposal_rejected_while_pending() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
             .unwrap();
+    });
 
-        let res =
-            TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone());
-        assert_eq!(res, Err(ContractError::BatchRemoveProposalPending));
+    let res = env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
+    });
+    assert_eq!(res, Err(ContractError::BatchRemoveProposalPending));
 
-        // A Role::Admin holder is not the contract admin and cannot propose at
-        // all — `propose_batch_remove` is explicitly admin-only.
-        let res = TrustBridgeContract::propose_batch_remove(env.clone(), second.clone(), names);
-        assert_eq!(res, Err(ContractError::NotAuthorized));
+    // A Role::Admin holder is not the contract admin and cannot propose at
+    // all — `propose_batch_remove` is explicitly admin-only.
+    let res = env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_batch_remove(env.clone(), second.clone(), names)
+    });
+    assert_eq!(res, Err(ContractError::NotAuthorized));
 
+    env.as_contract(&contract_id, || {
         assert!(
             TrustBridgeContract::get_pending_batch_remove(env.clone()).is_some(),
             "the original proposal must survive rejected attempts"
@@ -262,10 +283,16 @@ fn test_execute_by_same_proposer_rejected() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names).unwrap();
+    });
 
-        let res = TrustBridgeContract::execute_batch_remove(env.clone(), admin.clone());
-        assert_eq!(res, Err(ContractError::NotAuthorized));
+    let res = env.as_contract(&contract_id, || {
+        TrustBridgeContract::execute_batch_remove(env.clone(), admin.clone())
+    });
+    assert_eq!(res, Err(ContractError::NotAuthorized));
+    env.as_contract(&contract_id, || {
         assert!(
             TrustBridgeContract::get_pending_batch_remove(env.clone()).is_some(),
             "the proposal survives a rejected execution attempt"
@@ -286,10 +313,14 @@ fn test_dual_control_batch_remove_requires_both_approvals() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+    });
 
-        // One admin signature on the direct path is not enough.
-        let direct = TrustBridgeContract::batch_remove(env.clone(), admin.clone(), names.clone());
-        assert_eq!(direct, Err(ContractError::DualControlRequired));
+    // One admin signature on the direct path is not enough.
+    let direct = env.as_contract(&contract_id, || {
+        TrustBridgeContract::batch_remove(env.clone(), admin.clone(), names.clone())
+    });
+    assert_eq!(direct, Err(ContractError::DualControlRequired));
+    env.as_contract(&contract_id, || {
         assert_eq!(
             TrustBridgeContract::get_stats(env.clone()).total,
             4,
@@ -302,10 +333,14 @@ fn test_dual_control_batch_remove_requires_both_approvals() {
                 "record must remain after rejected direct batch_remove"
             );
         }
+    });
 
-        // First approval: propose. Registry still complete; proposal pending.
+    // First approval: propose. Registry still complete; proposal pending.
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
             .unwrap();
+    });
+    env.as_contract(&contract_id, || {
         assert!(
             TrustBridgeContract::get_pending_batch_remove(env.clone()).is_some(),
             "first approval records a pending proposal"
@@ -315,10 +350,14 @@ fn test_dual_control_batch_remove_requires_both_approvals() {
             4,
             "propose must not remove records"
         );
+    });
 
-        // Same authorized approver cannot consume their own proposal.
-        let same_key = TrustBridgeContract::execute_batch_remove(env.clone(), admin.clone());
-        assert_eq!(same_key, Err(ContractError::NotAuthorized));
+    // Same authorized approver cannot consume their own proposal.
+    let same_key = env.as_contract(&contract_id, || {
+        TrustBridgeContract::execute_batch_remove(env.clone(), admin.clone())
+    });
+    assert_eq!(same_key, Err(ContractError::NotAuthorized));
+    env.as_contract(&contract_id, || {
         assert!(
             TrustBridgeContract::get_pending_batch_remove(env.clone()).is_some(),
             "proposal must survive a one-approver execute"
@@ -328,11 +367,14 @@ fn test_dual_control_batch_remove_requires_both_approvals() {
             4,
             "one approval must not complete removal"
         );
+    });
 
-        // Second distinct admin-equivalent approval completes the removal.
-        let summary =
-            TrustBridgeContract::execute_batch_remove(env.clone(), second.clone()).unwrap();
-        assert_eq!(summary.successful, 4);
+    // Second distinct admin-equivalent approval completes the removal.
+    let summary = env.as_contract(&contract_id, || {
+        TrustBridgeContract::execute_batch_remove(env.clone(), second.clone()).unwrap()
+    });
+    assert_eq!(summary.successful, 4);
+    env.as_contract(&contract_id, || {
         assert!(
             TrustBridgeContract::get_pending_batch_remove(env.clone()).is_none(),
             "proposal is consumed only after the second approval"
@@ -426,8 +468,12 @@ fn test_cancel_clears_proposal_and_allows_a_new_one() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
             .unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::cancel_batch_remove(env.clone(), admin.clone()).unwrap();
     });
 
@@ -447,7 +493,6 @@ fn test_cancel_clears_proposal_and_allows_a_new_one() {
     });
 
     // A fresh proposal is possible after a cancel.
-    env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names).unwrap();
         assert!(TrustBridgeContract::get_pending_batch_remove(env.clone()).is_some());
@@ -462,23 +507,24 @@ fn test_cancel_by_non_admin_or_without_proposal_fails() {
     let random = Address::generate(&env);
 
     env.mock_all_auths();
+    let res = env.as_contract(&contract_id, || {
+        TrustBridgeContract::cancel_batch_remove(env.clone(), admin.clone())
+    });
+    assert_eq!(res, Err(ContractError::NoPendingBatchRemove));
+
     env.as_contract(&contract_id, || {
-        // Nothing pending.
-        assert_eq!(
-            TrustBridgeContract::cancel_batch_remove(env.clone(), admin.clone()),
-            Err(ContractError::NoPendingBatchRemove)
-        );
-
         TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names).unwrap();
+    });
 
-        // Non-admin canceller.
-        assert_eq!(
-            TrustBridgeContract::cancel_batch_remove(env.clone(), random),
-            Err(ContractError::NotAuthorized)
-        );
+    let res = env.as_contract(&contract_id, || {
+        TrustBridgeContract::cancel_batch_remove(env.clone(), random)
+    });
+    assert_eq!(res, Err(ContractError::NotAuthorized));
 
-        // The rejected attempt left the proposal in place.
+    env.as_contract(&contract_id, || {
         assert!(TrustBridgeContract::get_pending_batch_remove(env.clone()).is_some());
     });
 }
@@ -496,42 +542,59 @@ fn test_pause_blocks_propose_and_execute_but_not_cancel() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::pause(env.clone(), 1).unwrap();
+    });
 
-        // Propose is blocked while paused.
-        assert_eq!(
-            TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone()),
-            Err(ContractError::Paused)
-        );
+    // Propose is blocked while paused.
+    let res = env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
+    });
+    assert_eq!(res, Err(ContractError::Paused));
 
-        // Unpause, propose, then re-pause so the execute step is exercised.
+    // Unpause, propose, then re-pause so the execute step is exercised.
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::unpause(env.clone(), 4).unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
             .unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::pause(env.clone(), 1).unwrap();
+    });
 
-        // Execute is blocked while paused; the proposal survives.
-        assert_eq!(
-            TrustBridgeContract::execute_batch_remove(env.clone(), second.clone()),
-            Err(ContractError::Paused)
-        );
+    // Execute is blocked while paused; the proposal survives.
+    let res = env.as_contract(&contract_id, || {
+        TrustBridgeContract::execute_batch_remove(env.clone(), second.clone())
+    });
+    assert_eq!(res, Err(ContractError::Paused));
+    env.as_contract(&contract_id, || {
         assert!(
             TrustBridgeContract::get_pending_batch_remove(env.clone()).is_some(),
             "the proposal must survive the pause and remain visible"
         );
+    });
 
-        // Cancel works while paused — the abort path is never blockable by the
-        // same freeze that might motivate using it.
+    // Cancel works while paused — the abort path is never blockable by the
+    // same freeze that might motivate using it.
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::cancel_batch_remove(env.clone(), admin.clone()).unwrap();
         assert!(TrustBridgeContract::get_pending_batch_remove(env.clone()).is_none());
-
-        // Unpausing restores the full flow end to end.
-        TrustBridgeContract::unpause(env.clone(), 4).unwrap();
-        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names).unwrap();
-        let summary =
-            TrustBridgeContract::execute_batch_remove(env.clone(), second.clone()).unwrap();
-        assert_eq!(summary.successful, 4);
     });
+
+    // Unpausing restores the full flow end to end.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::unpause(env.clone(), 4).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names).unwrap();
+    });
+    let summary = env.as_contract(&contract_id, || {
+        TrustBridgeContract::execute_batch_remove(env.clone(), second.clone()).unwrap()
+    });
+    assert_eq!(summary.successful, 4);
 }
 
 /// Copy a slice of a soroban `Vec<String>` into a fresh `Vec`, so one
@@ -615,6 +678,8 @@ fn test_verified_count_correct_after_dual_control_execute() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "user000")).unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::verify(env.clone(), admin.clone(), username(&env, "user001")).unwrap();
     });
 
@@ -625,20 +690,21 @@ fn test_verified_count_correct_after_dual_control_execute() {
     });
 
     // Enable dual-control and go through the propose→execute flow.
-    env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
             .unwrap();
     });
 
-    env.mock_all_auths();
-    env.as_contract(&contract_id, || {
-        let summary =
-            TrustBridgeContract::execute_batch_remove(env.clone(), second.clone()).unwrap();
-        assert_eq!(summary.total, 4);
-        assert_eq!(summary.successful, 4);
+    let summary = env.as_contract(&contract_id, || {
+        TrustBridgeContract::execute_batch_remove(env.clone(), second.clone()).unwrap()
+    });
+    assert_eq!(summary.total, 4);
+    assert_eq!(summary.successful, 4);
 
+    env.as_contract(&contract_id, || {
         let stats = TrustBridgeContract::get_stats(env.clone());
         assert_eq!(
             stats.total, 0,
@@ -663,7 +729,11 @@ fn test_get_pending_batch_remove_public_while_paused() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names).unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::pause(env.clone(), 1).unwrap();
     });
 
@@ -721,17 +791,23 @@ fn test_cancel_after_execute_fails_with_no_pending() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
-        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names).unwrap();
-        TrustBridgeContract::execute_batch_remove(env.clone(), second.clone()).unwrap();
-
-        // The slot is gone — cancel must fail rather than silently no-op.
-        let res = TrustBridgeContract::cancel_batch_remove(env.clone(), admin.clone());
-        assert_eq!(
-            res,
-            Err(ContractError::NoPendingBatchRemove),
-            "cancel after execute must fail with NoPendingBatchRemove"
-        );
     });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::execute_batch_remove(env.clone(), second.clone()).unwrap();
+    });
+
+    // The slot is gone — cancel must fail rather than silently no-op.
+    let res = env.as_contract(&contract_id, || {
+        TrustBridgeContract::cancel_batch_remove(env.clone(), admin.clone())
+    });
+    assert_eq!(
+        res,
+        Err(ContractError::NoPendingBatchRemove),
+        "cancel after execute must fail with NoPendingBatchRemove"
+    );
 }
 
 /// Verify that `BatchRemoveCancelledEvent` carries the correct proposer even
@@ -745,7 +821,11 @@ fn test_cancel_event_records_proposer_and_canceller() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names).unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::cancel_batch_remove(env.clone(), admin.clone()).unwrap();
     });
 
@@ -763,6 +843,131 @@ fn test_cancel_event_records_proposer_and_canceller() {
             TrustBridgeContract::get_stats(env.clone()).total,
             4,
             "cancel must not remove any record"
+        );
+    });
+}
+
+// ── Proposal TTL boundary (Issue #805) ────────────────────────────────────────
+//
+// `storage::is_batch_remove_proposal_expired` deliberately uses `>=`, the
+// same boundary convention as upgrade expiry checks in the registry/upgrade
+// paths: a proposal is live for timestamps strictly less than
+// `proposed_at + BATCH_REMOVE_PROPOSAL_TTL_SECS` and expired at that exact
+// second. These tests lock down both sides of that boundary plus the
+// replacement rule for a stale proposal.
+
+/// Happy path just inside the TTL: `TTL - 1` seconds still allows the
+/// second, distinct approver to execute the proposal.
+#[test]
+fn test_proposal_is_executable_one_second_before_ttl() {
+    let (env, admin, second, contract_id) = setup();
+    let names = register_n(&env, &contract_id, 4);
+    let proposed_at = 1_000u64;
+
+    env.ledger().set_timestamp(proposed_at);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names.clone())
+            .unwrap();
+    });
+
+    // One second before expiry the proposal is still live.
+    env.ledger()
+        .set_timestamp(proposed_at + PROPOSAL_TTL_SECS - 1);
+    let summary = env.as_contract(&contract_id, || {
+        TrustBridgeContract::execute_batch_remove(env.clone(), second.clone()).unwrap()
+    });
+    assert_eq!(summary.successful, 4);
+    env.as_contract(&contract_id, || {
+        assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 0);
+        assert!(TrustBridgeContract::get_pending_batch_remove(env.clone()).is_none());
+    });
+}
+
+/// Failure path at the exact boundary: `>=` means the proposal is already
+/// expired at `proposed_at + TTL`, so execute rejects it and clears the slot
+/// without removing anything.
+#[test]
+fn test_proposal_exactly_at_ttl_is_expired_and_cleared() {
+    let (env, admin, second, contract_id) = setup();
+    let names = register_n(&env, &contract_id, 4);
+    let proposed_at = 1_000u64;
+
+    env.ledger().set_timestamp(proposed_at);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), names).unwrap();
+    });
+
+    env.ledger().set_timestamp(proposed_at + PROPOSAL_TTL_SECS);
+
+    let res = env.as_contract(&contract_id, || {
+        TrustBridgeContract::execute_batch_remove(env.clone(), second.clone())
+    });
+    assert_eq!(res, Err(ContractError::NoPendingBatchRemove));
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::get_stats(env.clone()).total,
+            4,
+            "an expired proposal must never remove records"
+        );
+        assert!(
+            TrustBridgeContract::get_pending_batch_remove(env.clone()).is_none(),
+            "the expired proposal slot is cleared"
+        );
+    });
+}
+
+/// A live proposal cannot be replaced, but a proposal that has reached the
+/// TTL boundary can be overwritten immediately with a fresh timestamp.
+#[test]
+fn test_stale_proposal_replacement_respects_ttl_boundary() {
+    let (env, admin, _second, contract_id) = setup();
+    let old_names = register_n(&env, &contract_id, 4);
+    let new_names = vec_from(&env, old_names.clone(), 0, 2);
+    let proposed_at = 1_000u64;
+
+    env.ledger().set_timestamp(proposed_at);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_batch_remove_threshold(env.clone(), 3).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), old_names.clone())
+            .unwrap();
+    });
+
+    // Before the boundary the stale-proposal guard rejects a replacement.
+    env.ledger()
+        .set_timestamp(proposed_at + PROPOSAL_TTL_SECS - 1);
+    let res = env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), new_names.clone())
+    });
+    assert_eq!(res, Err(ContractError::BatchRemoveProposalPending));
+
+    // At the boundary the same call replaces the expired proposal and
+    // records the new timestamp.
+    env.ledger().set_timestamp(proposed_at + PROPOSAL_TTL_SECS);
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_batch_remove(env.clone(), admin.clone(), new_names.clone())
+            .unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        let pending = TrustBridgeContract::get_pending_batch_remove(env.clone())
+            .expect("a fresh proposal must be visible after replacement");
+        assert_eq!(pending.proposed_at, proposed_at + PROPOSAL_TTL_SECS);
+        assert_eq!(pending.usernames.len(), 2);
+        assert_eq!(pending.usernames.get(0).unwrap(), new_names.get(0).unwrap());
+        assert_eq!(
+            TrustBridgeContract::get_stats(env.clone()).total,
+            4,
+            "proposal replacement never deletes records"
         );
     });
 }

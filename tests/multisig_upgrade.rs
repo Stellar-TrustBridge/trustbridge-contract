@@ -16,10 +16,12 @@
 
 #![cfg(test)]
 
-use soroban_sdk::testutils::{Address as _, Ledger as _};
-use soroban_sdk::{Address, BytesN, Env};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+use soroban_sdk::{Address, BytesN, Env, String, Symbol, TryFromVal};
 
-use trustbridge_contract::{ContractError, Role, TrustBridgeContract, MAX_UPGRADE_SIGNERS};
+use trustbridge_contract::{
+    AuditEventType, ContractError, Role, TrustBridgeContract, MAX_UPGRADE_SIGNERS,
+};
 
 /// Test fixture: an initialized contract where `admin` is the contract admin,
 /// `upgrader` holds `Role::Upgrader`, and `random` holds no role at all.
@@ -252,13 +254,15 @@ fn test_approve_upgrade_with_no_or_wrong_proposal_id_fails() {
     let (env, admin, upgrader, _random, contract_id) = setup();
 
     env.mock_all_auths();
+    // Nothing pending yet.
     env.as_contract(&contract_id, || {
-        // Nothing pending yet.
         assert_eq!(
             TrustBridgeContract::approve_upgrade(env.clone(), upgrader.clone(), 0),
             Err(ContractError::NoUpgradeProposalPending)
         );
+    });
 
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_multisig_upgrade(
             env.clone(),
             admin.clone(),
@@ -266,7 +270,10 @@ fn test_approve_upgrade_with_no_or_wrong_proposal_id_fails() {
             0,
         )
         .unwrap();
-        // Wrong id for the live proposal.
+    });
+
+    // Wrong id for the live proposal.
+    env.as_contract(&contract_id, || {
         assert_eq!(
             TrustBridgeContract::approve_upgrade(env.clone(), upgrader.clone(), 99),
             Err(ContractError::NoUpgradeProposalPending)
@@ -307,6 +314,8 @@ fn test_execute_fails_with_insufficient_approvals() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::set_upgrade_threshold(env.clone(), admin.clone(), 2).unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_multisig_upgrade(
             env.clone(),
             admin.clone(),
@@ -317,7 +326,6 @@ fn test_execute_fails_with_insufficient_approvals() {
     });
 
     // Delay (0) has elapsed, but only the proposer has approved.
-    env.mock_all_auths();
     env.as_contract(&contract_id, || {
         assert_eq!(
             TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), 0),
@@ -336,7 +344,9 @@ fn test_execute_fails_with_no_live_proposal() {
             TrustBridgeContract::execute_upgrade(env.clone(), upgrader.clone(), 0),
             Err(ContractError::NoUpgradeProposalPending)
         );
+    });
 
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_multisig_upgrade(
             env.clone(),
             admin.clone(),
@@ -344,7 +354,10 @@ fn test_execute_fails_with_no_live_proposal() {
             0,
         )
         .unwrap();
-        // Proposed but executed/cancelled under a different id than requested.
+    });
+
+    // Proposed but executed under a different id than requested.
+    env.as_contract(&contract_id, || {
         assert_eq!(
             TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), 42),
             Err(ContractError::NoUpgradeProposalPending)
@@ -529,13 +542,15 @@ fn test_cancel_with_no_or_wrong_proposal_id_fails() {
     let (env, admin, _upgrader, _random, contract_id) = setup();
 
     env.mock_all_auths();
+    // Nothing pending.
     env.as_contract(&contract_id, || {
-        // Nothing pending.
         assert_eq!(
             TrustBridgeContract::cancel_upgrade_proposal(env.clone(), admin.clone(), 0),
             Err(ContractError::NoUpgradeProposalPending)
         );
+    });
 
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::propose_multisig_upgrade(
             env.clone(),
             admin.clone(),
@@ -543,7 +558,10 @@ fn test_cancel_with_no_or_wrong_proposal_id_fails() {
             0,
         )
         .unwrap();
-        // Wrong id for the live proposal.
+    });
+
+    // Wrong id for the live proposal.
+    env.as_contract(&contract_id, || {
         assert_eq!(
             TrustBridgeContract::cancel_upgrade_proposal(env.clone(), admin.clone(), 99),
             Err(ContractError::NoUpgradeProposalPending)
@@ -603,23 +621,30 @@ fn test_proposal_error_paths_after_cancellation() {
             0,
         )
         .unwrap();
+    });
 
-        // Admin cancels proposal 0.
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::cancel_upgrade_proposal(env.clone(), admin.clone(), 0).unwrap();
+    });
 
-        // Approval on cancelled proposal fails with NoUpgradeProposalPending.
+    // Approval on cancelled proposal fails with NoUpgradeProposalPending.
+    env.as_contract(&contract_id, || {
         assert_eq!(
             TrustBridgeContract::approve_upgrade(env.clone(), upgrader.clone(), 0),
             Err(ContractError::NoUpgradeProposalPending)
         );
+    });
 
-        // Execution on cancelled proposal fails with NoUpgradeProposalPending.
+    // Execution on cancelled proposal fails with NoUpgradeProposalPending.
+    env.as_contract(&contract_id, || {
         assert_eq!(
             TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), 0),
             Err(ContractError::NoUpgradeProposalPending)
         );
+    });
 
-        // Repeat cancel on already-cancelled proposal fails with NoUpgradeProposalPending.
+    // Repeat cancel on already-cancelled proposal fails with NoUpgradeProposalPending.
+    env.as_contract(&contract_id, || {
         assert_eq!(
             TrustBridgeContract::cancel_upgrade_proposal(env.clone(), admin.clone(), 0),
             Err(ContractError::NoUpgradeProposalPending)
@@ -792,9 +817,215 @@ fn test_recovery_set_reachable_threshold_after_rejected_attempt() {
             MAX_UPGRADE_SIGNERS + 10,
         )
         .is_err());
+    });
 
-        // Admin lowers the threshold to a value within the signer cap.
+    // Admin lowers the threshold to a value within the signer cap.
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::set_upgrade_threshold(env.clone(), admin.clone(), 2).unwrap();
         assert_eq!(TrustBridgeContract::get_upgrade_threshold(env.clone()), 2);
+    });
+}
+
+// ── clear_staged unauthorized-attempt audit trail (Issue #812) ────────────────
+//
+// `clear_staged` is admin-only. A privileged Upgrader (which may stage WASM)
+// still must not clear it. Every rejected call records an
+// `AuditEventType::UnauthorizedAttempt` with `details = "clear_staged"` and
+// the rejecting actor, matching `stage_wasm` and the attestation setters.
+// The staged entry and its event stream are left untouched.
+
+/// True when an `UnauthorizedAttempt` entry for `actor` with the given
+/// operation details exists in the on-chain audit log.
+fn has_unauthorized_attempt(env: &Env, actor: &Address, operation: &str) -> bool {
+    let logs = TrustBridgeContract::get_audit_logs(env.clone());
+    let want_details = String::from_str(env, operation);
+    for i in 0..logs.len() {
+        let entry = logs.get(i).unwrap();
+        if entry.event_type == AuditEventType::UnauthorizedAttempt
+            && entry.actor == Some(actor.clone())
+            && entry.details == Some(want_details.clone())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// True when the contract emitted an event whose first topic is `symbol`.
+fn has_event(env: &Env, contract_id: &Address, symbol: Symbol) -> bool {
+    let want = soroban_sdk::xdr::ScVal::try_from_val(env, &symbol.to_val()).unwrap();
+    env.events()
+        .all()
+        .filter_by_contract(contract_id)
+        .events()
+        .iter()
+        .any(|e| match &e.body {
+            soroban_sdk::xdr::ContractEventBody::V0(v0) => v0.topics.first() == Some(&want),
+        })
+}
+
+/// Happy path: the admin can clear a staged hash. The operation emits
+/// `StagedWasmClearedEvent` and does **not** create an `UnauthorizedAttempt`
+/// audit entry.
+#[test]
+fn test_clear_staged_admin_happy_path_has_no_unauthorized_attempt() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::stage_wasm(env.clone(), admin.clone(), hash(&env, 0x11)).unwrap();
+        assert!(
+            TrustBridgeContract::get_staged(env.clone()).is_some(),
+            "fixture must stage a hash before clear"
+        );
+    });
+
+    let attempts_before = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_audit_stats(env.clone()).unauthorized_attempts
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::clear_staged(env.clone(), admin.clone()).unwrap();
+        assert!(TrustBridgeContract::get_staged(env.clone()).is_none());
+        assert!(has_event(
+            &env,
+            &contract_id,
+            Symbol::new(&env, "staged_wasm_cleared_event")
+        ));
+        let attempts_after =
+            TrustBridgeContract::get_audit_stats(env.clone()).unauthorized_attempts;
+        assert_eq!(attempts_after, attempts_before);
+        assert!(!has_unauthorized_attempt(&env, &admin, "clear_staged"));
+    });
+}
+
+/// Failure path 1: a `Role::Upgrader` holder may stage WASM but may not clear
+/// it. The attempt is rejected, logged with `details = "clear_staged"`, and
+/// the staged hash remains untouched.
+#[test]
+fn test_clear_staged_by_upgrader_records_unauthorized_attempt() {
+    let (env, admin, upgrader, _random, contract_id) = setup();
+    let staged_hash = hash(&env, 0x22);
+    env.ledger().set_timestamp(1_000);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::stage_wasm(env.clone(), admin.clone(), staged_hash.clone()).unwrap();
+    });
+
+    let attempts_before = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_audit_stats(env.clone()).unauthorized_attempts
+    });
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::clear_staged(env.clone(), upgrader.clone()),
+            Err(ContractError::NotAuthorized)
+        );
+    });
+
+    env.as_contract(&contract_id, || {
+        let staged = TrustBridgeContract::get_staged(env.clone())
+            .expect("an unauthorized clear must preserve the staged entry");
+        assert_eq!(staged.wasm_hash, staged_hash);
+        assert!(!has_event(
+            &env,
+            &contract_id,
+            Symbol::new(&env, "staged_wasm_cleared_event")
+        ));
+        assert!(has_unauthorized_attempt(&env, &upgrader, "clear_staged"));
+        let attempts_after =
+            TrustBridgeContract::get_audit_stats(env.clone()).unauthorized_attempts;
+        assert_eq!(attempts_after, attempts_before + 1);
+    });
+}
+
+/// Failure path 2: an unprivileged actor gets the same typed error and the
+/// same audit entry. A later timestamp keeps the two entries distinguishable
+/// for indexers.
+#[test]
+fn test_clear_staged_by_random_records_unauthorized_attempt() {
+    let (env, admin, _upgrader, random, contract_id) = setup();
+    env.ledger().set_timestamp(2_000);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::stage_wasm(env.clone(), admin.clone(), hash(&env, 0x33)).unwrap();
+    });
+
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::clear_staged(env.clone(), random.clone()),
+            Err(ContractError::NotAuthorized)
+        );
+    });
+
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::get_staged(env.clone()).is_some());
+        assert!(!has_event(
+            &env,
+            &contract_id,
+            Symbol::new(&env, "staged_wasm_cleared_event")
+        ));
+        assert!(has_unauthorized_attempt(&env, &random, "clear_staged"));
+        let logs = TrustBridgeContract::get_audit_logs(env.clone());
+        let mut found = false;
+        for i in 0..logs.len() {
+            let entry = logs.get(i).unwrap();
+            if entry.event_type == AuditEventType::UnauthorizedAttempt
+                && entry.details == Some(String::from_str(&env, "clear_staged"))
+                && entry.timestamp == 2_000
+            {
+                found = true;
+            }
+        }
+        assert!(
+            found,
+            "the rejected attempt must carry the ledger timestamp for indexers"
+        );
+    });
+}
+
+/// Configuration path: `log_unauthorized = false` suppresses the audit entry
+/// for a rejected `clear_staged` call. NOTE: `docs/SECURITY.md` states that
+/// `AuditStats.unauthorized_attempts` still increments in this mode; the
+/// current helper returns before writing either the entry or the stats, so
+/// this test locks in the observed behaviour and the documentation
+/// discrepancy is surfaced separately in the PR description.
+#[test]
+fn test_clear_staged_unauthorized_audit_can_be_suppressed() {
+    let (env, admin, _upgrader, random, contract_id) = setup();
+    env.ledger().set_timestamp(3_000);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::stage_wasm(env.clone(), admin.clone(), hash(&env, 0x44)).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_audit_config(env.clone(), admin.clone(), true, 100, false)
+            .unwrap();
+    });
+
+    let stats_before = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_audit_stats(env.clone())
+    });
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::clear_staged(env.clone(), random.clone()),
+            Err(ContractError::NotAuthorized)
+        );
+    });
+
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::get_staged(env.clone()).is_some());
+        assert!(!has_unauthorized_attempt(&env, &random, "clear_staged"));
+        let stats_after = TrustBridgeContract::get_audit_stats(env.clone());
+        assert_eq!(
+            stats_after.unauthorized_attempts,
+            stats_before.unauthorized_attempts
+        );
+        // The staged hash can still be cleared by the admin after the
+        // suppressed probe — the guard itself is unaffected by audit config.
+        TrustBridgeContract::clear_staged(env.clone(), admin.clone()).unwrap();
+        assert!(TrustBridgeContract::get_staged(env.clone()).is_none());
     });
 }

@@ -420,6 +420,12 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   single invocation** — there is no partial state where only one counter
   gets fixed; Soroban commits all of an invocation's storage writes or none
   of it. A call that finds no drift is a no-op even with `apply = true`.
+- **Unauthorized callers:** `repair_index` authenticates with
+  `admin.require_auth()` and has no extra caller argument. A non-admin signer
+  or an unsigned call is trapped by the Soroban host before contract code
+  runs, so no `UnauthorizedAttempt` audit entry is written and the counters
+  are untouched. See [SECURITY.md § Index Repair](SECURITY.md#index-repair-repair_index)
+  for why an on-chain audit signal is not available here (Issue #801).
 - See [SECURITY.md § Index Repair](SECURITY.md#index-repair-repair_index)
   for the full atomicity and dry-run-write guarantees, and
   `tests/repair_index.rs` for the automated proof.
@@ -494,7 +500,10 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 ```
 
 Staging is advisory: absent a staged hash, ordinary upgrade rules still
-apply. When a hash is staged, `execute_upgrade` must use that hash.
+apply. When a hash is staged, `execute_upgrade` must use that hash. A
+non-admin `clear_staged` attempt fails with `NotAuthorized` and, under the
+default audit config, records an `UnauthorizedAttempt` entry with details
+`"clear_staged"`; the staged hash is not cleared (Issue #812).
 `clear_staged` is idempotent and does not emit a clearing event for an
 already-empty slot. These are separate calls, not a
 `commit_staged_wasm` operation. The upgrade itself follows the
@@ -741,8 +750,11 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   -- get_registered_paginated --cursor 0 --limit 100
 ```
 
-- **Auth:** admin only (read). `limit` clamps to `MAX_PAGE_LIMIT` = 100. Loop
-  until `has_more == false` / `next_cursor == null`.
+- **Auth:** admin only (read). `limit` clamps to `MAX_PAGE_LIMIT` = 100; pass
+  `--limit 0` (or omit it) to use `DEFAULT_PAGE_LIMIT` = 20. Loop until
+  `has_more == false` / `next_cursor == null`. A cursor issued with `limit 0`
+  is validated exactly like any other cursor — after a removal it returns
+  `InvalidCursor`, so restart from `--cursor 0`.
 
 #### `scripts/export_registry.sh` — assembled JSON snapshot
 
@@ -1221,9 +1233,13 @@ make invoke-execute-batch-remove \
 ```
 
 `get_pending_batch_remove` shows what is queued (works while paused). A
-proposal not executed within 24 hours (`BATCH_REMOVE_PROPOSAL_TTL_SECS`) is
-treated as gone the next time anyone calls `execute_batch_remove` — propose
-again if you still need it removed.
+proposal not executed within 24 hours (`BATCH_REMOVE_PROPOSAL_TTL_SECS =
+86_400`) is treated as gone the next time anyone calls
+`execute_batch_remove` — propose again if you still need it removed. The
+boundary is inclusive: at exactly `proposed_at + 24h` the proposal is already
+expired (`NoPendingBatchRemove`) and the slot is cleared; the same timestamp
+allows a fresh `propose_batch_remove` to replace it, while a second proposal
+before the boundary is rejected with `BatchRemoveProposalPending`.
 
 ### 4. Abort instead
 
