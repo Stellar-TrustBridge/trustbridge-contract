@@ -936,6 +936,13 @@ To prevent a malicious or erroneous caller from exhausting the network CPU/memor
 
 ## Dual-Control `batch_remove` Auth Negative Matrix (Issue #219)
 
+Wave operators must not treat pending reverify flags as removal approvals.
+Mixed flagged, verified and unverified registrations remain subject to the same
+threshold and distinct-admin execution checks. Rejected or cancelled removals
+preserve registry records and reverify flags; successful removal clears only
+flags belonging to removed registrations. See the mixed-reverify regression
+cases in `tests/batch_remove_dual_control.rs` (Issue #861).
+
 Dashboard operators and auditors need the full failure surface of the dual-control
 `batch_remove` entrypoints spelled out. The matrix below covers every unauthorized and
 invalid state transition across all six entrypoints. Each cell maps to a test in

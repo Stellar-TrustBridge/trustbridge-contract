@@ -3334,7 +3334,12 @@ even while paused — see
 
 Read-only; no auth; works while paused.
 
-**batch_remove itself:** now returns `DualControlRequired` (code 30) if
+Reverify flags do not alter the requested batch size or authorization checks.
+A successful removal clears the removed registration's pending reverify flag;
+flags on other registrations remain unchanged. Rejected authorization or pause
+checks leave records and flags intact.
+
+**batch_remove itself:** now returns `DualControlRequired` (code 54) if
 `usernames.len()` exceeds the configured threshold, instead of executing —
 below the threshold, or with the default threshold of `0`, `batch_remove`'s
 behavior is completely unchanged.
