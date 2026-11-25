@@ -734,6 +734,120 @@ fn test_clear_attestation_does_not_disable_required_flag() {
     });
 }
 
+// ── Attestation gate on propose (Issue #851) ────────────────────────────────
+
+/// Failure path: with `attestation_required` on and no attestation, an admin
+/// cannot even propose an upgrade. No live proposal or partial state is left.
+#[test]
+fn test_propose_while_attestation_required_unmet_fails() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+    });
+    // Fresh auth frame: two require_auth calls in one frame are rejected by
+    // the Soroban host.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::propose_multisig_upgrade(
+                env.clone(),
+                admin.clone(),
+                hash(&env, 0xAA),
+                0,
+            ),
+            Err(ContractError::AttestationRequired)
+        );
+        assert!(
+            TrustBridgeContract::get_upgrade_proposal(env.clone()).is_none(),
+            "failed propose must not persist a proposal"
+        );
+    });
+}
+
+/// Failure path: the gate applies to `Role::Upgrader` proposers too, not just
+/// the admin.
+#[test]
+fn test_upgrader_propose_blocked_when_attestation_unmet() {
+    let (env, admin, upgrader, _random, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+    });
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::propose_multisig_upgrade(
+                env.clone(),
+                upgrader.clone(),
+                hash(&env, 0xAA),
+                0,
+            ),
+            Err(ContractError::AttestationRequired)
+        );
+        assert!(TrustBridgeContract::get_upgrade_proposal(env.clone()).is_none());
+    });
+}
+
+/// Auth precedence: an unauthorized caller still gets `NotAuthorized` rather
+/// than the attestation error, and no proposal is created.
+#[test]
+fn test_unauthorized_propose_still_rejected_with_attestation_required() {
+    let (env, admin, _upgrader, random, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+    });
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::propose_multisig_upgrade(
+                env.clone(),
+                random.clone(),
+                hash(&env, 0xAA),
+                0,
+            ),
+            Err(ContractError::NotAuthorized)
+        );
+        assert!(TrustBridgeContract::get_upgrade_proposal(env.clone()).is_none());
+    });
+}
+
+/// Happy path: a valid attestation permits propose, but clearing it before
+/// execute still fails closed on the execute path (no bypass).
+#[test]
+fn test_propose_with_attestation_then_execute_still_gated() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+    });
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::attest_upgrade(env.clone(), hash(&env, 0xAA), 2_000).unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0xAA),
+            0,
+        )
+        .unwrap();
+    });
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::clear_attestation(env.clone()).unwrap();
+        let id = TrustBridgeContract::get_upgrade_proposal(env.clone())
+            .expect("proposal exists")
+            .id;
+        assert_eq!(
+            TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), id),
+            Err(ContractError::AttestationRequired)
+        );
+    });
+}
+
 // ── Threshold above signer set must fail closed (Issue #795) ─────────────────
 
 /// Setting a threshold above `MAX_UPGRADE_SIGNERS` would make the threshold

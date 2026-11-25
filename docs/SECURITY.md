@@ -1181,6 +1181,27 @@ equivalent replay protection) in the same change, not after.
 
 ---
 
+## Multisig upgrade attestation gate (Issue #851)
+
+When `set_attestation_required(admin, true)` is configured, the attestation
+gate covers **both** multisig paths:
+
+- `propose_multisig_upgrade`: fails with `AttestationRequired` (code from
+  `ContractError`) before allocating a proposal ID or writing instance state.
+  A missing attestation therefore cannot leave a live proposal.
+- `execute_upgrade`: still enforces the same gate through
+  `staged_wasm::require_staged_wasm_consistent`, so clearing or letting the
+  attestation expire after proposing blocks execution.
+
+Authorization is checked first: an unauthorized caller receives
+`NotAuthorized`, not the attestation error. With a valid, unexpired
+attestation, the unchanged happy path (propose → approve → delay → execute)
+applies. No new inputs, env vars, or reason codes are introduced.
+
+Automated proof: `cargo test --test multisig_upgrade` covers propose with no
+attestation, propose with an expired attestation, unauthorized propose while
+the gate is on, and execute after the attestation is cleared.
+
 ## Responsible Disclosure
 
 If you discover a security vulnerability:
