@@ -173,6 +173,15 @@ Commit that golden together with `docs/ABI.md` / `docs/abi.json` so reviewers
 see the entrypoint list change in Git. Do not refresh it for documentation-only
 edits. Error-enum codes remain in `abi/contract_error_codes.golden`.
 
+When the change follows a module split (Issue #771), check `src/lib.rs`
+re-exports first: only public contract entrypoints belong in the golden.
+`pub(crate)` helpers and `module::helper` paths are module-internal and must
+never be exported to Wave integrators. After refreshing, run
+`cargo test --test abi_entrypoints_golden && make abi-check`; the test fails if
+an entrypoint disappears, changes name/arity, or if an extra helper appears in
+the golden. Wave integrators depend on this list, so an unexplained golden
+diff blocks the PR rather than being auto-accepted.
+
 `make abi-check` runs in `make check` and in the CI `quality` job, so a
 release that skips regeneration fails the gate. Commit the regenerated
 `docs/abi.json` alongside the `docs/ABI.md` change.
@@ -1090,6 +1099,16 @@ their own `Env`.
 - **Default TTL bump**: `LEDGERS_PER_DAY * 90` (~90 days).
 - Document the exact conditions when TTL is extended (read vs. write, or both).
 - See `docs/STORAGE_RENT.md` before changing TTL constants — storage rent is sensitive.
+
+### CI collision narrative for new Symbol keys
+
+After adding a Symbol constant, `make storage-keys-check` and
+`cargo test --test storage_keys_collision` run in CI. A green run means the
+constant is inventoried in [STORAGE_KEYS.md](STORAGE_KEYS.md) and its literal
+is unique; a red run names the duplicate literal or undocumented constant.
+Never refresh the test to accept a colliding key — reserve a fresh symbol.
+The module map in [ARCHITECTURE.md](ARCHITECTURE.md#contract-modules) identifies
+the owning module for each key family.
 
 ### Testing storage keys
 

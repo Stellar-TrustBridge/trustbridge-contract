@@ -131,6 +131,24 @@ renamed, or changes arity. Refresh with
 intentional public ABI change (Issue #631). See
 [the ABI testdata README](../tests/testdata/abi/README.md).
 
+### Module-split exports (Issue #771)
+
+After moving entrypoints between `src/` modules, refresh the public snapshot in
+this order:
+
+1. Confirm every public contract function is re-exported from `src/lib.rs`.
+   Module-internal helpers — including anything `pub(crate)` or referenced as
+   `module::helper` — are **not** ABI surfaces and must not appear in
+   `docs/abi.json` or the golden.
+2. Regenerate `docs/abi.json` from this file (`make abi`), then refresh the
+   golden with `python3 scripts/generate_abi_json.py --update-entrypoints-golden`.
+3. Run `cargo test --test abi_entrypoints_golden && make abi-check` and review
+   the golden diff: only intended `(name, arity)` changes may appear.
+4. Commit `docs/ABI.md`, `docs/abi.json`, the golden, and any `src/lib.rs`
+   export change together. `tests/abi_entrypoints_golden.rs` fails on a
+   missing, renamed, or arity-changed entrypoint and on an extra helper entry;
+   error codes stay in `abi/contract_error_codes.golden`.
+
 `tests/testdata/bindings/get_address_simulate.v1.json` is a versioned golden of
 the `ScVal` XDR that `simulateTransaction` returns for `get_address` (hit and
 miss). `tests/bindings_golden.rs` fails when the contract encoding drifts, and CI
@@ -1273,7 +1291,11 @@ none) while more remain. Advance `offset` by `limit` until it reaches
 `get_stats().total`. An empty registry or `offset >= total` returns an empty
 page. A name drops out once `verify` / `batch_verify` /
 `verify_with_oracle_proof` or `remove` clears its flag; `rename` moves the flag
-to the new name.
+to the new name. The flag is set on address change for a verified record
+(`register`, `register_sponsored`, `execute_rotation`); a successful verify
+removes the `"pend_rev"` storage key rather than writing `false`. Failed or
+unauthorized verifies leave it set. See
+[STORAGE_KEYS.md § PENDING_REVERIFY_KEY lifecycle](STORAGE_KEYS.md#pending_reverify_key-lifecycle-issue-852).
 
 #### Limit boundaries (Issue #847)
 

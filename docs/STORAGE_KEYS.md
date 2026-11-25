@@ -83,6 +83,30 @@ When introducing a new storage key, **new contributors** should:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md#storage-key-best-practices) for the full workflow.
 
+### CI collision narrative for new `Symbol` keys (Issue #773)
+
+When you add a `Symbol` constant in `src/storage.rs`, two CI gates must stay green:
+
+1. `make storage-keys-check` runs `scripts/check_storage_keys.sh`: every
+   `const NAME: Symbol = symbol_short!("...")` declaration must appear in the
+   **Complete Key Inventory** below, by constant name and symbol string. A
+   missing row fails with the constant name; a duplicate symbol string fails
+   with the colliding literal. Dynamic `Symbol::new` keys are rejected in
+   production source.
+2. `cargo test --test storage_keys_collision` checks the same inventory at
+   compile time and proves that primary symbol literals are unique. On failure
+   it names the duplicate literal or undocumented constant, e.g.
+   `duplicate Symbol literal "reg": two primary keys would collide` or
+   `Symbol constant NEW_WAVE_KEY not documented in docs/STORAGE_KEYS.md`.
+
+For a new key: add the constant, add its inventory row plus a table row/diagram
+note above, run `make storage-keys-check && cargo test --test storage_keys_collision`,
+and confirm the diff contains no other key changes. If CI reports a collision,
+do **not** refresh the test or linter — choose a fresh discriminator. The
+[ARCHITECTURE module map](ARCHITECTURE.md#contract-modules) shows which module owns
+each key family; test-local `Symbol::new` keys stay out of production
+inventory as described above.
+
 ### Temporary keys in tests
 
 Tests that need an ad-hoc storage key may create one with `Symbol::new` inside
@@ -190,6 +214,49 @@ These keys use **tuples** as storage keys, where the first element is a `Symbol`
 | `"vfy_at"` records | `LEDGERS_PER_DAY * 30` (~30 days) | `LEDGERS_PER_DAY * 90` (~90 days) | Extended on write |
 | `"vfyrate"` records | `LEDGERS_PER_DAY * 30` (~30 days) | `LEDGERS_PER_DAY * 90` (~90 days) | Extended on write |
 | Instance keys | N/A | N/A | Instance storage entries do not have TTL |
+
+---
+
+## `PENDING_REVERIFY_KEY` lifecycle (Issue #852)
+
+`"pend_rev"` is a **persistent** key keyed by the canonical (lower-case)
+username. Its value is always `true`; "cleared" means the key is **removed**,
+never stored as `false` (Issue #588). This keeps `has()` consistent with
+`get_pending_reverify()` and prevents a stale entry being inherited.
+
+```
+ register/register_sponsored with a different address on a verified record
+ execute_rotation on a verified record ──────────────┐
+ rename of a verified or already-flagged record ─────┤
+                                                     ▼
+                                     set_pending_reverify(name, true)
+                                                     │
+              verify / batch_verify success ─────────┤
+              remove / batch_remove ─────────────────┤
+                                                     ▼
+                                     clear_pending_reverify(name) → key absent
+```
+
+- **Set**: `register` / `register_sponsored` when an existing *verified* record
+  changes `stellar_address`; `execute_rotation` for a verified record; and
+  `rename`, which moves an outstanding flag to the new name (the old name's
+  entry is removed with the old record).
+- **Cleared**: successful `verify` / `batch_verify` (via `mark_verified`), and
+  record removal (`remove` / `batch_remove`). A failed or unauthorized verify
+  leaves the flag untouched — no partial privileged state.
+- **Read**: `get_pending_reverify(username) -> bool` and
+  `get_pending_reverify_page(offset, limit)` (Issue #587). The page scan is
+  bounded by `limit` and returns canonical names.
+- **Idempotence**: repeating a `true` set or a clear has the same observable
+  state; `set_pending_reverify(name, false)` is equivalent to a clear.
+- **Failure behavior**: only malformed/oversized page limits produce a stable
+  `InvalidBatchSize` error; an empty or unknown username simply reads `false`.
+  No new env vars or reason codes are introduced by this key.
+
+Tests: `src/storage.rs::pending_reverify_tests` covers the set → verify →
+clear path, unauthorized verify (flag preserved), canonical-key lookup, and
+hostile pagination bounds. Run with
+`cargo test --lib pending_reverify_tests` (or `cargo test --lib`).
 
 ---
 

@@ -1,4 +1,9 @@
 #![no_std]
+//! Public contract entrypoints are the `#[contractimpl]` methods below plus
+//! the items re-exported here. After a module split, refresh the public golden
+//! with `python3 scripts/generate_abi_json.py --update-entrypoints-golden`;
+//! `pub(crate)` helpers stay module-internal and are not ABI surfaces
+//! (Issue #771). See docs/ABI.md § Module-split exports.
 
 mod audit;
 mod batch;
