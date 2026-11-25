@@ -464,3 +464,23 @@ pub struct AuditConfigChangedEvent {
     pub log_unauthorized: bool,
     pub timestamp: u64,
 }
+
+
+/// Consumer-side payload for `index_generation_bumped_event` (Issue #850).
+///
+/// The chain currently exposes index generation through `get_health_probes`
+/// and opaque cursors; indexers still need a replayable signal when a removal
+/// invalidates all outstanding cursors. This schema documents that signal for
+/// replay fixtures: both generations are explicit, and `reason` is the stable
+/// `remove_from_index` cause. Keeping it as a plain payload (rather than a new
+/// `#[contractevent]`) preserves the existing event ABI and subgraph parity
+/// tables while `tests/event_replay.rs` pins the replay semantics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexGenerationBumpedPayload {
+    /// Generation before the bump.
+    pub previous_generation: u32,
+    /// Generation after the bump; cursors carry this value.
+    pub new_generation: u32,
+    /// Stable reason code for the invalidation (for example `remove_from_index`).
+    pub reason: &'static str,
+}

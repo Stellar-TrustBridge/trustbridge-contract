@@ -304,6 +304,17 @@ lives at
 consumer and asserts the stream is replay-safe.
 
 
+### Index generation replay parity (Issue #850)
+
+In addition to the `#[contractevent]` catalogue, the replay suite covers the
+`index_generation_bumped_event` payload (`previous_generation`,
+`new_generation`, `reason`) via
+`tests/testdata/index_generation_bumped_fixture.json`. An exact reconnect
+replay is deduplicated by the RPC envelope; a non-advancing generation or an
+empty reason is rejected. Consumers must reset any cursor whose embedded
+generation differs from `new_generation`, otherwise Wave exports can drift
+after a removal.
+
 ### Full contract-event replay coverage (Issue #598)
 
 The [Rust replay test](../tests/event_replay.rs) and

@@ -337,3 +337,127 @@ fn every_contractevent_has_replay_coverage() {
         );
     }
 }
+
+
+// ── Issue #850: IndexGenerationBumped payload replay ───────────────────────
+
+/// A cursor-invalidating bump delivery. Dedupe key is the RPC envelope, while
+/// the payload carries the generation the consumer must pin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BumpDelivery {
+    previous_generation: u32,
+    new_generation: u32,
+    reason: &'static str,
+    ledger_sequence: u64,
+    tx_hash: &'static str,
+    event_index: u32,
+}
+
+impl BumpDelivery {
+    fn envelope_id(&self) -> String {
+        format!(
+            "{NETWORK_ID}:{CONTRACT_ID}:{}:{}:{}",
+            self.ledger_sequence, self.tx_hash, self.event_index
+        )
+    }
+}
+
+fn bump_deliveries() -> Vec<BumpDelivery> {
+    vec![
+        BumpDelivery {
+            previous_generation: 0,
+            new_generation: 1,
+            reason: "remove_from_index",
+            ledger_sequence: 1_004_000,
+            tx_hash: "f1f2f3f4f5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+            event_index: 0,
+        },
+        BumpDelivery {
+            previous_generation: 0,
+            new_generation: 1,
+            reason: "remove_from_index",
+            ledger_sequence: 1_004_000,
+            tx_hash: "f1f2f3f4f5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+            event_index: 0,
+        },
+    ]
+}
+
+#[derive(Default)]
+struct BumpConsumer {
+    seen: std::collections::HashSet<String>,
+    generation: Option<u32>,
+    applied: u32,
+    ignored: u32,
+    rejected_stale: u32,
+    rejected_malformed: u32,
+}
+
+impl BumpConsumer {
+    fn apply(&mut self, delivery: &BumpDelivery) {
+        if !self.seen.insert(delivery.envelope_id()) {
+            self.ignored += 1;
+            return;
+        }
+        if delivery.new_generation <= delivery.previous_generation {
+            self.rejected_stale += 1;
+            return;
+        }
+        if delivery.reason.is_empty() {
+            self.rejected_malformed += 1;
+            return;
+        }
+        self.generation = Some(delivery.new_generation);
+        self.applied += 1;
+    }
+
+    fn accept_cursor(&self, cursor_generation: u32) -> bool {
+        self.generation == Some(cursor_generation)
+    }
+}
+
+#[test]
+fn index_generation_bumped_replay_is_idempotent_and_matches_fixture() {
+    let deliveries = bump_deliveries();
+    let fixture = include_str!("testdata/index_generation_bumped_fixture.json");
+    for delivery in &deliveries {
+        let needle = format!("\"new_generation\": {}", delivery.new_generation);
+        assert!(fixture.contains(&needle), "fixture lacks {needle}");
+        assert!(fixture.contains(&format!("\"reason\": \"{}\"", delivery.reason)));
+        assert!(fixture.contains(&format!("\"event_index\": {}", delivery.event_index)));
+    }
+    assert_eq!(fixture.matches("\"event_type\"").count(), deliveries.len());
+
+    let mut consumer = BumpConsumer::default();
+    for delivery in &deliveries {
+        consumer.apply(delivery);
+    }
+    assert_eq!(consumer.applied, 1);
+    assert_eq!(consumer.ignored, 1);
+    assert_eq!(consumer.generation, Some(1));
+    assert!(consumer.accept_cursor(1));
+    assert!(!consumer.accept_cursor(0), "pre-bump cursor must be invalid");
+}
+
+#[test]
+fn index_generation_bumped_rejects_stale_generation() {
+    let mut consumer = BumpConsumer::default();
+    let mut stale = bump_deliveries().remove(0);
+    stale.previous_generation = 4;
+    stale.new_generation = 4;
+    consumer.apply(&stale);
+    assert_eq!(consumer.rejected_stale, 1);
+    assert_eq!(consumer.applied, 0);
+    assert_eq!(consumer.generation, None);
+}
+
+#[test]
+fn index_generation_bumped_rejects_malformed_empty_reason() {
+    let mut consumer = BumpConsumer::default();
+    let mut malformed = bump_deliveries().remove(0);
+    malformed.reason = "";
+    consumer.apply(&malformed);
+    assert_eq!(consumer.rejected_malformed, 1);
+    assert_eq!(consumer.applied, 0);
+    assert_eq!(consumer.generation, None);
+}
