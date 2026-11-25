@@ -3477,7 +3477,9 @@ impl TrustBridgeContract {
     /// bounded by `limit`, so a page can hold fewer than `limit` names; keep
     /// advancing `offset` by `limit` until it reaches `get_stats().total`.
     /// `limit == 0` uses `DEFAULT_PAGE_LIMIT`. An empty registry returns an
-    /// empty page. Read-only, no auth required.
+    /// empty page. Read-only, no auth required — see
+    /// `docs/SECURITY.md#pending-reverify-page-authorization-issue-846` and
+    /// the signer-class rows in `tests/auth_matrix.csv`.
     ///
     /// # Errors
     ///
