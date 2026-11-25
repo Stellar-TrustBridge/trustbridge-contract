@@ -1342,6 +1342,11 @@ impl TrustBridgeContract {
     /// Defaults to `false` on instances that have never explicitly set the flag.
     /// Dashboards and operator tooling can read this to show the current gate
     /// configuration without needing admin credentials.
+    ///
+    /// Pair with [`Self::get_health`]'s `attestation_present`, which reports only
+    /// whether an unexpired attestation exists. `required=true` with
+    /// `attestation_present=false` is the fail-closed divergence documented in
+    /// `docs/CONTRACT_HEALTH.md` (Issue #848).
     #[must_use]
     pub fn get_attestation_required(env: Env) -> bool {
         crate::storage::is_attestation_required(&env)
@@ -4395,6 +4400,8 @@ impl TrustBridgeContract {
     ///
     /// For uptime/alerting prefer [`get_health_probes`](Self::get_health_probes),
     /// which never errors; see `docs/CONTRACT_HEALTH.md` (probe SLOs, Issue #756).
+    /// Alert on `attestation_present` together with `get_attestation_required`:
+    /// the former tracks only expiry, not policy (Issue #848).
     ///
     /// # Errors
     ///

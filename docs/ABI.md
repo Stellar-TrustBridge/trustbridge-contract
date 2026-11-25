@@ -2463,6 +2463,13 @@ Returns whether WASM attestation is required before upgrade. Defaults to `false`
 | **Auth** | None |
 | **Mutates** | No |
 
+Pair this read with `get_health().attestation_present`: that field only reports
+whether an attestation is currently live, not whether it is required. The
+`required=true` / `attestation_present=false` divergence is fail-closed on
+upgrade (`AttestationRequired`, code 20; `AttestationExpired`, code 12 for a
+stale hash) and its alert mapping is in
+[CONTRACT_HEALTH.md § Attestation divergence alert mapping](CONTRACT_HEALTH.md#attestation-divergence-alert-mapping-issue-848).
+
 ---
 
 ## batch_remove Return Value (Issue #205)

@@ -528,6 +528,11 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 
 - **Auth:** admin only. When `true`, `upgrade` without a live matching
   attestation fails `AttestationRequired` (code 20). Default `false`.
+- **Alerting:** check this flag alongside `get_health().attestation_present`.
+  `required=true` with `attestation_present=false` means upgrades are blocked
+  until a fresh `attest_upgrade`; see
+  [CONTRACT_HEALTH.md § Attestation divergence alert mapping](CONTRACT_HEALTH.md#attestation-divergence-alert-mapping-issue-848).
+  Do not clear the flag to silence the page.
 
 #### `attest_upgrade` — declare the next hash in advance
 
