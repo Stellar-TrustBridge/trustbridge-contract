@@ -3,7 +3,9 @@ use soroban_sdk::{
     testutils::{Address as _, Ledger as _},
     Address, Bytes, BytesN, Env, String, Vec,
 };
-use trustbridge_contract::{ContractError, OracleProof, TrustBridgeContract, TrustBridgeContractClient};
+use trustbridge_contract::{
+    ContractError, OracleProof, TrustBridgeContract, TrustBridgeContractClient,
+};
 
 // Offline test-only Ed25519 vector, using the same public fixture key as
 // src/oracle_proof.rs. The signed message binds the username, address and expiry.
@@ -19,7 +21,7 @@ const SIG: [u8; 64] = [
     84, 120, 102, 43, 242, 48, 172, 93, 232, 139, 16, 89, 0, 179, 100, 207, 153, 166, 168, 191, 14,
 ];
 
-fn check_boundary(now: u64, expected: Result<(), ContractError>) {
+fn check_boundary(now: u64, signed_expiry: u64, paused: bool, expected: Result<(), ContractError>) {
     let env = Env::default();
     env.mock_all_auths();
     let client = TrustBridgeContractClient::new(&env, &env.register(TrustBridgeContract, ()));
@@ -28,7 +30,9 @@ fn check_boundary(now: u64, expected: Result<(), ContractError>) {
     let name = String::from_str(&env, "octocat");
     client.register(&name, &owner, &Vec::new(&env));
     let key = BytesN::from_array(&env, &KEY);
-    client.set_oracle_allowlist(&Vec::from_array(&env, [key.clone()]));
+    let mut allowlist = Vec::new(&env);
+    allowlist.push_back(key.clone());
+    client.set_oracle_allowlist(&allowlist);
     let proof = OracleProof {
         oracle_pubkey: key,
         message: Bytes::from_slice(
@@ -36,10 +40,13 @@ fn check_boundary(now: u64, expected: Result<(), ContractError>) {
             b"octocat:GADQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOZPI:1700000000",
         ),
         signature: BytesN::from_array(&env, &SIG),
-        expires_at: EXPIRES,
+        expires_at: signed_expiry,
     };
 
     env.ledger().set_timestamp(now);
+    if paused {
+        client.pause(&1);
+    }
     match expected {
         Ok(()) => {
             client.verify_with_oracle_proof(&name, &proof);
@@ -58,13 +65,28 @@ fn check_boundary(now: u64, expected: Result<(), ContractError>) {
 #[test]
 fn oracle_proof_clock_skew_accepts_expiry_and_grace_boundary() {
     for now in [EXPIRES - 1, EXPIRES, EXPIRES + 30] {
-        check_boundary(now, Ok(()));
+        check_boundary(now, EXPIRES, false, Ok(()));
     }
 }
 
 #[test]
 fn oracle_proof_clock_skew_rejects_expired_without_verifying() {
     for now in [EXPIRES + 31, EXPIRES + 500] {
-        check_boundary(now, Err(ContractError::OracleProofExpired));
+        check_boundary(now, EXPIRES, false, Err(ContractError::OracleProofExpired));
     }
+}
+
+#[test]
+fn oracle_proof_clock_skew_does_not_allow_tampered_expiry() {
+    check_boundary(
+        EXPIRES + 31,
+        EXPIRES + 31,
+        false,
+        Err(ContractError::AddressMismatch),
+    );
+}
+
+#[test]
+fn oracle_proof_clock_skew_does_not_bypass_pause() {
+    check_boundary(EXPIRES + 30, EXPIRES, true, Err(ContractError::Paused));
 }
