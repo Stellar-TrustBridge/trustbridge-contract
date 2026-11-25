@@ -75,6 +75,30 @@ When introducing a new storage key, **new contributors** should:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md#storage-key-best-practices) for the full workflow.
 
+### CI collision narrative for new `Symbol` keys (Issue #773)
+
+When you add a `Symbol` constant in `src/storage.rs`, two CI gates must stay green:
+
+1. `make storage-keys-check` runs `scripts/check_storage_keys.sh`: every
+   `const NAME: Symbol = symbol_short!("...")` declaration must appear in the
+   **Complete Key Inventory** below, by constant name and symbol string. A
+   missing row fails with the constant name; a duplicate symbol string fails
+   with the colliding literal. Dynamic `Symbol::new` keys are rejected in
+   production source.
+2. `cargo test --test storage_keys_collision` checks the same inventory at
+   compile time and proves that primary symbol literals are unique. On failure
+   it names the duplicate literal or undocumented constant, e.g.
+   `duplicate Symbol literal "reg": two primary keys would collide` or
+   `Symbol constant NEW_WAVE_KEY not documented in docs/STORAGE_KEYS.md`.
+
+For a new key: add the constant, add its inventory row plus a table row/diagram
+note above, run `make storage-keys-check && cargo test --test storage_keys_collision`,
+and confirm the diff contains no other key changes. If CI reports a collision,
+do **not** refresh the test or linter — choose a fresh discriminator. The
+[ARCHITECTURE module map](ARCHITECTURE.md#contract-modules) shows which module owns
+each key family; test-local `Symbol::new` keys stay out of production
+inventory as described above.
+
 ### Temporary keys in tests
 
 Tests that need an ad-hoc storage key may create one with `Symbol::new` inside

@@ -1009,6 +1009,16 @@ their own `Env`.
 - Document the exact conditions when TTL is extended (read vs. write, or both).
 - See `docs/STORAGE_RENT.md` before changing TTL constants — storage rent is sensitive.
 
+### CI collision narrative for new Symbol keys
+
+After adding a Symbol constant, `make storage-keys-check` and
+`cargo test --test storage_keys_collision` run in CI. A green run means the
+constant is inventoried in [STORAGE_KEYS.md](STORAGE_KEYS.md) and its literal
+is unique; a red run names the duplicate literal or undocumented constant.
+Never refresh the test to accept a colliding key — reserve a fresh symbol.
+The module map in [ARCHITECTURE.md](ARCHITECTURE.md#contract-modules) identifies
+the owning module for each key family.
+
 ### Testing storage keys
 
 New storage key workflows are tested in:

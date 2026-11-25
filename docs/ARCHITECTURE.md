@@ -576,7 +576,7 @@ Storage keys are carefully designed to prevent collisions:
 
 Persistent keys use `(Symbol, Context)` tuples where the Symbol discriminator is encoded first in XDR serialization, preventing collisions even when different namespaces use the same context type.
 
-**New contributors must read [STORAGE_KEYS.md](STORAGE_KEYS.md) § Key Namespace Diagram before adding a new storage key.** The diagram shows how discriminators partition the keyspace and documents the collision-prevention strategy.
+**New contributors must read [STORAGE_KEYS.md](STORAGE_KEYS.md) § Key Namespace Diagram before adding a new storage key.** The diagram shows how discriminators partition the keyspace and documents the collision-prevention strategy. The same document's § CI collision narrative for new `Symbol` keys (Issue #773) explains what `make storage-keys-check` and `cargo test --test storage_keys_collision` print on success and on a collision.
 
 Automated tests (`tests/storage_keys_collision.rs`) and a linter script (`scripts/check_storage_keys.sh`) verify:
 1. All Symbol constants are unique.
