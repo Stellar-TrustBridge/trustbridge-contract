@@ -158,8 +158,11 @@ budget: `storage_footprint_budget_tests` in `src/storage.rs` registers one full
 chunk (`CHUNK_SIZE`) of worst-case 39-character usernames, reads each growing
 key back from storage, and compares its XDR-serialized size against these
 rows. CI runs it in the `storage-budgets` job; locally run
-`make storage-footprint-check`.
-
+`make storage-footprint-check`. `make storage-help-check` verifies that
+`make help` exposes this target and the other storage CI checks. The Rust
+check requires `cargo`; it takes no environment variables or operator
+addresses and writes no files. It compares the measured XDR sizes, not a
+separate configuration, against the marked budget table below.
 The check fails when:
 
 - a measured key exceeds its `max_bytes` (e.g. a new `ContributorRecord`

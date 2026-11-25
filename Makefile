@@ -50,7 +50,7 @@ FUTURENET_DRY_RUN ?= false
         invoke-batch-remove invoke-set-batch-remove-threshold invoke-get-batch-remove-threshold \
         invoke-propose-batch-remove invoke-execute-batch-remove invoke-cancel-batch-remove \
         invoke-get-pending-batch-remove \
-        ttl-keeper \
+        ttl-keeper storage-help-check \
 	export-registry validate-registry dr-test futurenet-smoke network-params assert-build \
 	xdr-fixtures diff-test
 
@@ -105,19 +105,28 @@ soak-register-verify: ## Soak repeated register/verify pairs (REGISTER_VERIFY_SO
 storage-keys-check: ## Fail if a storage.rs key is missing from docs/STORAGE_KEYS.md
 	./scripts/check_storage_keys.sh
 
-storage-footprint-check: ## Fail if measured storage key sizes exceed the budget table in docs/STORAGE_FOOTPRINT.md
+storage-footprint-check: ## CI-equivalent: fail if measured storage key sizes exceed docs/STORAGE_FOOTPRINT.md budgets
+	@command -v cargo >/dev/null 2>&1 || { echo "ERROR: cargo is required; install Rust and run 'rustup default stable'." >&2; exit 1; }
 	cargo test --lib storage_footprint_budget_tests
 
-storage-rent-check: ## Fail if the TTL playbook constants in docs/STORAGE_RENT.md drift from src/storage.rs
+storage-rent-check: ## CI-equivalent: fail if TTL keeper constants drift from src/storage.rs and docs/STORAGE_RENT.md
+	@command -v cargo >/dev/null 2>&1 || { echo "ERROR: cargo is required; install Rust and run 'rustup default stable'." >&2; exit 1; }
 	cargo test --lib storage_rent_playbook_tests
 
-storage-rent-estimator: ## Check the storage rent estimator golden output + invalid-input errors (Issue #750)
+storage-rent-estimator: ## CI-equivalent: check rent-estimator golden output and stable invalid-input errors
+	@command -v bash >/dev/null 2>&1 || { echo "ERROR: bash is required; use a Unix shell or devcontainer." >&2; exit 1; }
+	@command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 is required (Python 3.8+; no packages needed)." >&2; exit 1; }
 	bash scripts/test_storage_rent_estimator.sh
 
 storage-rent-estimator-golden: ## Regenerate scripts/testdata/storage-rent-estimator.golden.txt (review the diff; see docs/CONTRIBUTING.md)
+	@command -v bash >/dev/null 2>&1 || { echo "ERROR: bash is required; use a Unix shell or devcontainer." >&2; exit 1; }
+	@command -v python3 >/dev/null 2>&1 || { echo "ERROR: python3 is required (Python 3.8+; no packages needed)." >&2; exit 1; }
 	UPDATE_GOLDEN=1 bash scripts/test_storage_rent_estimator.sh
 
 storage-check: storage-keys-check storage-footprint-check storage-rent-check storage-rent-estimator ## Run all storage key, footprint budget, and rent checks (Issue #762)
+
+storage-help-check: ## Verify make help documents all CI storage check targets
+	bash scripts/test_make_help_storage_targets.sh
 
 bindings-golden: ## Verify the get_address simulate golden fixture (UPDATE_GOLDEN=1 to regenerate)
 	cargo test --test bindings_golden -- --nocapture
@@ -271,7 +280,7 @@ event-topics: ## Verify the indexer's topic table matches src/events.rs (Issue #
 event-topics-message-test: ## Pin the collision failure message format (Issue #794)
 	bash scripts/test_check_event_topics_message.sh
 
-check: fmt lint error-codes event-topics event-topics-message-test wasm-hash-pin-test subgraph-parity abi-check test build docs-check wasm-size ## Run full local quality gate
+check: fmt lint error-codes event-topics event-topics-message-test wasm-hash-pin-test subgraph-parity abi-check test build docs-check wasm-size storage-help-check storage-footprint-check storage-rent-check storage-rent-estimator ## Run full local quality gate
 
 wasm-hash-pin-test: ## Automated tests for wasm-hash.pin verification logic and WASM_HASH_STRICT modes (Issue #759)
 	bash scripts/test_wasm_hash_pin.sh
