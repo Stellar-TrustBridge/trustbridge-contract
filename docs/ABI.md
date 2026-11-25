@@ -3194,11 +3194,19 @@ subject to this delay.
 ### `get_pending_role(target: Address) -> Option<PendingRoleGrant>`
 
 `PendingRoleGrant { role: Role, activate_at: u64 }` — the queued grant, if any.
+`activate_at` is the earliest activation timestamp, not an expiry deadline.
+The pending record has no `expires_at` field and does not automatically
+activate or expire when ledger time reaches that timestamp. Persistent-storage
+TTL/archival is separate from role authorization (see [STORAGE_KEYS.md](STORAGE_KEYS.md)).
 
 ### `activate_role(target: Address) -> Result<(), ContractError>`
 
-Admin-only. Applies a queued grant once `activate_at` has passed and emits the
-normal `RoleGrantedEvent`.
+Admin-only. Applies a queued grant when ledger time is **at or after**
+`activate_at` and emits the normal `RoleGrantedEvent`. Before that boundary
+it returns `RoleGrantNotReady` without consuming the grant. Activation is
+blocked while paused. An existing active role's `expires_at` remains an
+independent, inclusive expiry boundary even when a replacement is queued.
+A pending grant alone cannot renew an expired role.
 
 - `NoPendingRoleGrant` (34) — nothing queued for `target`.
 - `RoleGrantNotReady` (35) — timelock has not elapsed.
@@ -3206,7 +3214,10 @@ normal `RoleGrantedEvent`.
 ### `cancel_role_grant(target: Address) -> Result<(), ContractError>`
 
 Admin-only. Drops a queued grant and emits `RoleGrantCancelledEvent`.
-`remove_role` also drops any queued grant for the same address.
+Cancellation works before, at, or after `activate_at` while the grant is
+still pending, including while paused. `remove_role` also drops any queued
+grant for the same address (subject to its pause guard). Repeated activation
+or cancellation of a consumed grant returns `NoPendingRoleGrant` (34).
 
 ### Events
 
