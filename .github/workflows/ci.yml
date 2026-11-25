@@ -93,6 +93,9 @@ jobs:
       - name: Run oracle_proof module tests
         run: cargo test --lib oracle_proof
 
+      - name: Run oracle proof clock skew integration tests
+        run: cargo test --test oracle_proof_clock_skew
+
   storage-budgets:
     name: Storage footprint and rent playbook checks
     runs-on: ubuntu-latest
