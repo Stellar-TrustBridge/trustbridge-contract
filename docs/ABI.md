@@ -1219,6 +1219,21 @@ none) while more remain. Advance `offset` by `limit` until it reaches
 out once `verify` / `batch_verify` clears its flag; `rename` moves the flag
 to the new name.
 
+#### Limit boundaries (Issue #847)
+
+| Input | Behavior |
+|-------|----------|
+| `limit == 0` | Uses `DEFAULT_PAGE_LIMIT = 20`; a page holds at most 20 names and the next offset is 20 |
+| `1 <= limit <= 100` | Scans at most `limit` index entries and returns the flagged subset |
+| `limit == 100` | Largest accepted page (`MAX_PAGE_LIMIT = 100`) |
+| `limit > 100`, including `u32::MAX` | Fails with `InvalidBatchSize` (code 14) before any scan; no partial page is returned |
+
+An offset at or beyond the index length is an empty page. The limit is rejected
+(not clamped) on this endpoint, unlike the other paginated export endpoints.
+Unit tests in `src/storage.rs` cover 0, 100, 101 and `u32::MAX`. Operator risk:
+a rejected oversized limit is a failed read-only call, not a cursor invalidation;
+retry with `limit <= 100`.
+
 ```bash
 stellar contract invoke --id $ID --network testnet \
   -- get_pending_reverify --offset 0 --limit 100
