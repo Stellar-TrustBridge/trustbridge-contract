@@ -28,7 +28,11 @@ policy constants change in `src/storage.rs`.
 ## CI golden check
 
 CI (`abi-consistency` job) runs `make storage-rent-estimator`, which is
-`scripts/test_storage_rent_estimator.sh`. It:
+`scripts/test_storage_rent_estimator.sh`. Run `make help` to see it and the
+footprint/rent targets. The check requires `bash` and Python 3.8+ (standard
+library only); it takes no credentials or contract addresses and writes no
+files unless the explicitly opted-in `UPDATE_GOLDEN=1` /
+`make storage-rent-estimator-golden` refresh mode is used. It:
 
 1. compares `python3 scripts/storage_rent_estimator.py --users 250 --roles 3 --lastact 100`
    against `scripts/testdata/storage-rent-estimator.golden.txt`
@@ -38,6 +42,27 @@ CI (`abi-consistency` job) runs `make storage-rent-estimator`, which is
 If an intentional change causes drift, follow the refresh procedure in
 [CONTRIBUTING.md → Storage rent estimator golden refresh](CONTRIBUTING.md#storage-rent-estimator-golden-refresh)
 (`make storage-rent-estimator-golden`). Never hand-edit the golden file.
+
+### Local commands, inputs, and outputs
+
+```bash
+make storage-rent-estimator          # CI check: golden + mismatch + invalid-input cases
+make storage-rent-estimator-golden   # intentional refresh only; writes the golden file
+python3 scripts/storage_rent_estimator.py --users 250 --roles 3 --lastact 100
+python3 scripts/storage_rent_estimator.py --users 250 --roles 3 --lastact 100 --json
+```
+
+Inputs are the versioned JSON file and optional `--users`, `--roles`,
+`--lastact`, `--inputs`, and `--storage-rs` flags. `--json` emits machine-readable
+entry counts. Normal output counts persistent and instance entries only: it does
+not calculate XLM and never asks for network credentials. Operator-supplied
+`network_rent_params` must be injected separately at UI estimation time.
+
+A mismatch between the JSON `chunk_size` and `src/storage.rs` is an actionable
+stderr warning with exit 0. Invalid input is distinct: it exits 2 with the stable
+messages below and must not be silently treated as success. The test wrapper
+uses `UPDATE_GOLDEN=1` only for the opt-in refresh target; it does not leak
+secret values or sensitive addresses.
 
 ### Estimator errors (stable)
 
@@ -156,11 +181,11 @@ with N, separate from chunk rent.
 
 ### Scaling table (entry counts — not XLM)
 
-| N users | `reg` entries | Index chunks (`ceil(N/100)`) | Instance keys (fixed + `idx`) | Optional `lastact` (worst case) |
+| N users | `reg` entries | Index chunks (`ceil(N/50)`) | Instance keys (fixed + `idx`) | Optional `lastact` (worst case) |
 |--------:|-------------:|-----------------------------:|-------------------------------:|--------------------------------:|
 | 1 | 1 | 1 | fixed set + small `idx` | 0–1 |
 | 10 | 10 | 1 | fixed + `idx` | 0–10 |
-| 100 | 100 | 1 | fixed + `idx` | 0–100 |
+| 100 | 100 | 2 | fixed + `idx` | 0–100 |
 | 500 | 500 | 5 | fixed + larger `idx` | 0–500 |
 | 1000 | 1000 | 10 | fixed + large `idx` | 0–1000 |
 
@@ -196,7 +221,7 @@ Logical schema:
       "bump_days_approx": 90
     },
     "layout": {
-      "chunk_size": 100,
+      "chunk_size": 50,
       "per_user_persistent_keys": ["reg"],
       "optional_per_user_persistent_keys": ["lastact"],
       "per_address_persistent_keys": ["role"],
@@ -244,7 +269,7 @@ Logical schema:
 | N | Persistent `reg` | Chunks | Approx persistent total (ex-roles, ex-lastact) | TTL policy |
 |--:|-----------------:|-------:|-----------------------------------------------:|------------|
 | 50 | 50 | 1 | 51 | bump to ~90d when &lt; ~30d remain |
-| 100 | 100 | 1 | 101 | same |
+| 100 | 100 | 2 | 102 | same |
 | 250 | 250 | 3 | 253 | same |
 | 1000 | 1000 | 10 | 1010 | same |
 

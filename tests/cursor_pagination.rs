@@ -12,6 +12,10 @@ use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, String, Vec};
 
 use trustbridge_contract::{ContractError, TrustBridgeContract};
 
+const SECURITY_DOC: &str = include_str!("../docs/SECURITY.md");
+const ABI_DOC: &str = include_str!("../docs/ABI.md");
+const DASHBOARD_DOC: &str = include_str!("../docs/DASHBOARD_SYNC.md");
+
 fn setup() -> (Env, Address, Address) {
     let env = Env::default();
     let admin = Address::generate(&env);
@@ -168,6 +172,66 @@ fn test_removal_anywhere_invalidates_outstanding_cursors_even_if_already_passed(
         let result =
             TrustBridgeContract::get_registered_paginated(env.clone(), Some(stale_cursor), 4);
         assert_eq!(result, Err(ContractError::InvalidCursor));
+    });
+}
+
+/// Operator acceptance: after one removal bumps the index generation,
+/// the stale page cursor is rejected and a full restart from `None` rebuilds
+/// the mirror without resurrecting the removed username.
+#[test]
+fn test_dashboard_index_generation_restart_happy_and_failure_paths() {
+    const DASHBOARD_SYNC: &str = include_str!("../docs/DASHBOARD_SYNC.md");
+    const EVENT_INDEXING: &str = include_str!("../docs/EVENT_INDEXING.md");
+
+    assert!(DASHBOARD_SYNC.contains("restart at `cursor = None`"));
+    assert!(DASHBOARD_SYNC.contains("`stellar_address`, `timestamp`, and `domain`"));
+    assert!(EVENT_INDEXING.contains("Restart export pagination with `cursor = None`"));
+
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 6);
+
+        let page1 = TrustBridgeContract::get_public_paginated(env.clone(), None, 2).unwrap();
+        let stale = page1.next_cursor.clone().unwrap();
+
+        // Failure path 1: stale contract cursor after a removal.
+        TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "user001")).unwrap();
+        assert_eq!(
+            TrustBridgeContract::get_public_paginated(env.clone(), Some(stale), 2),
+            Err(ContractError::InvalidCursor)
+        );
+
+        // Failure path 2: malformed/oversized offset after the registry shrank.
+        let mut malformed = [0u8; 8];
+        malformed[0..4].copy_from_slice(&u32::MAX.to_be_bytes());
+        malformed[4..8].copy_from_slice(&1u32.to_be_bytes());
+        assert_eq!(
+            TrustBridgeContract::get_public_paginated(
+                env.clone(),
+                Some(BytesN::from_array(&env, &malformed)),
+                2,
+            ),
+            Err(ContractError::InvalidCursor)
+        );
+
+        // Happy path: discard stale state and restart pages from None.
+        let mut seen: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = TrustBridgeContract::get_public_paginated(env.clone(), cursor, 2).unwrap();
+            for i in 0..page.records.len() {
+                seen.push(page.records.get(i).unwrap().0);
+            }
+            if !page.has_more {
+                assert!(page.next_cursor.is_none());
+                break;
+            }
+            cursor = page.next_cursor;
+        }
+
+        assert_eq!(seen.len(), 5);
+        assert!(!seen.iter().any(|username| *username == s(&env, "user001")));
     });
 }
 
@@ -667,4 +731,130 @@ fn test_get_pending_reverify_requires_initialized() {
             Err(ContractError::NotInitialized)
         );
     });
+}
+
+// ── Public pending-reverify listing policy (Issue #860) ──────────────────────
+
+/// Happy path: the public, no-auth page exposes the flagged username and
+/// nothing else. The docs must state the same public-read auth surface.
+#[test]
+fn test_pending_reverify_page_is_public_username_only_listing() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    flag_reverify(&env, &contract_id, &admin, "carol");
+
+    env.as_contract(&contract_id, || {
+        let page = TrustBridgeContract::get_pending_reverify(env.clone(), 0, 10).unwrap();
+        assert_eq!(page, Vec::from_array(&env, [s(&env, "carol")]));
+    });
+
+    assert!(SECURITY_DOC.contains("Public pending re-verification listings (Issue #860)"));
+    assert!(SECURITY_DOC.contains("Auth: None"));
+    assert!(ABI_DOC.contains("**Auth** | None (public read, no admin credentials)"));
+    assert!(DASHBOARD_DOC.contains("Restrict the username list"));
+}
+
+/// Failure path 1 — an unflagged/never-registered name never appears in the
+/// listing, so a public reader cannot invent a pending-reverify target.
+#[test]
+fn test_pending_reverify_page_omits_unflagged_and_unknown_names() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    flag_reverify(&env, &contract_id, &admin, "carol");
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "carol")).unwrap();
+        let page = TrustBridgeContract::get_pending_reverify(env.clone(), 0, 10).unwrap();
+        assert!(page.is_empty(), "removal clears the public pending flag");
+    });
+}
+
+/// Failure path 2 — oversized pages fail with the stable documented reason
+/// code; the public listing never silently returns an unbounded target set.
+#[test]
+fn test_pending_reverify_page_oversized_limit_is_rejected() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    flag_reverify(&env, &contract_id, &admin, "carol");
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::get_pending_reverify(env.clone(), 0, 101),
+            Err(ContractError::InvalidBatchSize)
+        );
+        // The documented bounded retry still works after the rejection.
+        let page = TrustBridgeContract::get_pending_reverify(env.clone(), 0, 100).unwrap();
+        assert_eq!(page.len(), 1);
+    });
+}
+
+// ── Invalid-cursor reason differentiation (Issue #859) ───────────────────────
+
+/// Happy path: the current-generation cursor with an in-range offset still
+/// decodes, so the single error code does not mask a working cursor.
+#[test]
+fn test_current_generation_cursor_still_decodes() {
+    let (env, _admin, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 4);
+        set_index_generation(&env, 3);
+        let page = TrustBridgeContract::get_public_paginated(
+            env.clone(),
+            Some(forge_cursor(&env, 2, 3)),
+            2,
+        )
+        .unwrap();
+        assert_eq!(page.records.get(0).unwrap().0, s(&env, "user002"));
+    });
+}
+
+/// Failure path 1 — a malformed/out-of-range offset maps to the documented
+/// single `InvalidCursor` code rather than a new reason code.
+#[test]
+fn test_out_of_range_cursor_offset_maps_to_invalid_cursor() {
+    let (env, _admin, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 4);
+        set_index_generation(&env, 3);
+        for offset in [5u32, u32::MAX] {
+            assert_eq!(
+                TrustBridgeContract::get_public_paginated(
+                    env.clone(),
+                    Some(forge_cursor(&env, offset, 3)),
+                    2,
+                ),
+                Err(ContractError::InvalidCursor),
+                "offset {offset} must not get a distinct reason code"
+            );
+        }
+    });
+}
+
+/// Failure path 2 — a wrong-generation cursor (in-range offset) maps to the
+/// same code as the malformed cursor above.
+#[test]
+fn test_wrong_generation_cursor_maps_to_same_invalid_cursor_code() {
+    let (env, _admin, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 4);
+        set_index_generation(&env, 3);
+        assert_eq!(
+            TrustBridgeContract::get_public_paginated(
+                env.clone(),
+                Some(forge_cursor(&env, 1, 4)),
+                2,
+            ),
+            Err(ContractError::InvalidCursor)
+        );
+    });
+}
+
+/// Docs must keep stating that only one code exists for both decode reasons.
+#[test]
+fn test_invalid_cursor_reason_docs_document_single_code() {
+    assert!(ABI_DOC.contains("**one** reason code for decode failures"));
+    assert!(ABI_DOC.contains("fail with `InvalidCursor` (code"));
+    assert!(DASHBOARD_DOC.contains("Invalid cursor reason codes (Issue #859)"));
+    assert!(DASHBOARD_DOC.contains("`InvalidCursor` (code 52)"));
 }

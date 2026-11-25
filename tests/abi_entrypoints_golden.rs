@@ -6,6 +6,12 @@
 //!
 //! Refresh after an intentional public interface change:
 //!   python3 scripts/generate_abi_json.py --update-entrypoints-golden
+//!
+//! Module-split guidance (Issue #771): after moving code between src/ modules,
+//! only entrypoints re-exported by `src/lib.rs` belong in `docs/abi.json` and
+//! this golden. `pub(crate)` helpers are module-internal and must never be
+//! promoted to public contract functions. See docs/ABI.md and
+//! docs/CONTRIBUTING.md for the refresh checklist.
 
 const ABI_JSON: &str = include_str!("../docs/abi.json");
 const GOLDEN: &str = include_str!("testdata/abi/public_entrypoints.golden.json");
@@ -53,7 +59,9 @@ fn arity_from_signature(signature: &str) -> u32 {
 
 fn is_public_entrypoint(name: &str) -> bool {
     let lowered = name.to_ascii_lowercase();
-    if name.starts_with('_') {
+    if name.starts_with('_') || name.contains("::") || lowered.starts_with("pub(crate)") {
+        // Module-qualified / pub(crate) helper names are internal to src/
+        // modules after the module split, not public ABI entrypoints.
         return false;
     }
     if lowered.starts_with("test") || lowered.ends_with("_test") || lowered.contains("_test_") {
@@ -232,6 +240,66 @@ fn internal_and_test_only_names_are_excluded() {
         .map(|e| e.name)
         .collect();
     assert_eq!(names, vec!["initialize".to_string()]);
+}
+
+#[test]
+fn module_split_refresh_guidance_is_documented() {
+    let abi_doc = include_str!("../docs/ABI.md");
+    let contributing_doc = include_str!("../docs/CONTRIBUTING.md");
+    let lib_src = include_str!("../src/lib.rs");
+    for doc in [abi_doc, contributing_doc, lib_src] {
+        assert!(
+            doc.contains("--update-entrypoints-golden"),
+            "golden refresh command must be documented (Issue #771)"
+        );
+        assert!(
+            doc.contains("pub(crate)"),
+            "module-internal helpers must be called out as non-ABI (Issue #771)"
+        );
+    }
+}
+
+#[test]
+fn module_qualified_helpers_are_not_public_entrypoints() {
+    let sample = r#"{
+      "functions": [
+        {"name": "initialize", "signature": "initialize(admin: Address) -> Result<(), ContractError>"},
+        {"name": "storage::pub(crate)helper", "signature": "storage::pub(crate)helper() -> ()"},
+        {"name": "audit::set_pending", "signature": "audit::set_pending() -> ()"}
+      ]
+    }"#;
+    let names: Vec<_> = public_entrypoints_from_abi(sample)
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(names, vec!["initialize".to_string()]);
+}
+
+#[test]
+fn missing_module_split_entrypoint_is_detected() {
+    let mut from_golden = parse_golden(GOLDEN);
+    assert!(!from_golden.is_empty(), "golden fixture must not be empty");
+    from_golden.pop();
+    assert_ne!(
+        public_entrypoints_from_abi(ABI_JSON),
+        from_golden,
+        "removing an entrypoint from the golden must fail the comparison"
+    );
+}
+
+#[test]
+fn extra_helper_in_golden_is_detected() {
+    let mut from_golden = parse_golden(GOLDEN);
+    from_golden.push(Entrypoint {
+        name: "pub(crate)::helper".to_string(),
+        arity: 0,
+    });
+    from_golden.sort();
+    assert_ne!(
+        public_entrypoints_from_abi(ABI_JSON),
+        from_golden,
+        "an accidental helper export in the golden must fail the comparison"
+    );
 }
 
 #[test]

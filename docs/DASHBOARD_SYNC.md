@@ -97,6 +97,107 @@ Full budget model, CLI examples, and reproduction commands:
 [BENCHMARK_BUDGETS.md](BENCHMARK_BUDGETS.md). Field semantics:
 [ABI.md § ExportPage](ABI.md#exportpage).
 
+### Invalid cursor reason codes (Issue #859)
+
+The contract deliberately reports **one** reason code for every cursor decode
+failure: `InvalidCursor` (code 52). It does not distinguish a malformed/out-of-
+range offset from a cursor issued against a different `index_gen`; both are
+unsafe to resume and both fail with the same stable code. Do not infer a more
+specific on-chain error than the ABI promises.
+
+For operator triage, compare recent removals with `get_health_probes().index_gen`
+from [CONTRACT_HEALTH.md](CONTRACT_HEALTH.md#pre-wave-probes-issue-668):
+
+- `index_gen` changed since the cursor was issued → stale generation; restart
+  from `cursor = None`. Removal/batch events identify the cause.
+- `index_gen` unchanged but the offset is beyond the registry size → malformed
+  or hand-crafted cursor; restart from `cursor = None` and never construct
+  cursors client-side.
+
+Either way the recovery is identical and idempotent: restart from `None` and
+replay the export with idempotent upserts. `tests/cursor_pagination.rs` pins
+both failure paths to `InvalidCursor`.
+
+## Handling Removals (Issue #3)
+
+### What happens when a username is removed
+
+When `remove` or `batch_remove` removes a username from the registry:
+1. The record is deleted from persistent storage.
+2. The flat username index is **not compacted** — the removed username's position
+   becomes a hole (an empty slot).
+3. The chunked index mirrors this: the chunk that held the removed username now
+   has one fewer live entry, but the chunk structure is not rebuilt.
+4. `count` and `verified` counters decrement immediately.
+
+**Wave exporter implications**: After removals, the index may contain gaps.
+Iterating by sequential integer offset (e.g., `for i in 0..count`) and expecting
+a live record at every position will skip records after the first hole. This is
+a bug in the exporter, not the contract.
+
+### How paginated exports handle holes correctly
+
+Both `get_registered_paginated` (admin) and `get_public_paginated` walk the
+index by **cursor**, not by assuming dense offsets. The returned `next_cursor`
+is an opaque token that embeds the index generation and the next valid position.
+When the contract encounters a hole, it skips it internally and advances to the
+next live record without exposing the gap to the caller. The page never contains
+empty slots; `has_more` and `next_cursor` guide the caller to the next batch.
+
+**Usage**:
+```rust
+let mut cursor = None;
+loop {
+    let page = get_public_paginated(cursor, 50);
+    for (username, record) in page.records {
+        // process record
+    }
+    if !page.has_more {
+        break;
+    }
+    cursor = page.next_cursor;
+}
+```
+
+This walks the entire registry exactly once, regardless of holes, and never
+skips or duplicates records.
+
+### Recovery after detecting a hole in a local mirror
+
+If your exporter built a local mirror by iterating integer offsets (the wrong
+approach) and now discovers missing records:
+
+1. **Clear the local mirror** or mark all entries as stale.
+2. **Restart from `cursor = None`** using the paginated export APIs.
+3. Walk to completion using `next_cursor` and `has_more`.
+4. Mark each record as fresh in the local store.
+5. Purge any stale entries that were not refreshed.
+
+**Do not** try to patch the local mirror by guessing which offsets were holes.
+The contract's internal index layout is not part of the ABI; only the paginated
+export APIs are.
+
+### Compaction (optional, operator-driven)
+
+`compact_index` (admin-callable, permissionless in some configurations) rebuilds
+the flat and chunked indexes without holes, reclaiming space and restoring dense
+sequential iteration. After compaction:
+- Previously issued cursors become invalid (`InvalidCursor` error).
+- Exporters must restart from `cursor = None`.
+- The index generation counter increments, which is how cursors detect staleness.
+
+**When to compact**: After large batch removals (10+ entries, or whenever the
+operator wants to reclaim index space). Compaction is **not required** for
+correctness — paginated exports work with or without it.
+
+**Guidance for Wave operators**: Schedule compaction during low-activity windows
+(maintenance, post-incident cleanup) to avoid invalidating in-flight exporter
+cursors. Document the compaction in the operator runbook so incident responders
+know why cursors were invalidated.
+
+See also: [REGISTRY_INVARIANTS.md § Hole Policy](./REGISTRY_INVARIANTS.md#hole-policy)
+for the full invariant definition and test coverage.
+
 ## Event Idempotency & Replay Handling
 ## Event lag signal (Issue #282)
 
@@ -304,6 +405,17 @@ lives at
 consumer and asserts the stream is replay-safe.
 
 
+### Index generation replay parity (Issue #850)
+
+In addition to the `#[contractevent]` catalogue, the replay suite covers the
+`index_generation_bumped_event` payload (`previous_generation`,
+`new_generation`, `reason`) via
+`tests/testdata/index_generation_bumped_fixture.json`. An exact reconnect
+replay is deduplicated by the RPC envelope; a non-advancing generation or an
+empty reason is rejected. Consumers must reset any cursor whose embedded
+generation differs from `new_generation`, otherwise Wave exports can drift
+after a removal.
+
 ### Full contract-event replay coverage (Issue #598)
 
 The [Rust replay test](../tests/event_replay.rs) and
@@ -353,6 +465,7 @@ new Stellar address has not yet been linked to the GitHub account.
 ### Reading pending-reverify state
 
 There is exactly **one** exported read endpoint (Issue #866):
+One public read endpoint exposes this flag (no auth required, works while paused):
 
 ```text
 get_pending_reverify(offset: u32, limit: u32) -> Result<Vec<String>, ContractError>
@@ -374,6 +487,19 @@ crate-internal storage helper (`src/storage.rs`), not part of the ABI — see
 | Termination | Advance `offset` by `limit` until `offset >= get_stats().total` |
 
 ### Consumer flow for pending reverify pages (Issue #866)
+| `get_pending_reverify(offset, limit)` | Paginated scan — returns `Vec<String>` of usernames with the flag set |
+
+This is the only pending-reverify ABI entry point (`docs/abi.json`); there is no
+`get_pending_reverify(github_username) -> bool` or `get_pending_reverify_page`.
+To check a single username, scan the pages and compare canonical (ASCII
+lowercase) usernames locally. The response contains **usernames only** — no
+Stellar addresses or other sensitive data. A username is absent from the pages
+when it was never registered, was removed, or had its flag cleared after
+successful re-verification.
+
+The list is public by design, so public dashboards should show counts only and
+keep usernames behind SSO/ACL; see
+[SECURITY.md § Public pending re-verification listings](SECURITY.md#public-pending-re-verification-listings-issue-860).
 
 ```text
 offset = 0
@@ -405,6 +531,14 @@ Topic symbols and payloads are listed in
 Automated proof: `cargo test --test dashboard_pending_reverify` (sparse two-page
 walk, pause exemption, clear-on-verify, `InvalidBatchSize`, and
 `NotInitialized`).
+1. **On `RegisteredEvent`** where the old and new `stellar_address` differ, check
+   the `get_pending_reverify` pages for that username to confirm the flag was set. Queue the
+   contributor for a re-verification workflow.
+2. **On `VerifiedEvent`**, the flag is cleared automatically — no additional call needed.
+3. **Periodic reconciliation**: Call `get_pending_reverify(0, 100)` and advance the
+   offset until the queue is drained. This is cheaper than scanning all
+   registrations individually and is authoritative. Restrict the username list
+   to internal tooling; public views should show aggregate counts.
 
 ### Relationship to verification flow
 
@@ -533,6 +667,47 @@ RPC or infra rather than contract state. Re-sync cached registry views when
 `index_gen` changes, the same trigger as an invalidated cursor. Suggested
 probe cadence, error semantics and alert thresholds:
 [CONTRACT_HEALTH.md → Choosing a probe & alert SLOs](CONTRACT_HEALTH.md#choosing-a-probe--alert-slos-issue-756).
+
+### Cursor restart after an index generation bump
+
+An index-generation bump is the registry-index equivalent of a desynchronization
+signal. It happens after a successful removal (including batch removals and
+challenge/completion removals) and after a rename removes the old index entry;
+it **does not** cause a separate `IndexGenerationBumpedEvent` to be emitted.
+Observe it by polling `get_health_probes().index_gen` and by comparing the
+post-removal value with the last probe value. A stale paginated-export cursor
+then fails with `ContractError::InvalidCursor` (`invalid cursor`) instead of
+being allowed to resume at a shifted offset.
+
+Operators and dashboards must follow this exact recovery sequence:
+
+1. **Pause writes to the export mirror.** Stop issuing or retaining
+   `get_registered_paginated` / `get_public_paginated` cursors; do not retry the
+   same `cursor` and `limit` pair after an observed bump.
+2. **Record the new generation.** Read `get_health_probes().index_gen` again
+   after the removal transaction has reached finality and save
+   `old_index_gen -> new_index_gen` in the operator/recovery log.
+3. **Drop the contract pagination cursor.** Delete the persisted
+   `next_cursor`/page-position for the affected dashboard or indexer run. Do
+   not also reset a valid Horizon/RPC event cursor unless it is pruned or
+   rejected: event delivery is independent and the same event is replay-safe.
+4. **Restart pages from `None`** (the CLI represents this as no `--cursor`,
+   or `cursor: null` in a JSON-RPC client). Fetch pages with the same bounded
+   `limit`, and replace or upsert each returned `(username, record)` row.
+5. **Commit the cursor only after the page is applied.** Persist
+   `page.next_cursor`/`has_more` together with the database transaction, then
+   repeat until `has_more == false` and `next_cursor == null`.
+6. **Verify removal event fields.** For every `removed_event`, confirm the
+   first topic is `github_username`, and verify the data fields
+   `stellar_address`, `timestamp`, and `domain`. Apply it idempotently by
+   deleting/tombstoning that username. A missing or malformed required field
+   is an ingestion failure; do not silently mark the registry fully resynced.
+
+If a stale cursor is used, restart at `cursor = None` immediately; replaying
+the registry page is safe because the restart upserts complete records and
+separately applied `RemovedEvent` deliveries delete/tombstone the same username.
+Do not call an empty result or a short first page proof of completion—trust
+`has_more` and `next_cursor`, and continue to the final empty tail state.
 
 ## Event topic classification (Issue #399)
 
