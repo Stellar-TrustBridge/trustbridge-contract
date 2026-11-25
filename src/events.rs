@@ -2,6 +2,11 @@
 //!
 //! Every struct here derives its `topic[0]` symbol from its snake_case name.
 //!
+//! Adding a new `#[contractevent]` requires the five-step operator checklist in
+//! [`docs/subgraph/README.md`](../docs/subgraph/README.md#contributor-checklist-adding-a-contract-event):
+//! event → `EVENT_INDEXING.md` topic row → subgraph handler/waiver → fixture →
+//! dashboard consumer note. A missing handler silently drops Wave events.
+//!
 //! ## Pending re-verification (`PENDING_REVERIFY_KEY`) — no dedicated events
 //!
 //! Setting or clearing `PENDING_REVERIFY_KEY` (`pend_rev`) does **not** emit a

@@ -3505,6 +3505,8 @@ impl TrustBridgeContract {
     /// Read-only, no auth required, and available while paused. The usernames
     /// are public by design (no Stellar addresses are returned); dashboards
     /// must follow the redaction policy in `docs/SECURITY.md` (Issue #860).
+    /// See also `docs/SECURITY.md#pending-reverify-page-authorization-issue-846`
+    /// and the signer-class rows in `tests/auth_matrix.csv`.
     ///
     /// # Errors
     ///

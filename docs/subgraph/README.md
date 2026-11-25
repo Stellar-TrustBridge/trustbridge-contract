@@ -21,6 +21,28 @@ The [`schema.graphql`](schema.graphql) file defines the entities that model the 
 - If the smart contract is upgraded and new fields are added to an event, or if new events are introduced, this `schema.graphql` and the corresponding mapping handlers must be updated to support them.
 - The `Contributor` aggregate might also need to be evolved if new core properties are tracked on-chain.
 
+## Contributor checklist: adding a contract event
+
+Every new `#[contractevent]` in [`src/events.rs`](../../src/events.rs) must move
+through all five steps below in the **same PR**. Missing a handler drops Wave
+operational events on the floor; a waived event must be waived explicitly.
+
+1. **Add the event** to `src/events.rs` (payload fields, topic, and rustdoc).
+2. **Update `EVENT_INDEXING.md`** — add the topic to the
+   [topic classification table](../EVENT_INDEXING.md#topic-classification) with
+   its `event_kind`, `category`, and `Subgraph` outcome (entity or `waived`).
+3. **Add the subgraph handler** (or an explicit waiver row below) and, for a
+   mapped event, the matching `schema.graphql` entity and event → entity row.
+4. **Update the fixture** — extend `scripts/testdata/getEvents.sample.json`
+   (and any event-replay fixture) with a representative emitted event.
+5. **Add the dashboard consumer note** — document in
+   [`DASHBOARD_SYNC.md`](../DASHBOARD_SYNC.md#abi-event-reference) how the
+   dashboard reads or reconciles the new event, and cross-link it here.
+
+Run `make subgraph-parity` and `cargo test --test event_checklist_docs` before
+opening the PR. Steps 2, 3, and 5 are enforced by that test; the fixture step is
+reviewed in PR because fixtures are JSON rather than prose.
+
 ## Sync Flow & Caveats
 
 When onboarding a new indexer (like Graph Node or Envio) using this schema, be aware of the following sync assumptions:

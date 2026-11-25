@@ -420,9 +420,13 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   single invocation** — there is no partial state where only one counter
   gets fixed; Soroban commits all of an invocation's storage writes or none
   of it. A call that finds no drift is a no-op even with `apply = true`.
+- **Pending re-verify flags are untouched.** `repair_index` only rewrites
+  `count` / `verified`; it never clears a `PENDING_REVERIFY_KEY` flag. After an
+  index repair, still page through `get_pending_reverify(offset, limit)` and
+  clear flags only with `verify` / `batch_verify`.
 - See [SECURITY.md § Index Repair](SECURITY.md#index-repair-repair_index)
-  for the full atomicity and dry-run-write guarantees, and
-  `tests/repair_index.rs` for the automated proof.
+  for the full atomicity, dry-run-write, and pending-flag guarantees, and
+  `tests/repair_index.rs` for the automated proof (`cargo test --test repair_index`).
 
 #### `set_bot_status` — flag / unflag a CI account
 
@@ -538,6 +542,24 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   until a fresh `attest_upgrade`; see
   [CONTRACT_HEALTH.md § Attestation divergence alert mapping](CONTRACT_HEALTH.md#attestation-divergence-alert-mapping-issue-848).
   Do not clear the flag to silence the page.
+
+**Enablement checklist (do not flip the gate mid-Wave without all of these):**
+
+1. **Stage/attest flow:** install the new WASM and record its hex SHA-256;
+   call `stage_wasm --wasm-hash "$HASH"`, then `attest_upgrade` with an
+   `expires_at` covering the whole upgrade window. Confirm both with
+   `get_staged` / `get_attestation` before proceeding.
+2. **Monitor:** watch `upgrade` failures for `AttestationRequired` (20),
+   `UnattestedWasm`, `AttestationExpired`, and `StagedWasmMismatch` during the
+   window; confirm the staged hash equals the attested hash and that
+   `get_attestation_required` reads `true` after the flip.
+3. **Disable criteria:** if the hash is wrong, the attestation expires, or the
+   upgrade does not verify within the window, call
+   `set_attestation_required --required false` (or `clear_attestation` and
+   re-attest) while paused, then re-run the checklist. Flipping the gate
+   without a live attestation bricks upgrades.
+
+The checklist is enforced by `cargo test --test attestation_enablement_docs`.
 
 #### `attest_upgrade` — declare the next hash in advance
 

@@ -15,6 +15,12 @@ repeated full-registry exports. Events are cheaper to read, capture every mutati
 atomically, and include enough context (topic symbol, ledger sequence, tx hash) for
 idempotent processing.
 
+When adding a new contract event, follow the five-step
+[contributor checklist](subgraph/README.md#contributor-checklist-adding-a-contract-event):
+add the event → update this topic table → add the subgraph handler (or waiver) →
+update the fixture → add the dashboard consumer note. Skipping the handler step
+silently drops Wave operational events.
+
 `scripts/event_indexer.sh` is the reference implementation: a dependency-light bash
 poller that tails the Stellar RPC `getEvents` endpoint, writes one JSON object per
 event to an append-only JSONL file, persists a cursor between runs, and deduplicates

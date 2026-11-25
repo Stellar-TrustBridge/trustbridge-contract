@@ -1645,6 +1645,23 @@ day to notice and cancel.
 
 ---
 
+## Pending-reverify page authorization (Issue #846)
+
+`get_pending_reverify(offset, limit)` is a **read-only, unauthenticated**
+entrypoint: no signer is required from admin, verifier, registrant, or anonymous
+callers. The page contains only canonical usernames already present in the
+public registry index — no addresses or private metadata — so there is no
+privilege boundary to enforce here. It remains available while paused/frozen so
+operators can keep reconciling Wave address-change work during an upgrade
+window.
+
+The auth expectations are encoded as CSV rows in `tests/auth_matrix.csv` (the
+scanner checks every signer class) and covered by dedicated tests in
+`tests/auth_matrix.rs`: the happy path lists flagged names with no auth, while
+`limit > MAX_PAGE_LIMIT` returns `InvalidBatchSize` (code 14) and an
+uninitialized contract returns `NotInitialized` (code 1). Both failures occur
+before any storage write.
+
 ## On-Chain Audit Logging
 
 The contract records structured `AuditLogEntry` values into instance storage on
@@ -1880,6 +1897,15 @@ another. Every repair is an explicit, auditable admin transaction.
 Covered by `tests/repair_index.rs`, which drifts the counters against a
 known-good fixture and checks both the dry-run report and the corrected
 on-chain state after `apply = true`.
+
+**Interaction with pending re-verify flags (Issue #857).** `repair_index`
+recomputes **only** `count` and `verified`. It never reads, clears, moves, or
+creates `PENDING_REVERIFY_KEY` flags, in either dry-run or apply mode. A
+flag set after an address change stays set through a dry run, a successful
+apply, and repeated no-op applies. Operators
+must still reconcile flags with `get_pending_reverify(offset, limit)` and
+clear them only through `verify` / `batch_verify` — an index repair must never
+be used as a shortcut to hide a Wave address-change risk.
 
 **Atomicity guarantee.** `apply = true` writes both `count` and `verified`
 within the same contract invocation — there is no intermediate state an
