@@ -1249,6 +1249,21 @@ canonical ownership message for the **record's** `stellar_address`. A proof
 issued for a different address returns `AddressMismatch` (62) and does not
 update verification state.
 
+**Clock skew (Issue #854).** Ledger time is authoritative. A non-zero signed
+expiry allows a fixed 30-second post-expiry grace, inclusive; 31 seconds
+or more returns `OracleProofExpired` (60). No separate future-expiry cap
+or issued-at field is introduced. The comparison uses saturating subtraction
+and does not alter the signed expiry, message binding, allowlist, signature
+or owner authorization checks. Zero retains the legacy no-expiry behavior;
+production oracles should issue short-lived non-zero expiries, synchronize
+their clocks, and obtain a fresh signed proof if the grace is exhausted.
+The grace extends the usable replay window by at most 30 seconds; it is
+not a substitute for signature or owner authentication. Failed verification
+does not update registry state.
+
+Run `cargo test --lib oracle_proof` and
+`cargo test --test oracle_proof_clock_skew` for the boundary checks.
+
 **Invalid proof fails.** Each rejection above returns its own `Err` code. An
 allowlisted key with a canonically encoded signature that does not verify
 traps the host invocation (`Error(Crypto, InvalidInput)`) instead of
