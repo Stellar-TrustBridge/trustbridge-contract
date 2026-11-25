@@ -3692,7 +3692,8 @@ impl TrustBridgeContract {
     ///   its message does not bind this username/address/expiry.
     /// - [`ContractError::OracleProofNotAllowlisted`] if the signing key is not
     ///   allowlisted (always, when the allowlist is empty).
-    /// - [`ContractError::OracleProofExpired`] if `expires_at` is non-zero and past.
+    /// - [`ContractError::OracleProofExpired`] if ledger time exceeds non-zero
+    ///   `expires_at` by more than 30 seconds.
     /// - [`ContractError::OracleProofBadSignature`] if the signature is not
     ///   canonically encoded; an invalid but well-formed signature traps.
     /// - [`ContractError::AlreadyVerified`] if the record is verified and that
