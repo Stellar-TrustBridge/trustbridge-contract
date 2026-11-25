@@ -672,12 +672,15 @@ impl TrustBridgeContract {
     }
 
     /// The pending (not yet active) role grant for `target`, if any.
+    /// `activate_at` is the earliest activation time, not an expiry timestamp.
+    /// A queued grant does not confer privileges or extend an active role's expiry.
     #[must_use]
     pub fn get_pending_role(env: Env, target: Address) -> Option<PendingRoleGrant> {
         storage_get_pending_role(&env, &target)
     }
 
-    /// Applies a pending role grant once its timelock has elapsed. Admin-only.
+    /// Applies a pending role grant at or after `activate_at`. Admin-only.
+    /// There is no automatic timestamp-based expiry of a queued grant.
     ///
     /// Emits [`RoleGrantedEvent`] — the same event an instant grant emits, so
     /// indexers do not need a second code path for the activated role.
@@ -726,7 +729,8 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Drops a pending role grant before it activates. Admin-only.
+    /// Drops a pending role grant that has not been explicitly activated. Admin-only.
+    /// Cancellation remains available after the timelock elapses and while paused.
     ///
     /// Emits [`RoleGrantCancelledEvent`].
     ///
