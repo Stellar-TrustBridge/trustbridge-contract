@@ -500,6 +500,18 @@ cross-contract by construction, not by an added check. That boundary, plus
 the full list of what *is* safe to call, is documented in
 [ABI.md § Cross-Contract Read Interface](ABI.md#cross-contract-read-interface).
 
+For registration, the architecture remains deliberately asymmetric: `register`
+requires `stellar_address.require_auth()` and is not a cross-contract write
+surface. Soroban invokes a sibling contract in its own authorization context,
+so it cannot forge or replay the target address's signature. `register` therefore
+closes on crafted username/address/fallback payloads and leaves no partial
+record, count, or index state. Malformed inputs use `InvalidUsername` (11),
+oversized fallback lists use `FallbackListFull` (46), paused/frozen registries
+use `Paused` (7), and zero/burn targets use `ZeroAddress` (16). The deterministic
+spoof matrix and guards are pinned by
+`tests/cross_contract_register_deny.rs`; the security threat model is in
+[SECURITY.md § Cross-Contract `register` Is Denied](SECURITY.md#cross-contract-register-is-denied-no-nonce).
+
 Because the safe surface is entirely existing, already-deployed functions,
 adopting it requires no storage migration and no new contract version for
 existing v0.1 consumers — `Version::supports_cross_contract_reads()` pins the

@@ -2472,6 +2472,9 @@ impl TrustBridgeContract {
             return Err(ContractError::ChallengeActive);
         }
 
+        // Cross-contract auth boundary: require_auth binds this address, not a
+        // caller-supplied identity or sibling-contract context. Keep registration
+        // fail-closed here instead of adding a trusted-relayer allowlist.
         stellar_address.require_auth();
 
         // Validate fallback address list size and require auth on each.

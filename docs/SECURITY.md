@@ -12,7 +12,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 
 | Threat | Mitigation |
 |--------|------------|
-| Impersonation (registering someone else's GitHub username) | `stellar_address.require_auth()` — only the address owner can register |
+| Impersonation (registering someone else's GitHub username) | `stellar_address.require_auth()` — only the address owner can register; cross-contract callers cannot impersonate the target address |
 | Unauthorized removal | `caller` must auth as registrant or admin |
 | Unauthorized admin-only actions | `admin.require_auth()` on `get_all_registered`, `get_registered_paginated`, `set_role`, `pause`/`unpause` |
 | Unauthorized verification actions | `caller.require_auth()` on `verify` / `revoke_verification`; `caller` must be the admin or hold `Role::Verifier` (checked via `has_role_or_admin`) — any other caller gets `NotAuthorized` |
@@ -1235,9 +1235,30 @@ exist, deliberately:
 
 This is enforced by test, not left as a comment:
 `tests/cross_contract_register_deny.rs::cross_contract_register_on_behalf_of_another_address_is_denied`
-(expects a panic — missing auth), with
-`direct_register_by_the_address_owner_still_works` as the positive control
-proving the same call path succeeds for a real, self-signing registrant.
+(expects a panic — missing auth), `::cross_contract_auth_spoof_payload_matrix_is_deterministically_denied`
+for a deterministic 32-payload caller/target matrix, and
+`::malformed_oversized_and_paused_register_leave_no_partial_state` for malformed,
+oversized-fallback, and pause guards. `direct_register_by_the_address_owner_still_works`
+is the positive control proving the same call path succeeds for a real,
+self-signing registrant.
+
+### Spoof threat and reason codes
+
+A hostile sibling contract may vary usernames, target addresses, fallback
+address lists, or caller identity, but it cannot turn a crafted argument into
+an authorization grant. The host authorization context belongs to the invoking
+contract and does not contain a signature for an arbitrary `stellar_address`.
+Consequently, crafted C2C relays fail before `register` changes storage. A
+`#[should_panic]` auth denial is the host-level result; contract-side rejection
+reason codes remain unchanged: `InvalidUsername` (11) for malformed/empty or
+oversized names, `FallbackListFull` (46) for more than five fallback addresses,
+and `Paused` (7) for paused/freeze guards. `ZeroAddress` (16) remains a
+fail-before-write guard for the burn-address form of spoofing.
+
+Operators should treat a successful C2C `register` from an untrusted sibling
+as a protocol regression, not as an expected fallback. There is no trusted
+contract allowlist and no nonce today because C2C registration is intentionally
+absent. Keep it absent unless replay protection is added atomically.
 
 **ABI statement:** `register` is not part of the cross-contract read surface
 documented in [ABI.md § Cross-Contract Read Interface](ABI.md#cross-contract-read-interface)
