@@ -521,6 +521,12 @@ digest stability across repeated calls, across independent contract
 instances holding identical content, across paginated sub-queries, and
 digest sensitivity to real content changes.
 
+Pending re-verification flags (`PENDING_REVERIFY_KEY`, Issue #864) are
+off-page advisory flags, not `ExportPage` XDR fields. They never block
+`export_attestation` and never enter the digest directly; only the normal
+record-field changes that set/clear a flag can change page bytes. Proven by
+`tests/export_page_layout.rs::pending_reverify_attestation`.
+
 ### RecordProof (Issue #230)
 
 Returned by `get_record_proof`. Lets a light client confirm a single
@@ -1217,7 +1223,9 @@ Gas is bounded by `limit`, so a page may hold fewer than `limit` names (or
 none) while more remain. Advance `offset` by `limit` until it reaches
 `get_stats().total`. An empty registry returns an empty page. A name drops
 out once `verify` / `batch_verify` clears its flag; `rename` moves the flag
-to the new name.
+to the new name. Flagged usernames remain fully exportable: the flag is
+advisory for Wave re-verification queues, **not** an export/attestation gate
+(Issue #864).
 
 ```bash
 stellar contract invoke --id $ID --network testnet \
@@ -3120,7 +3128,8 @@ not configured, `expires_in == 0`, or revoked).
 
 Admin-only; unaffected by the normal pause flag (same as
 `get_registered_paginated` / `get_all_registered` — admin export tooling
-stays available during maintenance). Wraps the same page
+stays available during maintenance). Pending re-verification flags do not
+gate it either (Issue #864). Wraps the same page
 `get_registered_paginated(cursor, limit)` would return with a SHA-256 digest,
 the contract's schema version, and the ledger sequence — see the
 `ExportAttestation` type above and

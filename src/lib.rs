@@ -3396,7 +3396,11 @@ impl TrustBridgeContract {
     ///
     /// Unaffected by the normal pause flag, matching
     /// `get_registered_paginated` / `get_all_registered`: admin export and
-    /// audit tooling stays available during a maintenance window.
+    /// audit tooling stays available during a maintenance window. Pending
+    /// re-verification flags (`PENDING_REVERIFY_KEY`) are advisory per-username
+    /// markers, not `ExportPage` fields: a flagged record does not block this
+    /// read or change its digest except via normal record-field changes
+    /// (Issue #864).
     ///
     /// # Auth
     ///

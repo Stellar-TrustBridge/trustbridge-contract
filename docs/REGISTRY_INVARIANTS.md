@@ -40,6 +40,17 @@ Related docs: [ABI](ABI.md) · [ARCHITECTURE](ARCHITECTURE.md) · [SECURITY](SEC
 | I11 | After mixed `batch_verify` / `batch_remove` calls (duplicates, unregistered names), `get_stats().total` equals the enumerable index length and `verified` equals live verified records | `tests/counter_proofs.rs::proof_counters_match_index_under_mixed_batches` |
 | I12 | A rejected batch (`InvalidBatchSize`) moves no counter and leaves the index untouched | `tests/counter_proofs.rs::proof_rejected_batch_moves_no_counter` |
 | I13 | A pagination cursor decodes only against the `INDEX_GEN` it was issued under; a cursor from any other generation (older, newer, or across the `u32::MAX` wrap) returns `InvalidCursor` on both `get_public_paginated` and `get_registered_paginated` | `test_public_paginated_rejects_cursor_from_any_other_generation`, `test_generation_wraps_at_u32_max_and_still_invalidates_cursors` |
+| I14 | Pending re-verification flags never gate export or attestation reads; `ExportPage` XDR and `ExportAttestation::digest` are independent of `PENDING_REVERIFY_KEY` except through normal record changes | `tests/export_page_layout.rs::pending_reverify_attestation` |
+
+### Pending reverify flags are advisory (Issue #864)
+
+A Wave address rotation can leave some usernames flagged in
+`PENDING_REVERIFY_KEY` while auditors still need a signed export. The flag is
+a per-username persistent marker, not an `ExportPage` field: `export_attestation`
+succeeds with any subset of records flagged, returns the same page as
+`get_registered_paginated`, and hashes only that page. Admin auth,
+initialization, and cursor validation remain enforced — flags do not weaken
+these checks. See [ABI.md § Signed export attestation](ABI.md#signed-export-attestation-issue-223).
 
 ### Cursors from other index generations (Issue #693)
 
