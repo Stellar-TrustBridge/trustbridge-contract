@@ -1213,15 +1213,19 @@ change (`PENDING_REVERIFY_KEY`, Issue #587).
 | **Pagination** | Offset-based over the registry index: scans entries `[offset, offset + limit)` |
 | **Limit** | `0` → `DEFAULT_PAGE_LIMIT`; `> MAX_PAGE_LIMIT` (100) → `InvalidBatchSize` |
 
-Gas is bounded by `limit`, so a page may hold fewer than `limit` names (or
-none) while more remain. Advance `offset` by `limit` until it reaches
-`get_stats().total`. An empty registry returns an empty page. A name drops
+The number of flag lookups is bounded by the effective limit, but the legacy
+flat index footprint grows with registry size. A page may hold fewer matches
+than requested (or none) while more remain. Advance `offset` by the effective
+limit (20 if the supplied limit is 0) until it reaches `get_stats().total`.
+Offsets at or beyond the index length return an empty page. Start with 20
+and consult [scan budget guidance](BENCHMARK_BUDGETS.md#pending-reverify-scan-budgets-issue-856)
+before increasing the page size. An empty registry returns an empty page. A name drops
 out once `verify` / `batch_verify` clears its flag; `rename` moves the flag
 to the new name.
 
 ```bash
 stellar contract invoke --id $ID --network testnet \
-  -- get_pending_reverify --offset 0 --limit 100
+  -- get_pending_reverify --offset 0 --limit 20
 ```
 
 ---
@@ -2404,9 +2408,9 @@ struct AdminTransferProposal {
 
 ## Pending Re-verification Functions (Issue #208)
 
-### `get_pending_reverify(github_username: String) -> Result<bool, ContractError>`
+### Pending re-verification flags (storage behavior)
 
-Returns whether `github_username` has a pending re-verification flag.
+The internal storage flag records whether a username requires re-verification.
 
 The flag is set automatically when a verified user re-registers to a different
 Stellar address, invalidating their prior verification. It is cleared once
@@ -2419,16 +2423,9 @@ removed users. Works while the contract is paused.
 | **Mutates** | No |
 | **Errors** | `NotInitialized` |
 
-### `get_pending_reverify_page(offset: u32, limit: u32) -> Result<Vec<String>, ContractError>`
-
-Returns a page of usernames that have a pending re-verification flag set.
-`limit` is capped at `MAX_PAGE_LIMIT` (100). Works while the contract is paused.
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Mutates** | No |
-| **Errors** | `NotInitialized` |
+The public scan endpoint is `get_pending_reverify(offset, limit)`, documented
+above. The internal per-name flag lookup and page helper are not separate ABI
+entrypoints.
 
 **Dashboard sync note:** Poll this endpoint to discover which contributors need
 a fresh off-chain GitHub identity check after an address change. See
