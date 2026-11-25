@@ -34,6 +34,7 @@ Related docs: [ABI](ABI.md) · [ARCHITECTURE](ARCHITECTURE.md) · [SECURITY](SEC
 | I5 | The export index holds exactly one entry per live record (no leaks, no duplicates) | `assert_registry_invariants` |
 | I6 | Every username resolves to the address last registered for it, with the expected verification flag | `assert_registry_invariants` |
 | I7 | A pending-reverify page scan never exceeds its limit: `0` means 20, `100` is the maximum, `>100` fails with `InvalidBatchSize` before scanning (Issue #847) | `src/storage.rs` boundary tests |
+| I8 | A `PENDING_REVERIFY_KEY` flag is an attribute, not an index filter: flagged users remain in identical positions across all three export walks (Issue #853) | `tests/pagination_parity.rs` |
 | I7 | A rejected operation moves no counter and mutates no record | `test_fuzz_failure_paths_leave_invariants_intact` |
 | I8 | Counters never underflow, including removal attempts against an empty registry | `test_fuzz_counters_never_underflow_on_empty_registry` |
 | I9 | A complete paginated export visits every live username exactly once, with no duplicate, skip, or reorder across chunk boundaries | `test_paginated_export_at_10k_users` |

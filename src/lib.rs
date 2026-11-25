@@ -3483,6 +3483,10 @@ impl TrustBridgeContract {
     ///
     /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
     /// - [`ContractError::InvalidBatchSize`] if `limit > MAX_PAGE_LIMIT` (100).
+    ///
+    /// Operator note (Issue #853): flagged users stay in the registry index and
+    /// in every paginated export walk; this endpoint only projects the flag,
+    /// so Wave parity checks remain valid while users are pending reverify.
     pub fn get_pending_reverify(
         env: Env,
         offset: u32,
