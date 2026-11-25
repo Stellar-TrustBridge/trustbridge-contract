@@ -1308,6 +1308,16 @@ hooks: [DASHBOARD_SYNC.md § Consumer flow for pending reverify pages](DASHBOARD
 | **Pagination** | Offset-based over the registry index: scans entries `[offset, offset + limit)` |
 | **Limit** | `0` → `DEFAULT_PAGE_LIMIT` (`20`); `> MAX_PAGE_LIMIT` (`100`) → `InvalidBatchSize` (`14`) |
 
+The number of flag lookups is bounded by the effective limit, but the legacy
+flat index footprint grows with registry size. A page may hold fewer matches
+than requested (or none) while more remain. Advance `offset` by the effective
+limit (20 if the supplied limit is 0) until it reaches `get_stats().total`.
+Offsets at or beyond the index length return an empty page. Start with 20
+and consult [scan budget guidance](BENCHMARK_BUDGETS.md#pending-reverify-scan-budgets-issue-856)
+before increasing the page size. An empty registry returns an empty page. A name drops
+out once `verify` / `batch_verify` clears its flag; `rename` moves the flag
+to the new name.
+
 Gas is bounded by `limit`, so a page may hold fewer than `limit` names (or
 none) while more remain. Advance `offset` by `limit` until it reaches
 `get_stats().total`. An empty registry or `offset >= total` returns an empty
@@ -1361,7 +1371,7 @@ retry with `limit <= 100`.
 
 ```bash
 stellar contract invoke --id $ID --network testnet \
-  -- get_pending_reverify --offset 0 --limit 100
+  -- get_pending_reverify --offset 0 --limit 20
 ```
 
 ---
@@ -2614,6 +2624,15 @@ struct AdminTransferProposal {
 
 ## Pending Re-verification Functions (Issues #208, #587)
 
+### Pending re-verification flags (storage behavior)
+
+The internal storage flag records whether a username requires re-verification.
+
+The flag is set automatically when a verified user re-registers to a different
+Stellar address, invalidating their prior verification. It is cleared once
+the record is `verify`'d again. Returns `false` for unknown usernames and
+removed users. Works while the contract is paused.
+
 The ABI has **one** pending-reverify read:
 [`get_pending_reverify(offset: u32, limit: u32)`](#get_pending_reverifyoffset-u32-limit-u32---resultvecstring-contracterror),
 which delegates to `crate::storage::get_pending_reverify_page` (internal-only,
@@ -2632,6 +2651,14 @@ or other sensitive data.
 | **Works while paused** | Yes |
 | **Errors** | `NotInitialized` (code `2`), `InvalidBatchSize` (code `14`), `NetworkMismatch` (code `30`) |
 | **Events** | None emitted on flag set/clear (poll `get_pending_reverify`) |
+
+The public scan endpoint is `get_pending_reverify(offset, limit)`, documented
+above. The internal per-name flag lookup and page helper are not separate ABI
+entrypoints.
+
+**Dashboard sync note:** Poll this endpoint to discover which contributors need
+a fresh off-chain GitHub identity check after an address change. See
+[DASHBOARD_SYNC.md § Pending Re-verification](DASHBOARD_SYNC.md#pending-re-verification-issue-208).
 
 **Dashboard sync note:** Poll `get_pending_reverify` to discover which contributors
 need a fresh off-chain GitHub identity check after an address change. Because the

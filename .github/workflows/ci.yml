@@ -116,6 +116,9 @@ jobs:
       - name: Storage footprint budget (Issue #661)
         run: cargo test --lib storage_footprint_budget_tests
 
+      - name: Pending reverify scan budgets (Issue #856)
+        run: make bench-pending-reverify
+
       - name: Storage rent playbook constants (Issue #660)
         run: cargo test --lib storage_rent_playbook_tests
 

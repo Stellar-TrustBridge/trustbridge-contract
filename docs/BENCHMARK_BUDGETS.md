@@ -17,7 +17,7 @@ These are constants in `src/storage.rs` and are part of the ABI; they are
 | Constant | Value | Behavior |
 |----------|------:|----------|
 | `DEFAULT_PAGE_LIMIT` | `20` | Used when the caller sends `limit = 0` |
-| `MAX_PAGE_LIMIT` | `100` | `limit > 100` is **clamped** to `100`, not rejected |
+| `MAX_PAGE_LIMIT` | `100` | Export readers clamp larger limits; `get_pending_reverify` rejects them |
 | `CHUNK_SIZE` | `50` | Usernames per persistent chunk entry (`(chunk, idx)`) |
 
 The full index (`idx`) is one instance-storage entry that grows linearly with
@@ -37,12 +37,12 @@ entry.
 | Public dashboard poll | `get_public_paginated` | `20` (`DEFAULT_PAGE_LIMIT`) | Smallest footprint, no admin key, cheap to retry; blocks while paused |
 | Indexer backfill / reconciliation | `get_public_paginated` | `50` (`CHUNK_SIZE`) | Aligns one page with one persistent chunk entry |
 | Admin export / audit snapshot | `get_registered_paginated` | `50` | Same footprint as above, plus one admin signature per page |
-| Recovery from a suspected OOG | Either | `10`, then increase | Establish a working baseline before tuning upward |
+| Pending reverify scan | `get_pending_reverify` | `20` initially | Filters a bounded window of the flat index; sparse results still cost a scan |
+| Recovery from a suspected OOG | Either export reader | `10`, then increase | Establish a working baseline before tuning upward |
 
 `100` is the ceiling, not the target. Use it only after a successful
-`make bench-export` on a comparable registry size. A request above `100`
-silently returns `100`, so an apparently "ignored" page size is the clamp, not
-a server bug.
+`make bench-export` on a comparable registry size. For export readers a request above `100` is clamped; pending-reverify scans
+instead reject it with `InvalidBatchSize`.
 
 CLI examples:
 
@@ -58,6 +58,63 @@ stellar contract invoke --id $ID --source-account admin --network testnet \
 
 Always follow `next_cursor` until `has_more == false` / `next_cursor == null`;
 never increase `limit` to compensate for a stalled cursor.
+
+---
+
+## Pending reverify scan budgets (Issue #856)
+
+`get_pending_reverify(offset, limit)` checks flags on a window of the legacy
+flat registry index, not on a separate pending-only index. Each candidate
+requires a flag lookup even when no match is returned. The full index is
+loaded, so limiting the window does not eliminate registry-size-dependent
+footprint or host costs.
+
+| Scan scenario | Guidance |
+|---|---|
+| Routine polling | Start at 20 candidates per invocation |
+| Larger backfill | Try 50 after simulation on a comparable registry |
+| Maximum page | 100; use only after confirming CPU, memory and footprint headroom |
+| Empty or short result | Continue scanning; it does not prove exhaustion |
+| Limit 0 | Effective window is 20 |
+| Limit above 100 | `InvalidBatchSize` (no scan) |
+| Offset at or beyond index length | Empty result, including `u32::MAX` |
+
+Advance the offset by the effective window size, not the returned count.
+Stop at the registry count from `get_stats()`; use saturating offset arithmetic.
+The endpoint is public and remains available while paused. If registrations
+are removed or renamed during a scan, offsets can shift: reconcile against
+a fresh registry count and repeat the scan as needed.
+
+Run the focused checks before increasing a Wave operator's page size:
+
+```bash
+make bench-pending-reverify
+make bench-budget-ci
+make storage-footprint-check
+```
+
+The focused Rust benchmark tests 100, 500 and 1,000 indexed names, with
+39-character usernames, all flags present, and first/late windows of 20,
+50 and 100 candidates. Fixture construction is excluded from metering.
+Each measured invocation must stay below or equal to **25 million CPU
+instructions and 3 million memory bytes**, conservative test-host headroom
+caps consistent with existing register/verify guidance. These are regression
+guardrails, not measured network limits or a guarantee for larger registries.
+The companion tests cover sparse windows, uninitialized calls, oversized
+limits and out-of-range offsets.
+
+Output format (actual measurements are printed by the test):
+
+```text
+pending_reverify size=<registry> offset=<offset> limit=<limit> cpu=<instructions> memory=<bytes>
+```
+
+The storage-budget CI job runs the focused target. These hard-cap checks
+are independent of the historical CSV baseline comparison; no unmeasured
+baseline numbers are added. Simulate the actual invocation on the target
+network, including ledger footprint, before a large backfill. On resource
+failure, retry the same offset with a smaller limit and advance only after
+success.
 
 ---
 
@@ -240,6 +297,7 @@ make bench-batch-register-budget    # batch register ceiling CPU/mem integration
 make bench-export                   # get_all_registered sweep
 make bench-username                 # usernames_match sweep
 make bench-double-verify            # verify success vs rejection
+make bench-pending-reverify         # pending scan CPU/memory and boundary checks
 ```
 
 The opt-in register/verify soak checks every pair's resulting counts and
