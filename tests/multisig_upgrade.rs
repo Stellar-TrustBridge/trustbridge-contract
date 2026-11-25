@@ -734,6 +734,36 @@ fn test_clear_attestation_does_not_disable_required_flag() {
     });
 }
 
+#[test]
+fn test_required_attestation_blocks_multisig_execute_without_attestation() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+    let wasm_hash = hash(&env, 0xA8);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+    });
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), wasm_hash, 0)
+            .unwrap();
+    });
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), 0),
+            Err(ContractError::AttestationRequired),
+            "the multisig path must honor the required-attestation gate"
+        );
+        assert!(
+            TrustBridgeContract::get_upgrade_proposal(env.clone()).is_some(),
+            "a rejected execution must leave its proposal intact"
+        );
+    });
+}
+
 // ── Threshold above signer set must fail closed (Issue #795) ─────────────────
 
 /// Setting a threshold above `MAX_UPGRADE_SIGNERS` would make the threshold

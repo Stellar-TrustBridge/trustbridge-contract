@@ -234,7 +234,7 @@
     {
       "code": 14,
       "name": "InvalidBatchSize",
-      "description": "Batch call supplied zero items or more than the configured max"
+      "description": "Batch call supplied zero items or more than the configured max, or `get_pending_reverify` called with `limit > MAX_PAGE_LIMIT` (100)"
     },
     {
       "code": 15,
@@ -380,6 +380,11 @@
       "code": 44,
       "name": "UpgradeProposalInsufficientApprovals",
       "description": "`execute_upgrade` was called before the approval threshold was met (Issue #301)"
+    },
+    {
+      "code": 45,
+      "name": "ThresholdExceedsSignerCap",
+      "description": "`set_upgrade_threshold` was called with a value greater than `MAX_UPGRADE_SIGNERS`, making the threshold unreachable (Issue #795)"
     },
     {
       "code": 46,

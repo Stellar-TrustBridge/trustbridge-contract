@@ -501,6 +501,18 @@
     },
     {
       "delivery": 42,
+      "event_type": "oracle_allowlist_rotated_event",
+      "subject": "admin",
+      "github_username": "",
+      "stellar_address": "",
+      "timestamp": 1733000035,
+      "ledger_sequence": 1003000,
+      "tx_hash": "e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5",
+      "event_index": 36,
+      "event_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472:CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA:1003000:e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5:36"
+    },
+    {
+      "delivery": 42,
       "event_type": "registered_event",
       "subject": "github_username",
       "github_username": "",
@@ -953,14 +965,27 @@
       "event_index": 35,
       "event_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472:CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA:1003000:e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5:35",
       "_note": "exact replay of delivery 41"
+    },
+    {
+      "delivery": 78,
+      "event_type": "oracle_allowlist_rotated_event",
+      "subject": "admin",
+      "github_username": "",
+      "stellar_address": "",
+      "timestamp": 1733000035,
+      "ledger_sequence": 1003000,
+      "tx_hash": "e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5",
+      "event_index": 36,
+      "event_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472:CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA:1003000:e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f901a2b3c4d5:36",
+      "_note": "exact replay of delivery 42"
     }
   ],
   "expected_final_state": {
     "octocat": {
       "stellar_address": "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H",
       "verified": false,
-      "applied_event_ids": 39,
-      "ignored_replays": 37
+      "applied_event_ids": 40,
+      "ignored_replays": 38
     }
   }
 }

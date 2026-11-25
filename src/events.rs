@@ -1,3 +1,18 @@
+//! Contract event definitions (`#[contractevent]`).
+//!
+//! Every struct here derives its `topic[0]` symbol from its snake_case name.
+//!
+//! ## Pending re-verification (`PENDING_REVERIFY_KEY`) — no dedicated events
+//!
+//! Setting or clearing `PENDING_REVERIFY_KEY` (`pend_rev`) does **not** emit a
+//! dedicated contract event, and no existing event (`RegisteredEvent`,
+//! `RenamedEvent`, `RotationExecutedEvent`, `VerifiedEvent`, `RemovedEvent`)
+//! carries a `pending_reverify` field. Wave indexers and dashboards must treat
+//! lifecycle events only as hints and poll
+//! `TrustBridgeContract::get_pending_reverify(offset, limit)` as the
+//! authoritative re-verification queue (see `docs/EVENT_INDEXING.md` and
+//! `docs/subgraph/README.md`).
+
 use soroban_sdk::{contractevent, Address, BytesN, String, Symbol};
 
 use crate::domain::EventDomain;
@@ -32,6 +47,10 @@ pub struct BotStatusChangedEvent {
 }
 
 /// Emitted when a registration is removed by the registrant or admin.
+/// Removal also advances the pagination index generation in `storage.rs`; the
+/// bump is observable via `get_health_probes().index_gen`, while this event
+/// remains the consumer-facing tombstone for the removed username. No separate
+/// `IndexGenerationBumpedEvent` is emitted.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemovedEvent {
