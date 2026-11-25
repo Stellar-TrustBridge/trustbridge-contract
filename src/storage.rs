@@ -49,6 +49,9 @@ pub const ROT_DELAY_KEY: Symbol = symbol_short!("rotdelay");
 /// Key prefix for a username's pending address rotation (Issue #234).
 pub const PENDING_ROT_KEY: Symbol = symbol_short!("pendrot");
 // Pending reverify flag per username
+/// Re-verify flag for a verified record whose address changed (Issue #852).
+/// Set on address change / rotation / rename; removed (never set to `false`)
+/// by `verify` / `batch_verify` and record removal. See docs/STORAGE_KEYS.md.
 pub const PENDING_REVERIFY_KEY: Symbol = symbol_short!("pend_rev");
 // Emergency pause flag and timestamp — wired as guardian circuit breaker (Issue #196)
 pub const EMERGENCY_PAUSE_KEY: Symbol = symbol_short!("emrg_ps");
@@ -3002,6 +3005,70 @@ mod pending_reverify_tests {
                 get_pending_reverify_page(&env, 0, MAX_PAGE_LIMIT + 1),
                 Err(ContractError::InvalidBatchSize)
             );
+        });
+    }
+
+    /// Lifecycle: address re-registration sets the flag; a successful
+    /// `verify` clears it and removes the storage key entirely (Issue #852).
+    #[test]
+    fn test_pending_reverify_lifecycle_cleared_by_verify() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        let owner = Address::generate(&env);
+        register_flagged(&env, &contract_id, "octocat", &owner);
+
+        env.as_contract(&contract_id, || {
+            let user = name(&env, "octocat");
+            assert!(get_pending_reverify(&env, &user));
+            TrustBridgeContract::verify(env.clone(), get_admin(&env).unwrap(), user.clone())
+                .unwrap();
+            assert!(!get_pending_reverify(&env, &user));
+            assert!(!env
+                .storage()
+                .persistent()
+                .has(&(PENDING_REVERIFY_KEY, canon(&env, &user))));
+        });
+    }
+
+    /// Failure path: an unauthorized verify must not clear the flag or leave
+    /// partial privileged state (Issue #852).
+    #[test]
+    fn test_pending_reverify_survives_unauthorized_verify() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        let owner = Address::generate(&env);
+        let random = Address::generate(&env);
+        register_flagged(&env, &contract_id, "octocat", &owner);
+
+        env.as_contract(&contract_id, || {
+            let user = name(&env, "octocat");
+            assert_eq!(
+                TrustBridgeContract::verify(env.clone(), random, user.clone()),
+                Err(ContractError::NotAuthorized)
+            );
+            assert!(get_pending_reverify(&env, &user));
+        });
+    }
+
+    /// Failure path: looking up a differently-cased raw (non-canonical) key
+    /// does not find the flag; only the canonical low-case key does.
+    #[test]
+    fn test_pending_reverify_raw_noncanonical_key_does_not_match() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        let owner = Address::generate(&env);
+        register_flagged(&env, &contract_id, "octocat", &owner);
+
+        env.as_contract(&contract_id, || {
+            assert!(get_pending_reverify(&env, &name(&env, "OCTOCAT")));
+            assert!(!env
+                .storage()
+                .persistent()
+                .has(&(PENDING_REVERIFY_KEY, name(&env, "OCTOCAT"))));
+            assert!(env
+                .storage()
+                .persistent()
+                .has(&(PENDING_REVERIFY_KEY, name(&env, "octocat"))));
         });
     }
 }

@@ -209,6 +209,49 @@ These keys use **tuples** as storage keys, where the first element is a `Symbol`
 
 ---
 
+## `PENDING_REVERIFY_KEY` lifecycle (Issue #852)
+
+`"pend_rev"` is a **persistent** key keyed by the canonical (lower-case)
+username. Its value is always `true`; "cleared" means the key is **removed**,
+never stored as `false` (Issue #588). This keeps `has()` consistent with
+`get_pending_reverify()` and prevents a stale entry being inherited.
+
+```
+ register/register_sponsored with a different address on a verified record
+ execute_rotation on a verified record ──────────────┐
+ rename of a verified or already-flagged record ─────┤
+                                                     ▼
+                                     set_pending_reverify(name, true)
+                                                     │
+              verify / batch_verify success ─────────┤
+              remove / batch_remove ─────────────────┤
+                                                     ▼
+                                     clear_pending_reverify(name) → key absent
+```
+
+- **Set**: `register` / `register_sponsored` when an existing *verified* record
+  changes `stellar_address`; `execute_rotation` for a verified record; and
+  `rename`, which moves an outstanding flag to the new name (the old name's
+  entry is removed with the old record).
+- **Cleared**: successful `verify` / `batch_verify` (via `mark_verified`), and
+  record removal (`remove` / `batch_remove`). A failed or unauthorized verify
+  leaves the flag untouched — no partial privileged state.
+- **Read**: `get_pending_reverify(username) -> bool` and
+  `get_pending_reverify_page(offset, limit)` (Issue #587). The page scan is
+  bounded by `limit` and returns canonical names.
+- **Idempotence**: repeating a `true` set or a clear has the same observable
+  state; `set_pending_reverify(name, false)` is equivalent to a clear.
+- **Failure behavior**: only malformed/oversized page limits produce a stable
+  `InvalidBatchSize` error; an empty or unknown username simply reads `false`.
+  No new env vars or reason codes are introduced by this key.
+
+Tests: `src/storage.rs::pending_reverify_tests` covers the set → verify →
+clear path, unauthorized verify (flag preserved), canonical-key lookup, and
+hostile pagination bounds. Run with
+`cargo test --lib pending_reverify_tests` (or `cargo test --lib`).
+
+---
+
 ## Collision Analysis
 
 No overlapping key encodings were identified. The following properties prevent collisions:

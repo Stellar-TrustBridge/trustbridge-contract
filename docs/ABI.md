@@ -1235,7 +1235,11 @@ Gas is bounded by `limit`, so a page may hold fewer than `limit` names (or
 none) while more remain. Advance `offset` by `limit` until it reaches
 `get_stats().total`. An empty registry returns an empty page. A name drops
 out once `verify` / `batch_verify` clears its flag; `rename` moves the flag
-to the new name.
+to the new name. The flag is set on address change for a verified record
+(`register`, `register_sponsored`, `execute_rotation`); a successful verify
+removes the `"pend_rev"` storage key rather than writing `false`. Failed or
+unauthorized verifies leave it set. See
+[STORAGE_KEYS.md § PENDING_REVERIFY_KEY lifecycle](STORAGE_KEYS.md#pending_reverify_key-lifecycle-issue-852).
 
 ```bash
 stellar contract invoke --id $ID --network testnet \
