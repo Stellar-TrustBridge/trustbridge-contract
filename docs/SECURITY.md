@@ -35,6 +35,32 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Auditor trusting an unbound, unsigned `export_registry.sh` JSON dump | `export_attestation` binds a page to a SHA-256 digest, version, and ledger for offline comparison — see [Signed Export Attestation](#signed-export-attestation-issue-223) |
 | Staged malicious WASM hash (operator key compromise, bad artifact, or swapped hash) | Staged slot is admin/Upgrader-only, publicly readable, and upgrade execution requires staged-hash consistency; attestation/provenance checks and dual-control multisig reduce single-key risk. See [Staged WASM malicious-hash threat model](#staged-wasm-malicious-hash-threat-model-issue-804). |
 
+### Audit ring saturation (Issue #2)
+
+The audit log is a ring buffer capped at `MAX_AUDIT_LOG_ENTRIES` (currently 100).
+When full, new audit entries evict the oldest (FIFO). Stats counters
+(`AuditStats.total_events`, `.registrations`, `.verifications`, etc.) continue
+to increment monotonically even when the ring is saturated — they track all
+events since deployment, not just the retained window.
+
+**Wave attack scenario**: Sustained registration spam that exceeds
+`MAX_AUDIT_LOG_ENTRIES` will fill the ring. The contract continues accepting
+new entries without panic; the oldest entries are evicted; logs stay in
+chronological order; and stats counters reflect the full attack volume.
+An incident responder querying `get_audit_logs` sees only the most recent
+`MAX_AUDIT_LOG_ENTRIES` events, but `get_audit_stats` reveals the total count.
+
+**Operational expectations when saturated**:
+- `get_audit_logs().len()` stays at `MAX_AUDIT_LOG_ENTRIES`.
+- Oldest entries are silently evicted (no event emitted for eviction).
+- `get_audit_stats().total_events` continues to grow beyond the ring size.
+- Paging/sequence stability: logs remain in timestamp order after eviction.
+- Setting `AuditConfig.max_events` to a smaller value caps the returned log
+  size but does not stop stats counters from incrementing.
+
+Covered by `tests/audit_capacity_stress.rs` (capacity, eviction, sequence
+stability, monotonic stats under saturation).
+
 ### Export record binding (Issue #672)
 
 Every `ExportPage.merkle_root` binds each exported record's username, Stellar

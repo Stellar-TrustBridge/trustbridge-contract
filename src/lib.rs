@@ -66,7 +66,7 @@ pub use storage::{
     ChallengeRecord, ContributorRecord, ExportAttestation, ExportPage, HealthProbes,
     HealthSnapshot, PauseReason, PendingBatchRemove, PendingRoleGrant, PendingRotation,
     RecordProof, RepairReport, Role, RoleHolder, Stats, VerificationConfig, VerifierAllowEntry,
-    WasmAttestation, WasmProvenance, MAX_FALLBACK_ADDRESSES, MAX_VERIFIERS,
+    WasmAttestation, WasmProvenance, MAX_AUDIT_LOG_ENTRIES, MAX_FALLBACK_ADDRESSES, MAX_VERIFIERS,
 };
 pub use version::Version;
 
