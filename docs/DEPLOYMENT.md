@@ -221,10 +221,14 @@ When rotating the WASM hash, put the contract into pause mode first so the
 upgrade window behaves as read-only for integrators:
 
 1. Call `set_paused(true)` as admin.
-2. Publish or apply the new WASM upgrade.
-3. Verify the new binary with the existing upgrade checks in [ABI.md](ABI.md)
+2. Before enabling required attestation, complete the
+   [ADMIN_RUNBOOK enablement checklist](ADMIN_RUNBOOK.md#set_attestation_required--require-pre-declared-hashes):
+   stage the hash, attest it with a covering expiry, monitor upgrade failures,
+   and know the disable criteria (`set_attestation_required(false)`).
+3. Publish or apply the new WASM upgrade.
+4. Verify the new binary with the existing upgrade checks in [ABI.md](ABI.md)
   and the deployment script flow in [scripts/deploy.sh](../scripts/deploy.sh).
-4. Call `set_paused(false)` once the upgrade is confirmed healthy.
+5. Call `set_paused(false)` once the upgrade is confirmed healthy.
 
 During this window, lookups remain safe, but mutation entry points reject with
 the existing pause error. In practice that means dashboards and indexers can

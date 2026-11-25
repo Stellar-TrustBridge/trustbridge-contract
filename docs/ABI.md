@@ -2454,6 +2454,12 @@ unattested upgrades are allowed and provenance notes them as such.
 
 **Since:** added in Issue #198. Existing deployments default to `false`.
 
+Enablement checklist for operators (see
+[ADMIN_RUNBOOK § set_attestation_required](ADMIN_RUNBOOK.md#set_attestation_required--require-pre-declared-hashes)):
+stage the WASM hash and attest it first, monitor upgrade reason codes during
+the window, and disable with `required = false` (or re-attest) if the hash or
+expiry is wrong. Do not enable mid-Wave without a live attestation.
+
 ### `get_attestation_required() -> bool`
 
 Returns whether WASM attestation is required before upgrade. Defaults to `false`.
