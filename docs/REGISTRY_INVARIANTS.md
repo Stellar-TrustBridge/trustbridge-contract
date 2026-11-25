@@ -82,7 +82,10 @@ for the exporter recovery procedure after detecting a hole in a local mirror.
 | I11 | After mixed `batch_verify` / `batch_remove` calls (duplicates, unregistered names), `get_stats().total` equals the enumerable index length and `verified` equals live verified records | `tests/counter_proofs.rs::proof_counters_match_index_under_mixed_batches` |
 | I12 | A rejected batch (`InvalidBatchSize`) moves no counter and leaves the index untouched | `tests/counter_proofs.rs::proof_rejected_batch_moves_no_counter` |
 | I13 | A pagination cursor decodes only against the `INDEX_GEN` it was issued under; a cursor from any other generation (older, newer, or across the `u32::MAX` wrap) returns `InvalidCursor` on both `get_public_paginated` and `get_registered_paginated` | `test_public_paginated_rejects_cursor_from_any_other_generation`, `test_generation_wraps_at_u32_max_and_still_invalidates_cursors` |
-| I14 | Pending re-verification flags never gate export or attestation reads; `ExportPage` XDR and `ExportAttestation::digest` are independent of `PENDING_REVERIFY_KEY` except through normal record changes | `tests/export_page_layout.rs::pending_reverify_attestation` |
+| I14 | `limit == 0` means `DEFAULT_PAGE_LIMIT` (20) on every registry export entrypoint; role enumeration is the sole exception at `MAX_ROLE_PAGE_LIMIT` (50) | `test_limit_zero_defaults_across_export_entrypoints`, `test_limit_zero_defaults_pending_reverify_and_role_holder_cap` |
+| I15 | A `limit == 0` cursor is still generation-checked; stale cursors fail with `InvalidCursor`, over-cap limits fail with `InvalidBatchSize`, and an empty registry fails with `NotInitialized` | `test_limit_zero_failure_paths_reject_stale_cursor_and_bad_config` |
+| I16 | A dual-control batch-remove proposal is live only while `now < proposed_at + BATCH_REMOVE_PROPOSAL_TTL_SECS`; at the exact boundary it is expired, cleared on execute, and replaceable by a fresh proposal | `test_proposal_is_executable_one_second_before_ttl`, `test_proposal_exactly_at_ttl_is_expired_and_cleared`, `test_stale_proposal_replacement_respects_ttl_boundary` |
+| I17 | Pending re-verification flags never gate export or attestation reads; `ExportPage` XDR and `ExportAttestation::digest` are independent of `PENDING_REVERIFY_KEY` except through normal record changes | `tests/export_page_layout.rs::pending_reverify_attestation` |
 
 ### Pending reverify flags are advisory (Issue #864)
 
@@ -107,6 +110,27 @@ removal would leave outstanding cursors valid against a shifted index.
 Recovery for clients is unchanged: on `InvalidCursor`, restart from
 `cursor = None` (see [DASHBOARD_SYNC.md](DASHBOARD_SYNC.md)). Covered by the
 I13 tests in `tests/cursor_pagination.rs`.
+
+### Zero-limit defaults (Issue #803)
+
+`limit = 0` is a request for the default page size, not an empty page. The
+registry exports (`get_registered_paginated`, `get_public_paginated`,
+`export_attestation`, `get_registered_page`, `get_pending_reverify`) all use
+`DEFAULT_PAGE_LIMIT = 20`. This does not relax any guard: cursors issued with
+`limit = 0` still carry the index generation and fail with `InvalidCursor`
+after a removal, and the initialization / batch-size checks still apply.
+`get_role_holders` intentionally uses `MAX_ROLE_PAGE_LIMIT = 50`, so its `0`
+is not interchangeable with the registry default — indexers must not assume a
+single zero-limit constant across all paged reads.
+
+### Dual-control proposal expiry (Issue #805)
+
+`is_batch_remove_proposal_expired` uses `>=`, aligning the batch-remove window
+with the upgrade-expiry convention: the exact `proposed_at + 86_400` second is
+already expired. `execute_batch_remove` clears the stale slot and returns
+`NoPendingBatchRemove` without removing records; `propose_batch_remove`
+treats that same slot as replaceable. A proposal kept for audit purposes must
+therefore be read before the boundary, not at it.
 
 ### `get_verified_count()` / `get_stats().verified` parity (Issue #90)
 

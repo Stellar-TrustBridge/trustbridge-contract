@@ -49,6 +49,21 @@ fn register_n(env: &Env, n: u32) -> Vec<(String, Address)> {
     register_range(env, 0, n)
 }
 
+/// Registers `n` users with one contract frame per registration. Large
+/// fixtures cannot be built in a single frame on SDK 26: the footprint of
+/// ~20+ registrations exceeds the test host's per-invocation budget. Each
+/// registration is still a normal contract call, so auth semantics are
+/// unchanged.
+fn register_n_isolated(env: &Env, contract_id: &Address, n: u32) {
+    for i in 0..n {
+        let name = s(env, &alloc::format!("user{i:03}"));
+        env.as_contract(contract_id, || {
+            TrustBridgeContract::register(env.clone(), name, Address::generate(env), Vec::new(env))
+                .unwrap();
+        });
+    }
+}
+
 extern crate alloc;
 
 #[test]
@@ -56,27 +71,29 @@ fn test_full_walk_with_cursor_none_start_visits_every_record_once() {
     let (env, _admin, contract_id) = setup();
 
     env.mock_all_auths();
-    env.as_contract(&contract_id, || {
-        register_n(&env, 25);
+    register_n_isolated(&env, &contract_id, 25);
 
-        let mut seen: alloc::vec::Vec<String> = alloc::vec::Vec::new();
-        let mut cursor = None;
-        loop {
-            let page =
-                TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 10).unwrap();
-            for i in 0..page.records.len() {
-                let (username, _) = page.records.get(i).unwrap();
-                seen.push(username);
-            }
-            if !page.has_more {
-                assert!(page.next_cursor.is_none());
-                break;
-            }
-            cursor = page.next_cursor;
+    // Each admin-gated page gets its own frame. Under SDK 26 recording auth,
+    // two `admin.require_auth()` calls in one frame fail with
+    // Auth/ExistingValue even though both signatures are mocked.
+    let mut seen: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 10).unwrap()
+        });
+        for i in 0..page.records.len() {
+            let (username, _) = page.records.get(i).unwrap();
+            seen.push(username);
         }
+        if !page.has_more {
+            assert!(page.next_cursor.is_none());
+            break;
+        }
+        cursor = page.next_cursor;
+    }
 
-        assert_eq!(seen.len(), 25);
-    });
+    assert_eq!(seen.len(), 25);
 }
 
 #[test]
@@ -113,42 +130,51 @@ fn test_removing_a_record_after_a_cursor_is_issued_invalidates_it() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         register_n(&env, 10);
+    });
 
-        // First page of 4; there is more after it.
+    // First page of 4; there is more after it. Each admin read gets its own
+    // frame so SDK 26 recording auth does not reuse the admin's signature.
+    let stale_cursor = env.as_contract(&contract_id, || {
         let page1 = TrustBridgeContract::get_registered_paginated(env.clone(), None, 4).unwrap();
         assert_eq!(page1.records.len(), 4);
         assert!(page1.has_more);
-        let stale_cursor = page1.next_cursor.clone().unwrap();
-
-        // Remove a record that sits *before* the stale cursor's offset,
-        // shifting every later position back by one.
-        TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "user000")).unwrap();
-
-        // Continuing with the pre-removal cursor must fail loudly rather
-        // than silently return a drifted page.
-        let result =
-            TrustBridgeContract::get_registered_paginated(env.clone(), Some(stale_cursor), 4);
-        assert_eq!(result, Err(ContractError::InvalidCursor));
-
-        // The documented recovery — restart from `cursor = None` — must
-        // succeed and eventually visit every remaining record exactly once.
-        let mut seen: alloc::vec::Vec<String> = alloc::vec::Vec::new();
-        let mut cursor = None;
-        loop {
-            let page =
-                TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 4).unwrap();
-            for i in 0..page.records.len() {
-                let (username, _) = page.records.get(i).unwrap();
-                seen.push(username);
-            }
-            if !page.has_more {
-                break;
-            }
-            cursor = page.next_cursor;
-        }
-        assert_eq!(seen.len(), 9);
-        assert!(!seen.iter().any(|u| *u == s(&env, "user000")));
+        page1.next_cursor.clone().unwrap()
     });
+
+    // Remove a record that sits *before* the stale cursor's offset,
+    // shifting every later position back by one.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "user000")).unwrap();
+    });
+
+    // Continuing with the pre-removal cursor must fail loudly rather
+    // than silently return a drifted page.
+    assert_eq!(
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_registered_paginated(env.clone(), Some(stale_cursor), 4)
+        }),
+        Err(ContractError::InvalidCursor)
+    );
+
+    // The documented recovery — restart from `cursor = None` — must
+    // succeed and eventually visit every remaining record exactly once.
+    let mut seen: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 4).unwrap()
+        });
+        for i in 0..page.records.len() {
+            let (username, _) = page.records.get(i).unwrap();
+            seen.push(username);
+        }
+        if !page.has_more {
+            break;
+        }
+        cursor = page.next_cursor;
+    }
+    assert_eq!(seen.len(), 9);
+    assert!(!seen.iter().any(|u| *u == s(&env, "user000")));
 }
 
 /// A removal that happens *after* the position a cursor already passed
@@ -162,17 +188,26 @@ fn test_removal_anywhere_invalidates_outstanding_cursors_even_if_already_passed(
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         register_n(&env, 10);
-
-        let page1 = TrustBridgeContract::get_registered_paginated(env.clone(), None, 4).unwrap();
-        let stale_cursor = page1.next_cursor.clone().unwrap();
-
-        // Remove a record *after* the cursor's offset this time.
-        TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "user009")).unwrap();
-
-        let result =
-            TrustBridgeContract::get_registered_paginated(env.clone(), Some(stale_cursor), 4);
-        assert_eq!(result, Err(ContractError::InvalidCursor));
     });
+
+    let stale_cursor = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 4)
+            .unwrap()
+            .next_cursor
+            .unwrap()
+    });
+
+    // Remove a record *after* the cursor's offset this time.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "user009")).unwrap();
+    });
+
+    assert_eq!(
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_registered_paginated(env.clone(), Some(stale_cursor), 4)
+        }),
+        Err(ContractError::InvalidCursor)
+    );
 }
 
 /// Operator acceptance: after one removal bumps the index generation,
@@ -266,21 +301,25 @@ fn test_cursor_is_interchangeable_between_admin_and_public_paginated() {
 fn test_registering_more_after_a_cursor_is_issued_does_not_invalidate_it() {
     let (env, _admin, contract_id) = setup();
     env.mock_all_auths();
-    env.as_contract(&contract_id, || {
+    let cursor = env.as_contract(&contract_id, || {
         register_n(&env, 3);
 
         let page1 = TrustBridgeContract::get_registered_paginated(env.clone(), None, 2).unwrap();
         assert!(page1.has_more);
-        let cursor = page1.next_cursor;
-
-        // Appending new registrations only grows the index past the cursor's
-        // offset; it never shifts an existing position, so the cursor from
-        // before this registration must still be valid.
-        register_range(&env, 3, 2);
-
-        let page2 = TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 10).unwrap();
-        assert!(!page2.records.is_empty());
+        page1.next_cursor
     });
+
+    // Appending new registrations only grows the index past the cursor's
+    // offset; it never shifts an existing position, so the cursor from
+    // before this registration must still be valid.
+    env.as_contract(&contract_id, || {
+        register_range(&env, 3, 2);
+    });
+
+    let page2 = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), cursor, 10).unwrap()
+    });
+    assert!(!page2.records.is_empty());
 }
 
 // ── Soak-style export_cursor decode property (Issue #650) ────────────────────
@@ -525,8 +564,10 @@ fn test_soak_generation_bump_invalidates_old_cursors() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         register_n(&env, 5);
+    });
 
-        // Pre-removal: the forged cursor and the issued cursor agree.
+    // Pre-removal: the forged cursor and the issued cursor agree.
+    let (forged, issued) = env.as_contract(&contract_id, || {
         let forged = forge_cursor(&env, 2, 0);
         let forged_page =
             TrustBridgeContract::get_public_paginated(env.clone(), Some(forged.clone()), 2)
@@ -535,21 +576,27 @@ fn test_soak_generation_bump_invalidates_old_cursors() {
 
         let page1 = TrustBridgeContract::get_registered_paginated(env.clone(), None, 2).unwrap();
         assert!(page1.has_more);
-        let issued = page1.next_cursor.clone().unwrap();
-
-        // Any removal bumps the index generation: both cursors must now fail
-        // loudly instead of silently resuming at a drifted offset.
-        TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "user000")).unwrap();
-
-        assert_eq!(
-            TrustBridgeContract::get_public_paginated(env.clone(), Some(issued), 2),
-            Err(ContractError::InvalidCursor)
-        );
-        assert_eq!(
-            TrustBridgeContract::get_public_paginated(env.clone(), Some(forged), 2),
-            Err(ContractError::InvalidCursor)
-        );
+        (forged, page1.next_cursor.clone().unwrap())
     });
+
+    // Any removal bumps the index generation: both cursors must now fail
+    // loudly instead of silently resuming at a drifted offset.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "user000")).unwrap();
+    });
+
+    assert_eq!(
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_public_paginated(env.clone(), Some(issued), 2)
+        }),
+        Err(ContractError::InvalidCursor)
+    );
+    assert_eq!(
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_public_paginated(env.clone(), Some(forged), 2)
+        }),
+        Err(ContractError::InvalidCursor)
+    );
 }
 
 // ── Cursors from other INDEX_GEN values (Issue #693) ────────────────────────
@@ -728,6 +775,154 @@ fn test_get_pending_reverify_requires_initialized() {
     env.as_contract(&contract_id, || {
         assert_eq!(
             TrustBridgeContract::get_pending_reverify(env.clone(), 0, 10),
+            Err(ContractError::NotInitialized)
+        );
+    });
+}
+
+// ── limit == 0 defaulting (Issue #803) ────────────────────────────────────────
+//
+// Every paginated entrypoint that shares `storage::DEFAULT_PAGE_LIMIT` must
+// treat `limit = 0` as 20, not zero and not an error. `get_role_holders` is
+// the deliberate exception: it uses `MAX_ROLE_PAGE_LIMIT` (50) as both its
+// default and its cap, which is documented in `docs/ABI.md` and
+// `docs/REGISTRY_INVARIANTS.md`.
+
+#[test]
+fn test_limit_zero_defaults_across_export_entrypoints() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    register_n_isolated(&env, &contract_id, 21);
+
+    // Admin cursor export: 21 records, default page of 20.
+    let (first_count, first_cursor, first_total) = env.as_contract(&contract_id, || {
+        let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 0).unwrap();
+        assert_eq!(page.records.len(), 20);
+        assert!(page.has_more);
+        assert!(page.next_cursor.is_some());
+        (page.records.len(), page.next_cursor, page.total)
+    });
+    assert_eq!(first_total, 21);
+
+    // Same default on the permissionless cursor export.
+    env.as_contract(&contract_id, || {
+        let page = TrustBridgeContract::get_public_paginated(env.clone(), None, 0).unwrap();
+        assert_eq!(page.records.len(), first_count);
+        assert_eq!(page.total, first_total);
+        assert!(page.has_more);
+    });
+
+    // Signed export attestation wraps the same `limit = 0` page.
+    env.as_contract(&contract_id, || {
+        let attestation = TrustBridgeContract::export_attestation(env.clone(), None, 0).unwrap();
+        assert_eq!(attestation.page.records.len(), first_count);
+        assert_eq!(attestation.page.total, first_total);
+        assert_eq!(attestation.version.len(), 3);
+    });
+
+    // Legacy offset export also defaults zero to 20.
+    env.as_contract(&contract_id, || {
+        let page = TrustBridgeContract::get_registered_page(env.clone(), 0, 0).unwrap();
+        assert_eq!(page.len(), 20);
+    });
+
+    // Continuing with the issued cursor and `limit = 0` returns the last
+    // record without error.
+    env.as_contract(&contract_id, || {
+        let page =
+            TrustBridgeContract::get_registered_paginated(env.clone(), first_cursor, 0).unwrap();
+        assert_eq!(page.records.len(), 1);
+        assert!(!page.has_more);
+        assert!(page.next_cursor.is_none());
+    });
+    let _ = admin;
+}
+
+#[test]
+fn test_limit_zero_defaults_pending_reverify_and_role_holder_cap() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    register_n_isolated(&env, &contract_id, 21);
+
+    // Flag the first and last records for re-verification. `limit = 0`
+    // scans only the first 20 index entries, so the boundary case is
+    // observable when the caller advances to offset 20.
+    flag_reverify(&env, &contract_id, &admin, "user000");
+    flag_reverify(&env, &contract_id, &admin, "user020");
+
+    env.as_contract(&contract_id, || {
+        let first = TrustBridgeContract::get_pending_reverify(env.clone(), 0, 0).unwrap();
+        assert_eq!(
+            first,
+            Vec::from_array(&env, [s(&env, "user000")]),
+            "limit = 0 must scan DEFAULT_PAGE_LIMIT (20) entries"
+        );
+        let second = TrustBridgeContract::get_pending_reverify(env.clone(), 20, 0).unwrap();
+        assert_eq!(second, Vec::from_array(&env, [s(&env, "user020")]));
+    });
+
+    // Documented mismatch: role enumeration does NOT share
+    // DEFAULT_PAGE_LIMIT; `0` means MAX_ROLE_PAGE_LIMIT (50).
+    env.as_contract(&contract_id, || {
+        let holders = TrustBridgeContract::get_role_holders(env.clone(), 0, 0);
+        assert_eq!(
+            holders.len(),
+            1,
+            "only the admin holds a role in this fixture"
+        );
+    });
+}
+
+#[test]
+fn test_limit_zero_failure_paths_reject_stale_cursor_and_bad_config() {
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 4);
+    });
+
+    // A `limit = 0` cursor is still subject to generation validation.
+    let stale_cursor = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_public_paginated(env.clone(), None, 2)
+            .unwrap()
+            .next_cursor
+            .unwrap()
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "user000")).unwrap();
+    });
+    assert_eq!(
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_public_paginated(env.clone(), Some(stale_cursor.clone()), 0)
+        }),
+        Err(ContractError::InvalidCursor)
+    );
+    assert_eq!(
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_registered_paginated(env.clone(), Some(stale_cursor), 0)
+        }),
+        Err(ContractError::InvalidCursor)
+    );
+
+    // `0` is the default, but an over-cap limit is still a typed error on
+    // the offset-based pending-reverify path.
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::get_pending_reverify(env.clone(), 0, 101),
+            Err(ContractError::InvalidBatchSize)
+        );
+    });
+
+    // Defaulting does not bypass the initialization guard.
+    let uninitialized = Env::default();
+    let uninitialized_id = uninitialized.register(TrustBridgeContract, ());
+    uninitialized.as_contract(&uninitialized_id, || {
+        assert_eq!(
+            TrustBridgeContract::get_public_paginated(uninitialized.clone(), None, 0),
+            Err(ContractError::NotInitialized)
+        );
+        assert_eq!(
+            TrustBridgeContract::get_pending_reverify(uninitialized.clone(), 0, 0),
             Err(ContractError::NotInitialized)
         );
     });
