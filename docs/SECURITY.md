@@ -227,14 +227,16 @@ Recommendations:
 The attestation flow (`attest_upgrade` → `upgrade`) is optionally enforceable
 on-chain via `set_attestation_required(true)`.
 
+The table below describes the single-admin `upgrade` path:
+
 | `attestation_required` | No attestation published | Attestation matches | Expired / mismatch |
 |------------------------|--------------------------|--------------------|--------------------|
 | `false` (default) | Upgrade proceeds (unattested) | Upgrade proceeds (attested) | `AttestationExpired` / `UnattestedWasm` |
-| `true` | `AttestationRequired` (code 20) | Upgrade proceeds (attested) | `AttestationExpired` / `UnattestedWasm` |
+| `true` | `AttestationRequired` (code 29) | Upgrade proceeds (attested) | `AttestationExpired` / `UnattestedWasm` |
 
 Setting `required = true` means:
 - A hot admin key cannot swap the WASM binary in a single step — it must first publish the hash via `attest_upgrade`, wait for watchers, then call `upgrade` with the same hash.
-- Clearing attestation (`clear_attestation`) and then calling `upgrade` fails with `AttestationRequired`.
+- Clearing attestation (`clear_attestation`) does not disable the policy; calling either upgrade path without an attestation fails with `AttestationRequired`.
 - The cooldown still applies independently.
 
 The `get_attestation_required()` read (no auth) exposes the current config
@@ -242,6 +244,14 @@ for monitoring and client-side enforcement; `set_attestation_required(caller,
 required)` is admin-only and recorded in `tests/auth_matrix.csv` alongside
 every other setter/getter pair, including an explicit unauthorized-caller
 negative row (Issue #790).
+
+The flag defaults to `false`, and its admin setter remains available while
+paused. The regular `upgrade` path checks the attestation's hash and expiry;
+multisig execution currently checks only that an attestation record exists,
+not that its hash matches the proposal or that it is unexpired. Clearing the
+record does not disable the flag. Wave operators must not treat this flag alone
+as proof that a multisig proposal matches an active attestation; independently
+verify the proposal hash and attestation before approving or executing it.
 
 **Threat scenarios:**
 - *Compromised admin key attempts silent upgrade*: `upgrade` fails with `AttestationRequired` unless an attestation for that exact hash was published first (observable on-chain by watchers).

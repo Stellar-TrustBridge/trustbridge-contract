@@ -2488,11 +2488,15 @@ a fresh off-chain GitHub identity check after an address change. See
 
 ### `set_attestation_required(caller: Address, required: bool) -> Result<(), ContractError>`
 
-Configures whether a published attestation is mandatory before `upgrade`.
+Configures whether a published attestation is mandatory before `upgrade` and
+multisig `execute_upgrade`.
 
-When `required = true`, `upgrade` fails with `AttestationRequired` (code 20)
-if no valid attestation is published. When `required = false` (default),
-unattested upgrades are allowed and provenance notes them as such.
+When `required = true`, the upgrade paths fail with `AttestationRequired`
+(code 29) if no attestation record is present. `upgrade` additionally checks
+that the attestation hash matches and has not expired; multisig
+`execute_upgrade` currently checks only that a record is present. When
+`required = false` (default), unattested upgrades are allowed and provenance
+notes them as such.
 
 | | |
 |---|---|
@@ -2502,9 +2506,13 @@ unattested upgrades are allowed and provenance notes them as such.
 
 **Since:** added in Issue #198. Existing deployments default to `false`.
 
+The policy may be changed while paused. Clearing a pending attestation does
+not change the policy; disable it explicitly with `required = false`.
+
 ### `get_attestation_required() -> bool`
 
-Returns whether WASM attestation is required before upgrade. Defaults to `false`.
+Returns whether WASM attestation is required before `upgrade` and multisig
+`execute_upgrade`. Defaults to `false`.
 
 | | |
 |---|---|

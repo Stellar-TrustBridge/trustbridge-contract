@@ -524,11 +524,15 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 
 ```bash
 stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
-  -- set_attestation_required --required true
+  -- set_attestation_required --caller "$ADMIN" --required true
 ```
 
-- **Auth:** admin only. When `true`, `upgrade` without a live matching
-  attestation fails `AttestationRequired` (code 20). Default `false`.
+- **Auth:** admin only. When `true`, an upgrade without an attestation record
+  fails `AttestationRequired` (code 29). The regular `upgrade` path also checks
+  the hash and expiry. Default `false`; available while paused. Clearing an
+  attestation does not disable the flag. Multisig execution checks for a record
+  but does not validate its hash or expiry; verify the proposal and attestation
+  separately before approving or executing.
 
 #### `attest_upgrade` — declare the next hash in advance
 
