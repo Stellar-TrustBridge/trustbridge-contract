@@ -578,6 +578,47 @@ RPC or infra rather than contract state. Re-sync cached registry views when
 probe cadence, error semantics and alert thresholds:
 [CONTRACT_HEALTH.md → Choosing a probe & alert SLOs](CONTRACT_HEALTH.md#choosing-a-probe--alert-slos-issue-756).
 
+### Cursor restart after an index generation bump
+
+An index-generation bump is the registry-index equivalent of a desynchronization
+signal. It happens after a successful removal (including batch removals and
+challenge/completion removals) and after a rename removes the old index entry;
+it **does not** cause a separate `IndexGenerationBumpedEvent` to be emitted.
+Observe it by polling `get_health_probes().index_gen` and by comparing the
+post-removal value with the last probe value. A stale paginated-export cursor
+then fails with `ContractError::InvalidCursor` (`invalid cursor`) instead of
+being allowed to resume at a shifted offset.
+
+Operators and dashboards must follow this exact recovery sequence:
+
+1. **Pause writes to the export mirror.** Stop issuing or retaining
+   `get_registered_paginated` / `get_public_paginated` cursors; do not retry the
+   same `cursor` and `limit` pair after an observed bump.
+2. **Record the new generation.** Read `get_health_probes().index_gen` again
+   after the removal transaction has reached finality and save
+   `old_index_gen -> new_index_gen` in the operator/recovery log.
+3. **Drop the contract pagination cursor.** Delete the persisted
+   `next_cursor`/page-position for the affected dashboard or indexer run. Do
+   not also reset a valid Horizon/RPC event cursor unless it is pruned or
+   rejected: event delivery is independent and the same event is replay-safe.
+4. **Restart pages from `None`** (the CLI represents this as no `--cursor`,
+   or `cursor: null` in a JSON-RPC client). Fetch pages with the same bounded
+   `limit`, and replace or upsert each returned `(username, record)` row.
+5. **Commit the cursor only after the page is applied.** Persist
+   `page.next_cursor`/`has_more` together with the database transaction, then
+   repeat until `has_more == false` and `next_cursor == null`.
+6. **Verify removal event fields.** For every `removed_event`, confirm the
+   first topic is `github_username`, and verify the data fields
+   `stellar_address`, `timestamp`, and `domain`. Apply it idempotently by
+   deleting/tombstoning that username. A missing or malformed required field
+   is an ingestion failure; do not silently mark the registry fully resynced.
+
+If a stale cursor is used, restart at `cursor = None` immediately; replaying
+the registry page is safe because the restart upserts complete records and
+separately applied `RemovedEvent` deliveries delete/tombstone the same username.
+Do not call an empty result or a short first page proof of completion—trust
+`has_more` and `next_cursor`, and continue to the final empty tail state.
+
 ## Event topic classification (Issue #399)
 
 `scripts/event_indexer.sh` is the reference indexer for this guide. Beyond

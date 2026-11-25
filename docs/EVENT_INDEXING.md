@@ -140,6 +140,35 @@ Restarting the indexer mid-batch is always safe:
 - Removing the cursor forces a full re-scan; removing `seen-*.txt` only widens the
   dedup window slightly at the overlap.
 
+### Contract index-generation restart (dashboard cursor)
+
+The `cursor-<network>.json` above is the Horizon/RPC event-stream cursor and is
+**not** the opaque `get_registered_paginated` / `get_public_paginated` cursor.
+Never delete the Horizon cursor merely because `index_gen` changed. Registry
+pagination has a separate recovery procedure:
+
+1. Poll `get_health_probes().index_gen`. A change means a successful removal
+   shifted the flat index; this bump has no on-chain event.
+2. Stop the page walk and discard every saved `next_cursor` issued under the
+   old generation. A resume attempt returns `ContractError::InvalidCursor`
+   (`invalid cursor`) rather than a deliberately drifted page.
+3. Restart export pagination with `cursor = None` (no CLI `--cursor` or JSON
+   `cursor: null`). Apply each result as an upsert of the complete
+   `(username, record)` pair and commit the database state plus that page's
+   `next_cursor` atomically.
+4. Continue until `has_more == false` and `next_cursor == null`. A short page
+   alone is not proof of completion.
+5. Keep processing `removed_event` deliveries independently and idempotently:
+   topic 0 must be `removed_event`, topic 1 must be `github_username`, and data
+   fields must include `stellar_address`, `timestamp`, and `domain`. Delete or
+   tombstone the username. Replays are safe and out-of-order deliveries must
+   be ordered by ledger, transaction, and event position as described in
+   [DASHBOARD_SYNC.md](DASHBOARD_SYNC.md).
+
+This is also the recovery after stale-cursor failures and is safe while the
+contract is paused. Public and admin page cursors are interchangeable, but both
+must restart from `None` after a generation change.
+
 ---
 
 ## Topic Classification

@@ -1002,8 +1002,11 @@ pub fn remove_from_index(env: &Env, github_username: &String) {
 // ── Opaque pagination cursors (Issue #215) ───────────────────────────────────
 
 /// Current index generation. Bumped by [`remove_from_index`] every time an
-/// existing entry's position could shift. Instance-scoped, defaulting to `0`
-/// for a fresh or pre-Issue-#215 instance.
+/// existing entry's position could shift (removal, batch removal, challenge
+/// completion, or rename removal). Instance-scoped, defaulting to `0` for a
+/// fresh or pre-Issue-#215 instance. There is intentionally no
+/// `IndexGenerationBumpedEvent`; dashboards detect this change with
+/// `get_health_probes().index_gen` and discard contract pagination cursors.
 pub fn get_index_generation(env: &Env) -> u32 {
     env.storage().instance().get(&INDEX_GEN_KEY).unwrap_or(0)
 }
@@ -2997,7 +3000,9 @@ mod pending_reverify_tests {
         env.as_contract(&contract_id, || {
             let default_page = get_pending_reverify_page(&env, 0, 0).unwrap();
             assert_eq!(default_page.len(), 3);
-            assert!(get_pending_reverify_page(&env, u32::MAX, 1).unwrap().is_empty());
+            assert!(get_pending_reverify_page(&env, u32::MAX, 1)
+                .unwrap()
+                .is_empty());
             assert_eq!(
                 get_pending_reverify_page(&env, 0, MAX_PAGE_LIMIT + 1),
                 Err(ContractError::InvalidBatchSize)
