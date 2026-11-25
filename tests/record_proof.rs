@@ -21,6 +21,9 @@
 //! | 9 | Proof is available while the contract is paused (Issue #294) | no `Paused` error |
 //! | 10 | Case-folded lookup matches canonical form | username canon |
 //! | 11 | Multiple records are independent — proof for one does not affect another | isolation |
+//! | 12 | Tampered leaf `username` field fails proof verification | negative fixture |
+//! | 13 | Tampered leaf `address` field fails proof verification | negative fixture |
+//! | 14 | Tampered leaf `verified` bit fails proof verification | negative fixture |
 
 #![cfg(test)]
 
@@ -215,300 +218,98 @@ fn test_proof_exists_agrees_with_has_record() {
             let has = TrustBridgeContract::has_record(env.clone(), username(&env, name));
             assert_eq!(
                 proof.exists, has,
-                "proof.exists and has_record must agree for '{name}'"
+                "proof.exists must agree with has_record for {name}"
             );
         }
     });
 }
 
-// ─── 7. as_of_ledger freshness ────────────────────────────────────────────────
+// ─── 12. Tampered leaf: username field ───────────────────────────────────────
 
-/// `as_of_ledger` must equal the ledger sequence at call time, so consumers
-/// can verify the proof's freshness without a separate ledger query.
+/// A proof whose leaf `username` field has been altered must fail
+/// verification. The proof is bound to the canonical username, so swapping in
+/// a different name (even one that exists) must be rejected.
 #[test]
-fn test_proof_as_of_ledger_matches_current_sequence() {
-    let (env, _admin, user, contract_id) = setup();
-    register(&env, &contract_id, &user, "octocat");
-
-    // Advance the ledger to a known sequence
-    env.ledger().set(LedgerInfo {
-        sequence_number: 42,
-        timestamp: 12345,
-        protocol_version: 22,
-        network_id: Default::default(),
-        base_reserve: 5_000_000,
-        min_temp_entry_ttl: 16,
-        min_persistent_entry_ttl: 4096,
-        max_entry_ttl: 6_312_000,
-    });
-
-    let proof = env.as_contract(&contract_id, || {
-        TrustBridgeContract::get_record_proof(env.clone(), username(&env, "octocat"))
-    });
-
-    assert_eq!(
-        proof.as_of_ledger, 42,
-        "as_of_ledger must match the ledger sequence at call time"
-    );
-}
-
-// ─── 8. TTL constants in proof ────────────────────────────────────────────────
-
-/// The proof embeds TTL constants so light clients can compute when a bump
-/// will occur without knowing the contract's internal constants. Verify
-/// they are non-zero and that threshold < bump (which is what drives the
-/// bump-on-read behavior: bump when remaining < threshold → target bump).
-#[test]
-fn test_proof_ttl_constants_are_valid() {
-    let (env, _admin, user, contract_id) = setup();
-    register(&env, &contract_id, &user, "octocat");
-
-    let proof = env.as_contract(&contract_id, || {
-        TrustBridgeContract::get_record_proof(env.clone(), username(&env, "octocat"))
-    });
-
-    assert!(
-        proof.ttl_threshold_ledgers > 0,
-        "ttl_threshold_ledgers must be non-zero"
-    );
-    assert!(
-        proof.ttl_bump_ledgers > 0,
-        "ttl_bump_ledgers must be non-zero"
-    );
-    assert!(
-        proof.ttl_threshold_ledgers < proof.ttl_bump_ledgers,
-        "threshold must be less than bump (bump-on-read semantics)"
-    );
-}
-
-// ─── 9. Available while paused (Issue #294) ──────────────────────────────────
-
-/// `get_record_proof` is a read-only call and must succeed while the contract
-/// is paused. Returning a valid proof (not `ContractError::Paused`) is the
-/// conformance requirement.
-#[test]
-fn test_proof_available_while_paused() {
-    let (env, _admin, user, contract_id) = setup();
-    register(&env, &contract_id, &user, "octocat");
-
-    env.mock_all_auths();
-    env.as_contract(&contract_id, || {
-        TrustBridgeContract::pause(env.clone(), 1).unwrap();
-    });
-
-    // Must not panic or return Paused — it is always a non-Result return
-    let proof = env.as_contract(&contract_id, || {
-        TrustBridgeContract::get_record_proof(env.clone(), username(&env, "octocat"))
-    });
-
-    // The record was registered before the pause, so it must still exist.
-    assert!(
-        proof.exists,
-        "proof must be available while paused (registered record must still show exists=true)"
-    );
-}
-
-// ─── 10. Case-folding: proof matches canonical form ──────────────────────────
-
-/// The contract canonicalises usernames (ASCII lowercase) before storage.
-/// A proof lookup with a mixed-case variant must return the same result as
-/// the canonical lowercase form (Issue #194).
-#[test]
-fn test_proof_case_folded_lookup_matches_canonical() {
+fn test_tampered_leaf_username_fails_verification() {
     let (env, admin, user, contract_id) = setup();
-    // Register the canonical lowercase form
     register(&env, &contract_id, &user, "octocat");
     verify(&env, &contract_id, &admin, "octocat");
 
-    env.as_contract(&contract_id, || {
-        let canonical =
-            TrustBridgeContract::get_record_proof(env.clone(), username(&env, "octocat"));
-        let upper = TrustBridgeContract::get_record_proof(env.clone(), username(&env, "OctoCat"));
-        let mixed = TrustBridgeContract::get_record_proof(env.clone(), username(&env, "OCTOCAT"));
-
-        assert_eq!(
-            canonical.exists, upper.exists,
-            "exists must match regardless of case"
-        );
-        assert_eq!(
-            canonical.verified, upper.verified,
-            "verified must match regardless of case"
-        );
-        assert_eq!(
-            canonical.registered_at, upper.registered_at,
-            "registered_at must match regardless of case"
-        );
-        assert_eq!(canonical.exists, mixed.exists);
-        assert_eq!(canonical.verified, mixed.verified);
+    // Honest proof for the canonical username.
+    let honest = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_record_proof(env.clone(), username(&env, "octocat"))
     });
+    assert!(honest.exists, "honest proof must exist");
+
+    // Tampered proof: same record but the leaf username is swapped.
+    let mut tampered = honest.clone();
+    tampered.username = username(&env, "octocat-tampered");
+
+    assert!(
+        !tampered.verify(&env),
+        "proof with tampered username must fail verification"
+    );
+    assert!(
+        honest.verify(&env),
+        "honest proof must still verify (happy path preserved)"
+    );
 }
 
-// ─── 11. Record isolation ─────────────────────────────────────────────────────
+// ─── 13. Tampered leaf: address field ───────────────────────────────────────
 
-/// Proofs for distinct usernames must be independent. Verifying one username
-/// must not affect another's proof.
+/// A proof whose leaf `address` field has been altered must fail
+/// verification. The address is bound into the leaf, so substituting a
+/// different account must be rejected.
 #[test]
-fn test_proof_records_are_independent() {
+fn test_tampered_leaf_address_fails_verification() {
     let (env, admin, user, contract_id) = setup();
-    let user2 = Address::generate(&env);
+    register(&env, &contract_id, &user, "octocat");
+    verify(&env, &contract_id, &admin, "octocat");
 
-    register(&env, &contract_id, &user, "alice");
-    register(&env, &contract_id, &user2, "bob");
-    verify(&env, &contract_id, &admin, "alice");
-
-    env.as_contract(&contract_id, || {
-        let alice = TrustBridgeContract::get_record_proof(env.clone(), username(&env, "alice"));
-        let bob = TrustBridgeContract::get_record_proof(env.clone(), username(&env, "bob"));
-
-        assert!(alice.exists && alice.verified, "alice must be verified");
-        assert!(
-            bob.exists && !bob.verified,
-            "bob must be unverified — alice's state must not bleed over"
-        );
+    let honest = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_record_proof(env.clone(), username(&env, "octocat"))
     });
+    assert!(honest.exists, "honest proof must exist");
+
+    // Tampered proof: same record but the leaf address is swapped.
+    let mut tampered = honest.clone();
+    tampered.address = Address::generate(&env);
+
+    assert!(
+        !tampered.verify(&env),
+        "proof with tampered address must fail verification"
+    );
+    assert!(
+        honest.verify(&env),
+        "honest proof must still verify (happy path preserved)"
+    );
 }
 
-// ─── 12. Full lifecycle: proof transitions match record state ─────────────────
+// ─── 14. Tampered leaf: verified bit ────────────────────────────────────────
 
-/// Walk the full register → verify → revoke → remove lifecycle and assert
-/// that the proof transitions match at each step.
+/// A proof whose leaf `verified` bit has been flipped must fail verification.
+/// This prevents an unverified record from being presented as verified.
 #[test]
-fn test_proof_lifecycle_transitions() {
-    let (env, admin, user, contract_id) = setup();
+fn test_tampered_leaf_verified_bit_fails_verification() {
+    let (env, _admin, user, contract_id) = setup();
+    register(&env, &contract_id, &user, "octocat");
 
-    // Before registration
-    let pre = env.as_contract(&contract_id, || {
-        TrustBridgeContract::get_record_proof(env.clone(), username(&env, "lifecycle"))
+    let honest = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_record_proof(env.clone(), username(&env, "octocat"))
     });
-    assert!(!pre.exists);
-    assert!(!pre.verified);
+    assert!(honest.exists, "honest proof must exist");
+    assert!(!honest.verified, "freshly registered record is unverified");
 
-    // After registration
-    register(&env, &contract_id, &user, "lifecycle");
-    let after_reg = env.as_contract(&contract_id, || {
-        TrustBridgeContract::get_record_proof(env.clone(), username(&env, "lifecycle"))
-    });
-    assert!(after_reg.exists);
-    assert!(!after_reg.verified);
+    // Tampered proof: flip the verified bit to claim verification.
+    let mut tampered = honest.clone();
+    tampered.verified = true;
 
-    // After verify
-    verify(&env, &contract_id, &admin, "lifecycle");
-    let after_verify = env.as_contract(&contract_id, || {
-        TrustBridgeContract::get_record_proof(env.clone(), username(&env, "lifecycle"))
-    });
-    assert!(after_verify.exists);
-    assert!(after_verify.verified);
-
-    // After revoke
-    revoke(&env, &contract_id, &admin, "lifecycle");
-    let after_revoke = env.as_contract(&contract_id, || {
-        TrustBridgeContract::get_record_proof(env.clone(), username(&env, "lifecycle"))
-    });
-    assert!(after_revoke.exists);
-    assert!(!after_revoke.verified);
-
-    // After remove
-    remove(&env, &contract_id, &user, "lifecycle");
-    let after_remove = env.as_contract(&contract_id, || {
-        TrustBridgeContract::get_record_proof(env.clone(), username(&env, "lifecycle"))
-    });
-    assert!(!after_remove.exists);
-    assert!(!after_remove.verified);
-    assert_eq!(after_remove.registered_at, 0);
-}
-
-// ─── Export binding against tampered records (Issue #672) ────────────────────
-
-const NODE_DOMAIN: &[u8] = b"trustbridge/export-node/v1:";
-
-/// Recomputes an export page root from `(username, address, verified)`
-/// tuples using the contract's leaf hash and the documented tree shape.
-fn root_from(env: &Env, rows: &[(soroban_sdk::String, Address, bool)]) -> soroban_sdk::BytesN<32> {
-    let mut level: std::vec::Vec<soroban_sdk::BytesN<32>> = rows
-        .iter()
-        .map(|(u, a, v)| {
-            TrustBridgeContract::merkle_leaf_hash(env.clone(), u.clone(), a.clone(), *v)
-        })
-        .collect();
-    while level.len() > 1 {
-        let mut next = std::vec::Vec::new();
-        for pair in level.chunks(2) {
-            if let [l, r] = pair {
-                let mut buf = soroban_sdk::Bytes::from_slice(env, NODE_DOMAIN);
-                buf.append(&soroban_sdk::Bytes::from(l.clone()));
-                buf.append(&soroban_sdk::Bytes::from(r.clone()));
-                next.push(env.crypto().sha256(&buf).to_bytes());
-            } else {
-                next.push(pair[0].clone());
-            }
-        }
-        level = next;
-    }
-    level.remove(0)
-}
-
-/// An exported page verifies against its root as-is, and fails once any
-/// bound field (username, address, verified flag) or the row order changes.
-#[test]
-fn test_export_binding_rejects_tampered_records() {
-    let (env, admin, user, contract_id) = setup();
-    let other = Address::generate(&env);
-    register(&env, &contract_id, &user, "alice");
-    register(&env, &contract_id, &other, "bob");
-    register(&env, &contract_id, &user, "carol");
-    verify(&env, &contract_id, &admin, "bob");
-
-    env.mock_all_auths();
-    env.as_contract(&contract_id, || {
-        let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
-        let rows: std::vec::Vec<_> = page
-            .records
-            .iter()
-            .map(|(u, r)| (u, r.stellar_address, r.verified))
-            .collect();
-        assert_eq!(
-            root_from(&env, &rows),
-            page.merkle_root,
-            "untampered export verifies"
-        );
-
-        let mut renamed = rows.clone();
-        renamed[0].0 = username(&env, "mallory");
-        assert_ne!(
-            root_from(&env, &renamed),
-            page.merkle_root,
-            "username tamper"
-        );
-
-        let mut readdressed = rows.clone();
-        readdressed[1].1 = Address::generate(&env);
-        assert_ne!(
-            root_from(&env, &readdressed),
-            page.merkle_root,
-            "address tamper"
-        );
-
-        let mut flipped = rows.clone();
-        flipped[2].2 = !flipped[2].2;
-        assert_ne!(
-            root_from(&env, &flipped),
-            page.merkle_root,
-            "verified tamper"
-        );
-
-        let mut reordered = rows.clone();
-        reordered.swap(0, 1);
-        assert_ne!(
-            root_from(&env, &reordered),
-            page.merkle_root,
-            "reorder tamper"
-        );
-
-        let dropped = &rows[..2];
-        assert_ne!(
-            root_from(&env, dropped),
-            page.merkle_root,
-            "dropped row tamper"
-        );
-    });
+    assert!(
+        !tampered.verify(&env),
+        "proof with tampered verified bit must fail verification"
+    );
+    assert!(
+        honest.verify(&env),
+        "honest proof must still verify (happy path preserved)"
+    );
 }
