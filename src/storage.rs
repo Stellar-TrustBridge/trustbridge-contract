@@ -1427,6 +1427,11 @@ pub fn clear_pending_reverify(env: &Env, github_username: &String) {
 /// Returns the usernames flagged for re-verification among index entries
 /// `[offset, offset + limit)` (Issue #587).
 ///
+/// The scan checks at most the effective limit of index entries, but loads
+/// the legacy flat index, whose footprint grows with the registry. A page
+/// may contain fewer matches than the limit. Advance by the effective limit
+/// (20 when `limit == 0`), not by the number of matches.
+
 /// Exposed on the contract ABI as `TrustBridgeContract::get_pending_reverify`.
 /// The scan visits at most `limit` index entries (so work per call stays
 /// bounded, though `get_index_page` deserializes the flat `INDEX_KEY` on each
@@ -2859,6 +2864,8 @@ pub fn repair_index(env: &Env, apply: bool) -> RepairReport {
 
 #[cfg(test)]
 mod pending_reverify_tests {
+    extern crate std;
+
     use super::*;
     use crate::TrustBridgeContract;
     use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
@@ -3024,6 +3031,97 @@ mod pending_reverify_tests {
             assert!(!env.storage().persistent().has(&key));
         });
     }
+
+    /// Measure the public read, excluding fixture construction. The flat index
+    /// is populated directly to isolate scan cost from registration writes.
+    #[test]
+    fn test_bench_pending_reverify_scan_budget() {
+        for size in [100u32, 500, 1000] {
+            let env = Env::default();
+            let contract_id = setup(&env);
+            env.cost_estimate().budget().reset_unlimited();
+            env.as_contract(&contract_id, || {
+                let mut index = Vec::new(&env);
+                for i in 0..size {
+                    let username = String::from_str(&env, &alloc::format!("user{i:035}"));
+                    index.push_back(username.clone());
+                    set_pending_reverify(&env, &username, true);
+                }
+                set_index(&env, &index);
+            });
+
+            for limit in [20u32, 50, 100] {
+                // Include a late window as well as the first page.
+                for offset in [0, size - limit] {
+                    env.cost_estimate().budget().reset_default();
+                    let page = env.as_contract(&contract_id, || {
+                        TrustBridgeContract::get_pending_reverify(env.clone(), offset, limit)
+                            .unwrap()
+                    });
+                    let budget = env.cost_estimate().budget();
+                    let cpu = budget.cpu_instruction_cost();
+                    let mem = budget.memory_bytes_cost();
+                    std::println!(
+                        "pending_reverify size={size} offset={offset} limit={limit} cpu={cpu} memory={mem}"
+                    );
+                    assert_eq!(page.len(), limit);
+                    assert!(cpu > 0 && mem > 0);
+                    assert!(cpu <= 25_000_000, "scan CPU exceeds headroom budget");
+                    assert!(mem <= 3_000_000, "scan memory exceeds headroom budget");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_pending_reverify_scan_sparse_windows() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        env.as_contract(&contract_id, || {
+            let mut index = Vec::new(&env);
+            for i in 0..45 {
+                let username = String::from_str(&env, &alloc::format!("user{i}"));
+                index.push_back(username.clone());
+                if i == 42 {
+                    set_pending_reverify(&env, &username, true);
+                }
+            }
+            set_index(&env, &index);
+            assert!(get_pending_reverify_page(&env, 0, 0).unwrap().is_empty());
+            assert!(get_pending_reverify_page(&env, 20, 20).unwrap().is_empty());
+            let tail = get_pending_reverify_page(&env, 40, 20).unwrap();
+            assert_eq!(tail.len(), 1);
+            assert_eq!(tail.get(0), Some(name(&env, "user42")));
+            assert_eq!(get_pending_reverify_page(&env, 40, 20).unwrap(), tail);
+        });
+    }
+
+    #[test]
+    fn test_pending_reverify_scan_uninitialized() {
+        let env = Env::default();
+        let contract_id = env.register(TrustBridgeContract, ());
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_pending_reverify(env.clone(), 0, 20),
+                Err(ContractError::NotInitialized)
+            );
+        });
+    }
+
+    #[test]
+    fn test_pending_reverify_scan_rejects_oversized_limit() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        register_flagged(&env, &contract_id, "alice", &Address::generate(&env));
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::get_pending_reverify(env.clone(), u32::MAX, 101),
+                Err(ContractError::InvalidBatchSize)
+            );
+            assert!(get_pending_reverify_page(&env, u32::MAX, 20)
+                .unwrap()
+                .is_empty());
+            assert_eq!(get_pending_reverify_page(&env, 0, 20).unwrap().len(), 1);
 
     /// limit == 0 selects DEFAULT_PAGE_LIMIT (20), not an unbounded scan.
     /// Registering DEFAULT_PAGE_LIMIT + 5 flagged users proves the default
