@@ -102,6 +102,38 @@ records, and substituting the private address invalidates that root. Existing
 same-window parity tests cover windows whose exported records match. A consumer
 must use the root from the same API and returned page it is verifying.
 
+### Mid-export reverify flag changes and Wave audit restart requirement
+
+`src/merkle.rs` encodes each leaf from `(github_username, stellar_address,
+verified)` and deliberately excludes `PENDING_REVERIFY_KEY` (`pend_rev`) and
+`ContributorRecord::is_bot`. During a multi-page export (`get_registered_paginated`,
+`get_public_paginated`, or `export_attestation`):
+
+- **Per-page root validity holds:** In-place verification and reverify transitions
+  (`register` / `register_sponsored` address change setting `pend_rev = true` and
+  `verified = false`, `execute_address_rotation`, `verify`, `batch_verify`,
+  `verify_with_oracle_proof`, `revoke_verification`) do **not** bump
+  `INDEX_GEN_KEY` (`idx_gen`). In-flight cursors continue to decode, and each
+  returned `ExportPage::merkle_root` accurately commits to that page's returned
+  `records` as of the ledger at which that page was read.
+- **Torn multi-page audits and stale proofs fail:** Because paginated reads are
+  not snapshot-isolated across multiple ledgers, flipping a record's `verified`
+  or `stellar_address` state mid-export invalidates prior proofs for that record
+  and causes a stitched multi-page export (`page1 ++ page2`) to diverge from a
+  single-shot snapshot root if an already-exported page changed before the walk
+  completed.
+- **Restart requirement for Wave audits:** Any whole-registry Wave audit must
+  either pause writes (`pause` / `set_paused`) for the export window or detect
+  mid-export drift (`get_last_event_ledger()`, `get_stats()`, or
+  `export_attestation().ledger` advancing) and **restart from `cursor = None`**.
+  Index-shifting operations (`remove`, `batch_remove`, `complete_challenge`, and
+  `rename` migrating `pend_rev`) bump `INDEX_GEN_KEY` and enforce restart directly
+  with `ContractError::InvalidCursor` (code `52`).
+
+Covered by `tests/merkle_export.rs` (`test_mid_export_reverify_flag_flip_*`,
+`test_stale_pre_reverify_proof_fails_against_post_reverify_page_root`, and
+`test_mid_export_rename_with_reverify_flag_invalidates_cursor_forcing_restart`).
+
 ### Challenge-period operations preserve count invariants (Issue #214)
 
 The squatter-challenge flow (`start_challenge`, `cancel_challenge`,
