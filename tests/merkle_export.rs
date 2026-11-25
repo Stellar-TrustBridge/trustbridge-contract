@@ -1056,3 +1056,436 @@ fn test_proof_for_wrong_index_fails_verification() {
         &root
     ));
 }
+
+// ── Mid-export reverify flag flips & Wave audit restart semantics ────────────
+
+fn page_to_leaves(
+    env: &Env,
+    records: &SVec<(String, ContributorRecord)>,
+) -> SVec<BytesN<32>> {
+    let mut leaves: SVec<BytesN<32>> = SVec::new(env);
+    for (username, record) in records.iter() {
+        leaves.push_back(leaf_hash(
+            env,
+            &username,
+            &record.stellar_address,
+            record.verified,
+        ));
+    }
+    leaves
+}
+
+/// Happy path: when a reverify flag flips between pages on a later (unfetched)
+/// record, the in-flight cursor remains valid, each page's `merkle_root`
+/// commits accurately to that page's returned records, and restarting from
+/// `cursor = None` matches a single-shot snapshot.
+#[test]
+fn test_mid_export_reverify_flag_flip_preserves_per_page_roots_and_cursor_continuity() {
+    let (env, admin, contract_id) = setup();
+    let names = ["alice", "bob", "carol", "dave"];
+    let addrs: Vec<Address> = names.iter().map(|_| Address::generate(&env)).collect();
+    let carol_new_addr = Address::generate(&env);
+
+    env.mock_all_auths();
+    for (name, addr) in names.iter().zip(addrs.iter()) {
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, name),
+                addr.clone(),
+                SVec::new(&env),
+            )
+            .unwrap();
+        });
+    }
+    for verified_name in ["alice", "carol"] {
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, verified_name))
+                .unwrap();
+        });
+    }
+
+    // Export page 1 (alice, bob) before any reverify flip.
+    let page1_admin = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 2).unwrap()
+    });
+    let page1_public = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_public_paginated(env.clone(), None, 2).unwrap()
+    });
+    assert_eq!(page1_admin.records.len(), 2);
+    assert!(page1_admin.has_more);
+    assert_eq!(
+        page1_admin.merkle_root,
+        independent_root_of_records(&env, &page1_admin.records)
+    );
+    assert_eq!(
+        page1_public.merkle_root,
+        independent_root_of_records(&env, &page1_public.records)
+    );
+
+    // Mid-export: carol (on page 2) changes address -> sets pending_reverify = true,
+    // clears verified = false. dave (on page 2) becomes verified.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "carol"),
+            carol_new_addr.clone(),
+            SVec::new(&env),
+        )
+        .unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "dave")).unwrap();
+    });
+    let pending = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_pending_reverify(env.clone(), 0, 10).unwrap()
+    });
+    assert_eq!(pending, SVec::from_array(&env, [s(&env, "carol")]));
+
+    // Resuming page 2 with the pre-flip cursor succeeds and commits to the
+    // updated records on both admin and public endpoints.
+    let page2_admin = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(
+            env.clone(),
+            page1_admin.next_cursor.clone(),
+            2,
+        )
+        .unwrap()
+    });
+    let page2_public = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_public_paginated(
+            env.clone(),
+            page1_public.next_cursor.clone(),
+            2,
+        )
+        .unwrap()
+    });
+    assert_eq!(page2_admin.records.len(), 2);
+    assert!(!page2_admin.has_more);
+    assert_eq!(
+        page2_admin.merkle_root,
+        independent_root_of_records(&env, &page2_admin.records)
+    );
+    assert_eq!(
+        page2_public.merkle_root,
+        independent_root_of_records(&env, &page2_public.records)
+    );
+
+    // Inclusion proof for carol's new unverified state verifies against page 2's root.
+    let page2_leaves = page_to_leaves(&env, &page2_admin.records);
+    let carol_proof = build_proof(&env, &page2_leaves, 0);
+    let (carol_name, carol_rec) = page2_admin.records.get(0).unwrap();
+    assert_eq!(carol_name, s(&env, "carol"));
+    assert_eq!(carol_rec.stellar_address, carol_new_addr);
+    assert!(!carol_rec.verified);
+    assert!(verify_proof(
+        &env,
+        &page2_leaves.get(0).unwrap(),
+        &carol_proof,
+        &page2_admin.merkle_root
+    ));
+
+    // Public export redacts carol's new unverified address to the zero address.
+    let zero_addr = Address::from_str(
+        &env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+    let (_, carol_pub_rec) = page2_public.records.get(0).unwrap();
+    assert_eq!(carol_pub_rec.stellar_address, zero_addr);
+    assert!(!carol_pub_rec.verified);
+
+    // Restarting from cursor = None matches a single-shot snapshot.
+    let restarted_p1 = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 2).unwrap()
+    });
+    let restarted_p2 = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(
+            env.clone(),
+            restarted_p1.next_cursor.clone(),
+            2,
+        )
+        .unwrap()
+    });
+    let single_shot = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap()
+    });
+    let mut restarted_all = SVec::new(&env);
+    for entry in restarted_p1.records.iter() {
+        restarted_all.push_back(entry);
+    }
+    for entry in restarted_p2.records.iter() {
+        restarted_all.push_back(entry);
+    }
+    assert_eq!(
+        independent_root_of_records(&env, &restarted_all),
+        single_shot.merkle_root
+    );
+}
+
+/// Failure path 1: if an already-exported page (page 1) undergoes a reverify
+/// flag flip before page 2 is read, the stitched export mixes pre-flip and
+/// post-flip epochs and fails to match either single-shot snapshot root until
+/// the operator restarts from `cursor = None`.
+#[test]
+fn test_mid_export_reverify_flip_on_earlier_page_invalidates_stitched_wave_audit() {
+    let (env, admin, contract_id) = setup();
+    let names = ["alice", "bob", "carol", "dave"];
+    let addrs: Vec<Address> = names.iter().map(|_| Address::generate(&env)).collect();
+    let alice_new_addr = Address::generate(&env);
+
+    env.mock_all_auths();
+    for (name, addr) in names.iter().zip(addrs.iter()) {
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, name),
+                addr.clone(),
+                SVec::new(&env),
+            )
+            .unwrap();
+        });
+    }
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
+    });
+
+    let pre_snapshot = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap()
+    });
+
+    // Read page 1 (alice is verified = true at old address).
+    let page1 = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 2).unwrap()
+    });
+
+    // Mid-export: alice (already exported on page 1) re-registers to a new
+    // address, setting pending_reverify = true and verified = false. Also dave
+    // (page 2) is verified.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "alice"),
+            alice_new_addr,
+            SVec::new(&env),
+        )
+        .unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "dave")).unwrap();
+    });
+
+    let page2 = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), page1.next_cursor.clone(), 2)
+            .unwrap()
+    });
+
+    // Per-page roots are still self-consistent for their own pages.
+    assert_eq!(
+        page1.merkle_root,
+        independent_root_of_records(&env, &page1.records)
+    );
+    assert_eq!(
+        page2.merkle_root,
+        independent_root_of_records(&env, &page2.records)
+    );
+
+    // Stitching page 1 (pre-flip) + page 2 (post-flip) produces a torn
+    // mixed-epoch root that matches neither the pre-flip nor post-flip snapshot.
+    let post_snapshot = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap()
+    });
+    let mut torn_records = SVec::new(&env);
+    for entry in page1.records.iter() {
+        torn_records.push_back(entry);
+    }
+    for entry in page2.records.iter() {
+        torn_records.push_back(entry);
+    }
+    let torn_root = independent_root_of_records(&env, &torn_records);
+    assert_ne!(
+        torn_root, pre_snapshot.merkle_root,
+        "torn mixed-epoch export must not match pre-flip snapshot root"
+    );
+    assert_ne!(
+        torn_root, post_snapshot.merkle_root,
+        "torn mixed-epoch export must not match post-flip snapshot root; restart from cursor = None"
+    );
+}
+
+/// Failure path 2: a pre-flip inclusion proof (verified = true at old address)
+/// fails verification against the post-flip page root once reverify is flagged,
+/// and a stale unverified leaf fails once `verify` clears the flag.
+#[test]
+fn test_stale_pre_reverify_proof_fails_against_post_reverify_page_root() {
+    let (env, admin, contract_id) = setup();
+    let old_addr = Address::generate(&env);
+    let new_addr = Address::generate(&env);
+    let bob_addr = Address::generate(&env);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "alice"),
+            old_addr.clone(),
+            SVec::new(&env),
+        )
+        .unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "bob"),
+            bob_addr.clone(),
+            SVec::new(&env),
+        )
+        .unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
+    });
+
+    let pre_page = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap()
+    });
+    let pre_leaves = page_to_leaves(&env, &pre_page.records);
+    let pre_proof_for_alice = build_proof(&env, &pre_leaves, 0);
+    let pre_alice_leaf = pre_leaves.get(0).unwrap();
+    assert!(verify_proof(
+        &env,
+        &pre_alice_leaf,
+        &pre_proof_for_alice,
+        &pre_page.merkle_root
+    ));
+
+    // Flip into pending-reverify state via address change.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "alice"),
+            new_addr.clone(),
+            SVec::new(&env),
+        )
+        .unwrap();
+    });
+    let pending_page = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap()
+    });
+
+    // Old leaf + old proof fails against the pending-reverify page root, and
+    // asserting verified=true with the new address also fails.
+    assert!(
+        !verify_proof(
+            &env,
+            &pre_alice_leaf,
+            &pre_proof_for_alice,
+            &pending_page.merkle_root
+        ),
+        "pre-reverify leaf must fail against post-reverify page root"
+    );
+    let pending_leaves = page_to_leaves(&env, &pending_page.records);
+    let pending_proof = build_proof(&env, &pending_leaves, 0);
+    let forged_verified_leaf = leaf_hash(&env, &s(&env, "alice"), &new_addr, true);
+    assert!(
+        !verify_proof(
+            &env,
+            &forged_verified_leaf,
+            &pending_proof,
+            &pending_page.merkle_root
+        ),
+        "forged verified=true leaf must fail while pending_reverify is active"
+    );
+
+    // Re-verifying clears pending_reverify; stale verified=false leaf must fail
+    // against the post-verify root.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
+    });
+    let reverified_page = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap()
+    });
+    assert!(
+        !verify_proof(
+            &env,
+            &pending_leaves.get(0).unwrap(),
+            &pending_proof,
+            &reverified_page.merkle_root
+        ),
+        "stale verified=false leaf must fail after verify clears pending_reverify"
+    );
+}
+
+/// Failure path 3: `rename` migrates an outstanding `pending_reverify` flag and
+/// shifts the index, bumping `INDEX_GEN_KEY` so resuming with an in-flight
+/// cursor fails with `ContractError::InvalidCursor` and forces restart from
+/// `cursor = None`.
+#[test]
+fn test_mid_export_rename_with_reverify_flag_invalidates_cursor_forcing_restart() {
+    let (env, admin, contract_id) = setup();
+    let a1 = Address::generate(&env);
+    let a1_new = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let a3 = Address::generate(&env);
+
+    env.mock_all_auths();
+    for (name, addr) in [("alice", &a1), ("bob", &a2), ("carol", &a3)] {
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, name),
+                addr.clone(),
+                SVec::new(&env),
+            )
+            .unwrap();
+        });
+    }
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "alice"),
+            a1_new.clone(),
+            SVec::new(&env),
+        )
+        .unwrap();
+    });
+
+    let page1 = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 2).unwrap()
+    });
+    assert!(page1.has_more);
+    let stale_cursor = page1.next_cursor.clone().unwrap();
+
+    // Rename migrates alice's pending_reverify flag to alice_new and removes the
+    // old username from the index, bumping INDEX_GEN_KEY.
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::rename(
+            env.clone(),
+            a1_new.clone(),
+            s(&env, "alice"),
+            s(&env, "alice_new"),
+        )
+        .unwrap();
+    });
+
+    let resume_res = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), Some(stale_cursor), 2)
+    });
+    assert_eq!(resume_res, Err(ContractError::InvalidCursor));
+
+    // Restarting from cursor = None succeeds and reflects the migrated flag and new root.
+    let restarted = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap()
+    });
+    assert_eq!(restarted.records.len(), 3);
+    assert_eq!(
+        restarted.merkle_root,
+        independent_root_of_records(&env, &restarted.records)
+    );
+    let pending = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_pending_reverify(env.clone(), 0, 10).unwrap()
+    });
+    assert_eq!(pending, SVec::from_array(&env, [s(&env, "alice_new")]));
+}

@@ -16,6 +16,9 @@
 //!
 //! ```text
 //! proposer (admin or Upgrader) → propose_multisig_upgrade(wasm_hash, delay_secs)
+//!                                  (fails with `AttestationRequired` before
+//!                                   writing any state when the attestation
+//!                                   policy is on but unmet, Issue #851)
 //!                                                ↓ UpgradeProposedEvent
 //!     any signer (admin / Upgrader, distinct from previous approvers)
 //!         → approve_upgrade(proposal_id)          ↓ UpgradeApprovedEvent
@@ -179,6 +182,8 @@ pub fn clear_upgrade_proposal(env: &Env) {
 ///
 /// # Errors
 ///
+/// - [`ContractError::AttestationRequired`] when the attestation policy is on
+///   and no attestation is present (Issue #851); nothing is written.
 /// - [`ContractError::UpgradeProposalAlreadyPending`] if a proposal is already
 ///   live (cancel or execute it first).
 pub fn create_upgrade_proposal(
@@ -187,6 +192,10 @@ pub fn create_upgrade_proposal(
     wasm_hash: BytesN<32>,
     delay_secs: u64,
 ) -> Result<UpgradeProposal, ContractError> {
+    // Fail closed before allocating an ID or writing the live proposal:
+    // when the attestation policy is on, even proposing an upgrade requires
+    // a valid attestation (Issue #851). No partial state is left behind.
+    crate::storage::require_attestation_if_required(env)?;
     if get_upgrade_proposal(env).is_some() {
         return Err(ContractError::UpgradeProposalAlreadyPending);
     }

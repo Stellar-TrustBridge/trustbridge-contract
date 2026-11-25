@@ -27,6 +27,7 @@
 #![cfg(test)]
 
 use soroban_sdk::{
+    symbol_short,
     testutils::{Address as _, Ledger as _, MockAuth, MockAuthInvoke},
     vec, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
 };
@@ -529,6 +530,10 @@ fn plan(fx: &Fixture, op: &str, caller: &Address) -> Call {
         "get_reserved_list" => call("get_reserved_list", vec![env]),
         "compact_index" => call("compact_index", vec![env]),
         "repair_index" => call("repair_index", vec![env, false.into_val(env)]),
+        "get_pending_reverify" => call(
+            "get_pending_reverify",
+            vec![env, 0u32.into_val(env), 10u32.into_val(env)],
+        ),
         "get_registered_page" => call(
             "get_registered_page",
             vec![env, 0u32.into_val(env), 10u32.into_val(env)],
@@ -675,6 +680,50 @@ fn auth_matrix_csv_rows_all_pass() {
         rows.len(),
         failures.join("\n")
     );
+}
+
+#[test]
+fn get_pending_reverify_page_is_public_and_lists_flagged_names() {
+    let fx = Fixture::new();
+    let env = &fx.env;
+    // Set the flag directly so the read is exercised with a non-empty page.
+    env.as_contract(&fx.contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&(symbol_short!("pend_rev"), fx.s("octocat")), &true);
+    });
+    let page = env
+        .as_contract(&fx.contract_id, || {
+            TrustBridgeContract::get_pending_reverify(env.clone(), 0, 10)
+        })
+        .unwrap();
+    assert!(
+        page.iter().any(|name| name == fx.s("octocat")),
+        "public page must include the flagged username"
+    );
+}
+
+#[test]
+fn get_pending_reverify_rejects_oversized_limit_without_auth() {
+    let env = Env::default();
+    let id = env.register(TrustBridgeContract, ());
+    env.as_contract(&id, || {
+        TrustBridgeContract::initialize(env.clone(), Address::generate(&env)).unwrap();
+    });
+    let result = env.as_contract(&id, || {
+        TrustBridgeContract::get_pending_reverify(env.clone(), 0, 101)
+    });
+    assert!(matches!(result, Err(ContractError::InvalidBatchSize)));
+}
+
+#[test]
+fn get_pending_reverify_fails_closed_when_uninitialized() {
+    let env = Env::default();
+    let id = env.register(TrustBridgeContract, ());
+    let result = env.as_contract(&id, || {
+        TrustBridgeContract::get_pending_reverify(env.clone(), 0, 10)
+    });
+    assert!(matches!(result, Err(ContractError::NotInitialized)));
 }
 
 /// Runs one row; returns a failure line citing the CSV line on mismatch or panic.

@@ -1,4 +1,9 @@
 #![no_std]
+//! Public contract entrypoints are the `#[contractimpl]` methods below plus
+//! the items re-exported here. After a module split, refresh the public golden
+//! with `python3 scripts/generate_abi_json.py --update-entrypoints-golden`;
+//! `pub(crate)` helpers stay module-internal and are not ABI surfaces
+//! (Issue #771). See docs/ABI.md § Module-split exports.
 
 mod audit;
 mod batch;
@@ -66,7 +71,8 @@ pub use storage::{
     ChallengeRecord, ContributorRecord, ExportAttestation, ExportPage, HealthProbes,
     HealthSnapshot, PauseReason, PendingBatchRemove, PendingRoleGrant, PendingRotation,
     RecordProof, RepairReport, Role, RoleHolder, Stats, VerificationConfig, VerifierAllowEntry,
-    WasmAttestation, WasmProvenance, MAX_FALLBACK_ADDRESSES, MAX_VERIFIERS,
+    WasmAttestation, WasmProvenance, MAX_AUDIT_LOG_ENTRIES, MAX_FALLBACK_ADDRESSES, MAX_VERIFIERS,
+    LAST_UPG_KEY,
 };
 pub use version::Version;
 
@@ -672,12 +678,15 @@ impl TrustBridgeContract {
     }
 
     /// The pending (not yet active) role grant for `target`, if any.
+    /// `activate_at` is the earliest activation time, not an expiry timestamp.
+    /// A queued grant does not confer privileges or extend an active role's expiry.
     #[must_use]
     pub fn get_pending_role(env: Env, target: Address) -> Option<PendingRoleGrant> {
         storage_get_pending_role(&env, &target)
     }
 
-    /// Applies a pending role grant once its timelock has elapsed. Admin-only.
+    /// Applies a pending role grant at or after `activate_at`. Admin-only.
+    /// There is no automatic timestamp-based expiry of a queued grant.
     ///
     /// Emits [`RoleGrantedEvent`] — the same event an instant grant emits, so
     /// indexers do not need a second code path for the activated role.
@@ -726,7 +735,8 @@ impl TrustBridgeContract {
         Ok(())
     }
 
-    /// Drops a pending role grant before it activates. Admin-only.
+    /// Drops a pending role grant that has not been explicitly activated. Admin-only.
+    /// Cancellation remains available after the timelock elapses and while paused.
     ///
     /// Emits [`RoleGrantCancelledEvent`].
     ///
@@ -1342,6 +1352,11 @@ impl TrustBridgeContract {
     /// Defaults to `false` on instances that have never explicitly set the flag.
     /// Dashboards and operator tooling can read this to show the current gate
     /// configuration without needing admin credentials.
+    ///
+    /// Pair with [`Self::get_health`]'s `attestation_present`, which reports only
+    /// whether an unexpired attestation exists. `required=true` with
+    /// `attestation_present=false` is the fail-closed divergence documented in
+    /// `docs/CONTRACT_HEALTH.md` (Issue #848).
     #[must_use]
     pub fn get_attestation_required(env: Env) -> bool {
         crate::storage::is_attestation_required(&env)
@@ -1875,6 +1890,7 @@ impl TrustBridgeContract {
     /// - [`ContractError::NoUpgradeProposalPending`] if no proposal exists.
     /// - [`ContractError::UpgradeProposalDelayActive`] if delay has not elapsed.
     /// - [`ContractError::UpgradeProposalInsufficientApprovals`] if threshold not met.
+    /// - [`ContractError::CooldownActive`] if the configured upgrade cooldown has not elapsed.
     /// - [`ContractError::StagedWasmMismatch`] if a staged hash conflicts.
     pub fn execute_upgrade(
         env: Env,
@@ -1906,6 +1922,7 @@ impl TrustBridgeContract {
         crate::staged_wasm::require_staged_wasm_consistent(&env, &proposal.wasm_hash)?;
 
         let now = env.ledger().timestamp();
+        Self::require_cooldown_elapsed(&env, now)?;
 
         // Capture provenance before the swap (same policy as `upgrade`).
         let previous_wasm_hash = get_wasm_provenance(&env).map(|p| p.wasm_hash);
@@ -2472,6 +2489,9 @@ impl TrustBridgeContract {
             return Err(ContractError::ChallengeActive);
         }
 
+        // Cross-contract auth boundary: require_auth binds this address, not a
+        // caller-supplied identity or sibling-contract context. Keep registration
+        // fail-closed here instead of adding a trusted-relayer allowlist.
         stellar_address.require_auth();
 
         // Validate fallback address list size and require auth on each.
@@ -3396,7 +3416,11 @@ impl TrustBridgeContract {
     ///
     /// Unaffected by the normal pause flag, matching
     /// `get_registered_paginated` / `get_all_registered`: admin export and
-    /// audit tooling stays available during a maintenance window.
+    /// audit tooling stays available during a maintenance window. Pending
+    /// re-verification flags (`PENDING_REVERIFY_KEY`) are advisory per-username
+    /// markers, not `ExportPage` fields: a flagged record does not block this
+    /// read or change its digest except via normal record-field changes
+    /// (Issue #864).
     ///
     /// # Auth
     ///
@@ -3476,13 +3500,26 @@ impl TrustBridgeContract {
     /// canonical usernames whose `PENDING_REVERIFY_KEY` flag is set. Gas is
     /// bounded by `limit`, so a page can hold fewer than `limit` names; keep
     /// advancing `offset` by `limit` until it reaches `get_stats().total`.
-    /// `limit == 0` uses `DEFAULT_PAGE_LIMIT`. An empty registry returns an
-    /// empty page. Read-only, no auth required.
+    /// `limit == 0` uses `DEFAULT_PAGE_LIMIT` (`20`). An empty registry or an
+    /// `offset >= total` returns an empty page (never `InvalidCursor`).
+    /// Read-only, no auth required, and available while paused. The usernames
+    /// are public by design (no Stellar addresses are returned); dashboards
+    /// must follow the redaction policy in `docs/SECURITY.md` (Issue #860).
+    /// See also `docs/SECURITY.md#pending-reverify-page-authorization-issue-846`
+    /// and the signer-class rows in `tests/auth_matrix.csv`.
     ///
     /// # Errors
     ///
-    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
-    /// - [`ContractError::InvalidBatchSize`] if `limit > MAX_PAGE_LIMIT` (100).
+    /// - [`ContractError::NotInitialized`] (code `2`, `Fatal`) if `initialize`
+    ///   has not been called.
+    /// - [`ContractError::InvalidBatchSize`] (code `14`, `Fatal`) if
+    ///   `limit > MAX_PAGE_LIMIT` (`100`).
+    /// - [`ContractError::NetworkMismatch`] (code `30`, `Fatal`) if the
+    ///   stored network tag differs from the executing ledger's network ID.
+    ///
+    /// Operator note (Issue #853): flagged users stay in the registry index and
+    /// in every paginated export walk; this endpoint only projects the flag,
+    /// so Wave parity checks remain valid while users are pending reverify.
     pub fn get_pending_reverify(
         env: Env,
         offset: u32,
@@ -3692,7 +3729,8 @@ impl TrustBridgeContract {
     ///   its message does not bind this username/address/expiry.
     /// - [`ContractError::OracleProofNotAllowlisted`] if the signing key is not
     ///   allowlisted (always, when the allowlist is empty).
-    /// - [`ContractError::OracleProofExpired`] if `expires_at` is non-zero and past.
+    /// - [`ContractError::OracleProofExpired`] if ledger time exceeds non-zero
+    ///   `expires_at` by more than 30 seconds.
     /// - [`ContractError::OracleProofBadSignature`] if the signature is not
     ///   canonically encoded; an invalid but well-formed signature traps.
     /// - [`ContractError::AlreadyVerified`] if the record is verified and that
@@ -4395,6 +4433,8 @@ impl TrustBridgeContract {
     ///
     /// For uptime/alerting prefer [`get_health_probes`](Self::get_health_probes),
     /// which never errors; see `docs/CONTRACT_HEALTH.md` (probe SLOs, Issue #756).
+    /// Alert on `attestation_present` together with `get_attestation_required`:
+    /// the former tracks only expiry, not policy (Issue #848).
     ///
     /// # Errors
     ///
@@ -4411,8 +4451,12 @@ impl TrustBridgeContract {
         let now = env.ledger().timestamp();
         let cooldown_remaining_secs = if cooldown_secs > 0 {
             let last_upg = get_last_upgrade(&env);
-            let next_allowed = last_upg.saturating_add(cooldown_secs);
-            next_allowed.saturating_sub(now)
+            if last_upg == 0 {
+                0
+            } else {
+                let next_allowed = last_upg.saturating_add(cooldown_secs);
+                next_allowed.saturating_sub(now)
+            }
         } else {
             0
         };

@@ -420,9 +420,19 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   single invocation** — there is no partial state where only one counter
   gets fixed; Soroban commits all of an invocation's storage writes or none
   of it. A call that finds no drift is a no-op even with `apply = true`.
+- **Unauthorized callers:** `repair_index` authenticates with
+  `admin.require_auth()` and has no extra caller argument. A non-admin signer
+  or an unsigned call is trapped by the Soroban host before contract code
+  runs, so no `UnauthorizedAttempt` audit entry is written and the counters
+  are untouched. See [SECURITY.md § Index Repair](SECURITY.md#index-repair-repair_index)
+  for why an on-chain audit signal is not available here (Issue #801).
+- **Pending re-verify flags are untouched.** `repair_index` only rewrites
+  `count` / `verified`; it never clears a `PENDING_REVERIFY_KEY` flag. After an
+  index repair, still page through `get_pending_reverify(offset, limit)` and
+  clear flags only with `verify` / `batch_verify`.
 - See [SECURITY.md § Index Repair](SECURITY.md#index-repair-repair_index)
-  for the full atomicity and dry-run-write guarantees, and
-  `tests/repair_index.rs` for the automated proof.
+  for the full atomicity, dry-run-write, and pending-flag guarantees, and
+  `tests/repair_index.rs` for the automated proof (`cargo test --test repair_index`).
 
 #### `set_bot_status` — flag / unflag a CI account
 
@@ -468,8 +478,9 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 The externally callable ABI functions are `stage_wasm`, `get_staged`,
 and `clear_staged`. In particular, `commit_staged_wasm` is **not** an
 exported function; `clear_staged_wasm` is only an internal Rust storage
-helper. See [ABI staged WASM entrypoints](ABI.md#staged-wasm-entrypoints-issue-594)
-and [staged-slot security](SECURITY.md#staged-wasm-slot-issue-300).
+helper. See [ABI staged WASM entrypoints](ABI.md#staged-wasm-entrypoints-issue-594),
+[staged-slot security](SECURITY.md#staged-wasm-slot-issue-300), and
+[malicious-hash threat model](SECURITY.md#staged-wasm-malicious-hash-threat-model-issue-804).
 
 The hash below is the 32-byte hex WASM hash returned by
 `stellar contract install`. `CONTRACT_ID`, `NETWORK`, and `ADMIN`
@@ -494,7 +505,10 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 ```
 
 Staging is advisory: absent a staged hash, ordinary upgrade rules still
-apply. When a hash is staged, `execute_upgrade` must use that hash.
+apply. When a hash is staged, `execute_upgrade` must use that hash. A
+non-admin `clear_staged` attempt fails with `NotAuthorized` and, under the
+default audit config, records an `UnauthorizedAttempt` entry with details
+`"clear_staged"`; the staged hash is not cleared (Issue #812).
 `clear_staged` is idempotent and does not emit a clearing event for an
 already-empty slot. These are separate calls, not a
 `commit_staged_wasm` operation. The upgrade itself follows the
@@ -516,18 +530,45 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   -- set_cooldown --cooldown-seconds 86400      # 0 disables the timelock
 ```
 
-- **Auth:** admin only. A non-zero cooldown makes `upgrade` fail
+- **Auth:** admin only. A non-zero cooldown makes both single-admin `upgrade` and multisig `execute_upgrade` fail
   `CooldownActive` until the interval since the last upgrade elapses.
 
 #### `set_attestation_required` — require pre-declared hashes
 
 ```bash
 stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
-  -- set_attestation_required --required true
+  -- set_attestation_required --caller "$ADMIN" --required true
 ```
 
-- **Auth:** admin only. When `true`, `upgrade` without a live matching
-  attestation fails `AttestationRequired` (code 20). Default `false`.
+- **Auth:** admin only. When `true`, an upgrade without an attestation record
+  fails `AttestationRequired` (code 29). The regular `upgrade` path also checks
+  the hash and expiry. Default `false`; available while paused. Clearing an
+  attestation does not disable the flag. Multisig execution checks for a record
+  but does not validate its hash or expiry; verify the proposal and attestation
+  separately before approving or executing.
+- **Alerting:** check this flag alongside `get_health().attestation_present`.
+  `required=true` with `attestation_present=false` means upgrades are blocked
+  until a fresh `attest_upgrade`; see
+  [CONTRACT_HEALTH.md § Attestation divergence alert mapping](CONTRACT_HEALTH.md#attestation-divergence-alert-mapping-issue-848).
+  Do not clear the flag to silence the page.
+
+**Enablement checklist (do not flip the gate mid-Wave without all of these):**
+
+1. **Stage/attest flow:** install the new WASM and record its hex SHA-256;
+   call `stage_wasm --wasm-hash "$HASH"`, then `attest_upgrade` with an
+   `expires_at` covering the whole upgrade window. Confirm both with
+   `get_staged` / `get_attestation` before proceeding.
+2. **Monitor:** watch `upgrade` failures for `AttestationRequired` (20),
+   `UnattestedWasm`, `AttestationExpired`, and `StagedWasmMismatch` during the
+   window; confirm the staged hash equals the attested hash and that
+   `get_attestation_required` reads `true` after the flip.
+3. **Disable criteria:** if the hash is wrong, the attestation expires, or the
+   upgrade does not verify within the window, call
+   `set_attestation_required --required false` (or `clear_attestation` and
+   re-attest) while paused, then re-run the checklist. Flipping the gate
+   without a live attestation bricks upgrades.
+
+The checklist is enforced by `cargo test --test attestation_enablement_docs`.
 
 #### `attest_upgrade` — declare the next hash in advance
 
@@ -658,6 +699,7 @@ Gotchas:
 - Execute fails with `UpgradeProposalDelayActive` while the delay is running and
   `UpgradeProposalInsufficientApprovals` until the threshold is met — both are
   transient, so retrying after more approvals / time is expected.
+- Execute also enforces the upgrade timelock (`set_cooldown`): if a previous upgrade occurred and the cooldown window has not elapsed, `execute_upgrade` fails with `CooldownActive` (code 8). The pending proposal is preserved without corruption or partial state write. Operators can query `get_health` to verify that `cooldown_remaining_secs` decreases monotonically across ledger timestamps towards zero before retrying execution.
 - `set_upgrade_threshold` **fails closed** with `ThresholdExceedsSignerCap`
   (Issue #795) if `--threshold` is greater than `MAX_UPGRADE_SIGNERS` (the
   hard cap on distinct approvers per proposal — currently 20). An impossible
@@ -741,8 +783,11 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   -- get_registered_paginated --cursor 0 --limit 100
 ```
 
-- **Auth:** admin only (read). `limit` clamps to `MAX_PAGE_LIMIT` = 100. Loop
-  until `has_more == false` / `next_cursor == null`.
+- **Auth:** admin only (read). `limit` clamps to `MAX_PAGE_LIMIT` = 100; pass
+  `--limit 0` (or omit it) to use `DEFAULT_PAGE_LIMIT` = 20. Loop until
+  `has_more == false` / `next_cursor == null`. A cursor issued with `limit 0`
+  is validated exactly like any other cursor — after a removal it returns
+  `InvalidCursor`, so restart from `--cursor 0`.
 
 #### `scripts/export_registry.sh` — assembled JSON snapshot
 
@@ -1221,9 +1266,13 @@ make invoke-execute-batch-remove \
 ```
 
 `get_pending_batch_remove` shows what is queued (works while paused). A
-proposal not executed within 24 hours (`BATCH_REMOVE_PROPOSAL_TTL_SECS`) is
-treated as gone the next time anyone calls `execute_batch_remove` — propose
-again if you still need it removed.
+proposal not executed within 24 hours (`BATCH_REMOVE_PROPOSAL_TTL_SECS =
+86_400`) is treated as gone the next time anyone calls
+`execute_batch_remove` — propose again if you still need it removed. The
+boundary is inclusive: at exactly `proposed_at + 24h` the proposal is already
+expired (`NoPendingBatchRemove`) and the slot is cleared; the same timestamp
+allows a fresh `propose_batch_remove` to replace it, while a second proposal
+before the boundary is rejected with `BatchRemoveProposalPending`.
 
 ### 4. Abort instead
 

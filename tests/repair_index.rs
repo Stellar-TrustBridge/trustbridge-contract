@@ -8,12 +8,22 @@
 //! them in lockstep — and then check that a dry run reports the drift
 //! without writing, and that `apply = true` corrects it. See
 //! `docs/SECURITY.md#index-repair-repair_index`.
+//!
+//! Interaction note (Issue #857): `repair_index` deliberately touches only
+//! `count` / `verified`. These tests also set a `PENDING_REVERIFY_KEY` flag
+//! directly in storage and prove it survives dry-run, apply, a rejected
+//! unauthenticated call, and repeated no-op applies — operators must not use
+//! index repair to hide a Wave address-change re-verification risk.
 
 #![cfg(test)]
 
-use soroban_sdk::{symbol_short, testutils::Address as _, Address, Env, String};
+use soroban_sdk::{
+    symbol_short,
+    testutils::{Address as _, MockAuth, MockAuthInvoke},
+    Address, Env, IntoVal, String,
+};
 
-use trustbridge_contract::TrustBridgeContract;
+use trustbridge_contract::{ContractError, TrustBridgeContract, TrustBridgeContractClient};
 
 fn setup() -> (Env, Address, Address, Address) {
     let env = Env::default();
@@ -21,7 +31,9 @@ fn setup() -> (Env, Address, Address, Address) {
     let user1 = Address::generate(&env);
     let contract_id = env.register(TrustBridgeContract, ());
 
-    env.mock_all_auths();
+    // `initialize` has no auth check. Leaving recording auth enabled here
+    // would make the "no signature" tests below pass by accident, so the
+    // fixture deliberately installs no auth mock.
     env.as_contract(&contract_id, || {
         TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
     });
@@ -44,6 +56,110 @@ fn corrupt_counters(env: &Env, contract_id: &Address, count: u32, verified: u32)
             .instance()
             .set(&symbol_short!("vcount"), &verified);
     });
+}
+
+/// Sets a pending re-verify flag exactly as `set_pending_reverify` does,
+/// without going through a public entry point that would clear it.
+fn set_pending_reverify_flag(env: &Env, contract_id: &Address, username: &str) {
+    env.as_contract(contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&(symbol_short!("pend_rev"), s(env, username)), &true);
+    });
+}
+
+fn pending_reverify_flag(env: &Env, contract_id: &Address, username: &str) -> bool {
+    env.as_contract(contract_id, || {
+        env.storage()
+            .persistent()
+            .get::<_, bool>(&(symbol_short!("pend_rev"), s(env, username)))
+            .unwrap_or(false)
+    })
+}
+
+#[test]
+fn test_repair_index_preserves_pending_reverify_flag_across_dry_run_and_apply() {
+    let (env, _admin, user1, contract_id) = setup();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "alice"),
+            user1,
+            soroban_sdk::Vec::new(&env),
+        )
+        .unwrap();
+    });
+    set_pending_reverify_flag(&env, &contract_id, "alice");
+    corrupt_counters(&env, &contract_id, 9, 9);
+
+    env.mock_all_auths();
+    let dry = env.as_contract(&contract_id, || {
+        TrustBridgeContract::repair_index(env.clone(), false).unwrap()
+    });
+    assert!(dry.drifted);
+    assert!(!dry.applied);
+    assert!(pending_reverify_flag(&env, &contract_id, "alice"));
+
+    let applied = env.as_contract(&contract_id, || {
+        TrustBridgeContract::repair_index(env.clone(), true).unwrap()
+    });
+    assert!(applied.applied);
+    assert!(pending_reverify_flag(&env, &contract_id, "alice"));
+    let stats = env.as_contract(&contract_id, || TrustBridgeContract::get_stats(env.clone()));
+    assert_eq!((stats.total, stats.verified), (1, 0));
+}
+
+#[test]
+fn test_repair_index_rejection_leaves_pending_reverify_flag_intact() {
+    let (env, _admin, user1, contract_id) = setup();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "alice"),
+            user1,
+            soroban_sdk::Vec::new(&env),
+        )
+        .unwrap();
+    });
+    set_pending_reverify_flag(&env, &contract_id, "alice");
+    corrupt_counters(&env, &contract_id, 7, 7);
+
+    // Failure path 1: a dry run reports drift but must not repair or clear
+    // the flag (a deliberately non-applying call).
+    env.mock_all_auths();
+    let dry = env.as_contract(&contract_id, || {
+        TrustBridgeContract::repair_index(env.clone(), false).unwrap()
+    });
+    assert!(dry.drifted && !dry.applied);
+    assert!(pending_reverify_flag(&env, &contract_id, "alice"));
+    let stats = env.as_contract(&contract_id, || TrustBridgeContract::get_stats(env.clone()));
+    assert_eq!(
+        (stats.total, stats.verified),
+        (7, 7),
+        "dry run must not write"
+    );
+
+    // Failure path 2: uninitialized contract fails before any write.
+    let fresh = env.register(TrustBridgeContract, ());
+    let err = env.as_contract(&fresh, || {
+        TrustBridgeContract::repair_index(env.clone(), true)
+    });
+    assert!(matches!(err, Err(ContractError::NotInitialized)));
+
+    // A later apply still works after the rejection, and repeated no-op
+    // applies with the flag set are idempotent.
+    env.mock_all_auths();
+    let repair = env.as_contract(&contract_id, || {
+        TrustBridgeContract::repair_index(env.clone(), true).unwrap()
+    });
+    assert!(repair.applied);
+    for _ in 0..2 {
+        let noop = env.as_contract(&contract_id, || {
+            TrustBridgeContract::repair_index(env.clone(), true).unwrap()
+        });
+        assert!(!noop.applied, "no drift must remain a no-op");
+        assert!(pending_reverify_flag(&env, &contract_id, "alice"));
+    }
 }
 
 #[test]
@@ -156,7 +272,13 @@ fn test_repair_index_apply_true_corrects_drifted_counters() {
             soroban_sdk::Vec::new(&env),
         )
         .unwrap();
+    });
+    // Each `verify` needs its own frame under SDK 26 recording auth: two
+    // `admin.require_auth()` calls in one frame fail with Auth/ExistingValue.
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "bob")).unwrap();
     });
 
@@ -282,7 +404,13 @@ fn test_repair_index_apply_is_atomic_per_counter_no_partial_update() {
             soroban_sdk::Vec::new(&env),
         )
         .unwrap();
+    });
+    // Each `verify` needs its own frame under SDK 26 recording auth: two
+    // `admin.require_auth()` calls in one frame fail with Auth/ExistingValue.
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
+    });
+    env.as_contract(&contract_id, || {
         TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "bob")).unwrap();
     });
 
@@ -302,7 +430,10 @@ fn test_repair_index_apply_is_atomic_per_counter_no_partial_update() {
     env.mock_all_auths();
     let stats = env.as_contract(&contract_id, || TrustBridgeContract::get_stats(env.clone()));
     assert_eq!(stats.total, 3, "count must be corrected");
-    assert_eq!(stats.verified, 2, "verified must be corrected in the same apply call");
+    assert_eq!(
+        stats.verified, 2,
+        "verified must be corrected in the same apply call"
+    );
     assert_ne!(
         stats.total, 1,
         "count must not be left at its pre-repair corrupted value"
@@ -328,4 +459,132 @@ fn test_repair_index_requires_admin_auth() {
         result.is_err(),
         "repair_index must panic on missing admin auth, matching every other admin-only call"
     );
+}
+
+// ── Unauthorized caller probes (Issue #801) ───────────────────────────────────
+//
+// `repair_index` keeps its two-argument ABI (`apply` only) and authenticates
+// with `admin.require_auth()`. A non-admin signature therefore fails inside
+// the Soroban host before any contract code runs. That means there is no
+// `NotAuthorized` branch from which we could call
+// `record_unauthorized_attempt`, and the failed transaction rolls back every
+// write. These tests pin that observable behaviour: no counter change, no
+// audit log growth, and no `unauthorized_attempts` increment. See
+// `docs/SECURITY.md#index-repair-repair_index` for the operator-facing note.
+
+fn auth_for(env: &Env, contract_id: &Address, signer: &Address, apply: bool) {
+    env.mock_auths(&[MockAuth {
+        address: signer,
+        invoke: &MockAuthInvoke {
+            contract: contract_id,
+            fn_name: "repair_index",
+            args: (apply,).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+}
+
+#[test]
+fn test_repair_index_non_admin_signer_fails_without_audit_signal() {
+    let (env, admin, user1, contract_id) = setup();
+    let intruder = Address::generate(&env);
+
+    // Build a drifted fixture with the real admin; this uses recording auth
+    // only for the fixture, not for the probe under test.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "alice"),
+            user1.clone(),
+            soroban_sdk::Vec::new(&env),
+        )
+        .unwrap();
+    });
+    corrupt_counters(&env, &contract_id, 99, 99);
+
+    let client = TrustBridgeContractClient::new(&env, &contract_id);
+    let logs_before = client.get_audit_logs();
+    let stats_before = client.get_audit_stats();
+    let counters_before = client.get_stats();
+
+    // Only the intruder signs. `repair_index` requires the admin signature,
+    // so the invocation fails in the host auth check.
+    auth_for(&env, &contract_id, &intruder, false);
+    assert!(
+        client.try_repair_index(&false).is_err(),
+        "a non-admin signer must not be able to repair the index"
+    );
+
+    assert_eq!(client.get_audit_logs(), logs_before);
+    assert_eq!(client.get_audit_stats(), stats_before);
+    let counters_after = client.get_stats();
+    assert_eq!(counters_after.total, counters_before.total);
+    assert_eq!(counters_after.verified, counters_before.verified);
+    assert_eq!(
+        counters_after.total, 99,
+        "the failed probe must not correct the drifted counter"
+    );
+    let _ = admin;
+}
+
+#[test]
+fn test_repair_index_unsigned_call_fails_without_audit_signal() {
+    let (env, _admin, _user1, contract_id) = setup();
+
+    let client = TrustBridgeContractClient::new(&env, &contract_id);
+    let logs_before = client.get_audit_logs();
+    let stats_before = client.get_audit_stats();
+
+    // No auth mock at all: the host rejects the missing signature.
+    assert!(
+        client.try_repair_index(&false).is_err(),
+        "an unsigned repair_index call must fail"
+    );
+
+    assert_eq!(client.get_audit_logs(), logs_before);
+    assert_eq!(client.get_audit_stats(), stats_before);
+    assert_eq!(
+        client.get_audit_stats().unauthorized_attempts,
+        0,
+        "a trapped auth failure cannot persist an audit write"
+    );
+}
+
+#[test]
+fn test_repair_index_admin_signer_applies_without_unauthorized_signal() {
+    let (env, admin, user1, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "alice"),
+            user1.clone(),
+            soroban_sdk::Vec::new(&env),
+        )
+        .unwrap();
+    });
+    corrupt_counters(&env, &contract_id, 0, 1);
+
+    let client = TrustBridgeContractClient::new(&env, &contract_id);
+    let logs_before = client.get_audit_logs();
+    let stats_before = client.get_audit_stats();
+
+    auth_for(&env, &contract_id, &admin, true);
+    let result = client.try_repair_index(&true);
+    assert!(result.is_ok(), "admin signer must be accepted: {result:?}");
+    let report = result.unwrap().unwrap();
+    assert!(report.drifted);
+    assert_eq!(report.recomputed_count, 1);
+    assert_eq!(report.recomputed_verified, 0);
+
+    assert_eq!(client.get_stats().total, 1);
+    assert_eq!(client.get_stats().verified, 0);
+    assert_eq!(
+        client.get_audit_logs(),
+        logs_before,
+        "a successful repair must not append an UnauthorizedAttempt entry"
+    );
+    assert_eq!(client.get_audit_stats(), stats_before);
 }
