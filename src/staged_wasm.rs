@@ -17,6 +17,14 @@
 //! the staged slot first (fail-fast on mismatch), then proceeds to the
 //! attestation check.
 //!
+//! ## Attestation gating (Issue #406)
+//!
+//! Sensitive admin entry points must consistently require attestation when
+//! `attestation_required` is configured.  `require_staged_wasm_consistent`
+//! therefore also enforces the attestation gate (fail-closed) so that any
+//! caller routing through the staged slot cannot bypass the peer-path check.
+//! The gate is a no-op when `attestation_required` is unset.
+//!
 //! ## Storage
 //!
 //! The staged hash is stored in instance storage under `STAGED_WASM_KEY`.
@@ -69,17 +77,26 @@ pub fn clear_staged_wasm(env: &Env) {
 
 // ── Business logic ────────────────────────────────────────────────────────────
 
-/// Validates that `wasm_hash` is consistent with the staged slot.
+/// Validates that `wasm_hash` is consistent with the staged slot **and** that
+/// the attestation gate is satisfied when configured.
 ///
-/// If nothing is staged, the check is a no-op — staging is advisory, not
+/// If nothing is staged, the staged check is a no-op — staging is advisory, not
 /// mandatory (use `set_attestation_required` for a hard gate).  If a hash is
 /// staged, the supplied hash must match; a mismatch fails with
 /// [`ContractError::StagedWasmMismatch`].
+///
+/// Regardless of the staged slot, when `attestation_required` is set the
+/// caller must have a valid, unexpired attestation; otherwise the call fails
+/// closed with [`ContractError::AttestationRequired`].  This unifies the
+/// attestation gate across admin/staged-wasm entry points so no sensitive path
+/// can bypass it.
 ///
 /// # Errors
 ///
 /// - [`ContractError::StagedWasmMismatch`] when a staged hash exists and
 ///   differs from `wasm_hash`.
+/// - [`ContractError::AttestationRequired`] when `attestation_required` is set
+///   and no valid attestation is present.
 pub fn require_staged_wasm_consistent(
     env: &Env,
     wasm_hash: &BytesN<32>,
@@ -89,6 +106,7 @@ pub fn require_staged_wasm_consistent(
             return Err(ContractError::StagedWasmMismatch);
         }
     }
+    crate::storage::require_attestation_if_required(env)?;
     Ok(())
 }
 
@@ -104,12 +122,19 @@ mod tests {
         BytesN::from_array(env, &[byte; 32])
     }
 
+    fn with_contract<T>(env: &Env, f: impl FnOnce() -> T) -> T {
+        let id = env.register(crate::TrustBridgeContract, ());
+        env.as_contract(&id, f)
+    }
+
     /// Nothing staged → consistent with any hash.
     #[test]
     fn test_no_staged_allows_any_hash() {
         let env = Env::default();
         let hash = make_hash(&env, 0xAB);
-        assert!(require_staged_wasm_consistent(&env, &hash).is_ok());
+        with_contract(&env, || {
+            assert!(require_staged_wasm_consistent(&env, &hash).is_ok());
+        });
     }
 
     /// Staged hash matches → ok.
@@ -124,8 +149,10 @@ mod tests {
             staged_by: admin,
             staged_at: env.ledger().timestamp(),
         };
-        set_staged_wasm(&env, &entry);
-        assert!(require_staged_wasm_consistent(&env, &hash).is_ok());
+        with_contract(&env, || {
+            set_staged_wasm(&env, &entry);
+            assert!(require_staged_wasm_consistent(&env, &hash).is_ok());
+        });
     }
 
     /// Staged hash differs → StagedWasmMismatch.
@@ -141,11 +168,13 @@ mod tests {
             staged_by: admin,
             staged_at: env.ledger().timestamp(),
         };
-        set_staged_wasm(&env, &entry);
-        assert_eq!(
-            require_staged_wasm_consistent(&env, &other_hash),
-            Err(ContractError::StagedWasmMismatch)
-        );
+        with_contract(&env, || {
+            set_staged_wasm(&env, &entry);
+            assert_eq!(
+                require_staged_wasm_consistent(&env, &other_hash),
+                Err(ContractError::StagedWasmMismatch)
+            );
+        });
     }
 
     /// clear_staged_wasm removes the slot; subsequent check passes.
@@ -160,13 +189,14 @@ mod tests {
             staged_by: admin,
             staged_at: env.ledger().timestamp(),
         };
-        set_staged_wasm(&env, &entry);
-        assert!(get_staged_wasm(&env).is_some());
-        clear_staged_wasm(&env);
-        assert!(get_staged_wasm(&env).is_none());
-        // After clearing, any hash is accepted.
-        let other = make_hash(&env, 0xFF);
-        assert!(require_staged_wasm_consistent(&env, &other).is_ok());
+        with_contract(&env, || {
+            set_staged_wasm(&env, &entry);
+            assert!(get_staged_wasm(&env).is_some());
+            clear_staged_wasm(&env);
+            assert!(get_staged_wasm(&env).is_none());
+            let other = make_hash(&env, 0xFF);
+            assert!(require_staged_wasm_consistent(&env, &other).is_ok());
+        });
     }
 
     /// Re-staging overwrites the previous entry.
@@ -177,33 +207,37 @@ mod tests {
         let hash_a = make_hash(&env, 0x0A);
         let hash_b = make_hash(&env, 0x0B);
         env.ledger().set_timestamp(3_000);
-        set_staged_wasm(
-            &env,
-            &StagedWasm {
-                wasm_hash: hash_a,
-                staged_by: admin.clone(),
-                staged_at: env.ledger().timestamp(),
-            },
-        );
-        env.ledger().set_timestamp(4_000);
-        set_staged_wasm(
-            &env,
-            &StagedWasm {
-                wasm_hash: hash_b.clone(),
-                staged_by: admin,
-                staged_at: env.ledger().timestamp(),
-            },
-        );
-        let current = get_staged_wasm(&env).unwrap();
-        assert_eq!(current.wasm_hash, hash_b);
-        assert_eq!(current.staged_at, 4_000);
+        with_contract(&env, || {
+            set_staged_wasm(
+                &env,
+                &StagedWasm {
+                    wasm_hash: hash_a,
+                    staged_by: admin.clone(),
+                    staged_at: env.ledger().timestamp(),
+                },
+            );
+            env.ledger().set_timestamp(4_000);
+            set_staged_wasm(
+                &env,
+                &StagedWasm {
+                    wasm_hash: hash_b.clone(),
+                    staged_by: admin,
+                    staged_at: env.ledger().timestamp(),
+                },
+            );
+            let current = get_staged_wasm(&env).unwrap();
+            assert_eq!(current.wasm_hash, hash_b);
+            assert_eq!(current.staged_at, 4_000);
+        });
     }
 
     /// get_staged_wasm returns None when nothing has ever been staged.
     #[test]
     fn test_get_staged_wasm_returns_none_initially() {
         let env = Env::default();
-        assert!(get_staged_wasm(&env).is_none());
+        with_contract(&env, || {
+            assert!(get_staged_wasm(&env).is_none());
+        });
     }
 
     /// The StagedWasm fields round-trip correctly through storage.
@@ -218,10 +252,37 @@ mod tests {
             staged_by: admin.clone(),
             staged_at: 9_999,
         };
-        set_staged_wasm(&env, &entry);
-        let retrieved = get_staged_wasm(&env).unwrap();
-        assert_eq!(retrieved.wasm_hash, hash);
-        assert_eq!(retrieved.staged_by, admin);
-        assert_eq!(retrieved.staged_at, 9_999);
+        with_contract(&env, || {
+            set_staged_wasm(&env, &entry);
+            let retrieved = get_staged_wasm(&env).unwrap();
+            assert_eq!(retrieved.wasm_hash, hash);
+            assert_eq!(retrieved.staged_by, admin);
+            assert_eq!(retrieved.staged_at, 9_999);
+        });
+    }
+
+    /// Attestation required but missing → fail closed (Issue #406).
+    #[test]
+    fn test_attestation_required_fails_closed_when_missing() {
+        let env = Env::default();
+        let hash = make_hash(&env, 0x77);
+        with_contract(&env, || {
+            crate::storage::set_attestation_required(&env, true);
+            assert_eq!(
+                require_staged_wasm_consistent(&env, &hash),
+                Err(ContractError::AttestationRequired)
+            );
+        });
+    }
+
+    /// Attestation not required → gate is a no-op (Issue #406).
+    #[test]
+    fn test_attestation_not_required_allows_call() {
+        let env = Env::default();
+        let hash = make_hash(&env, 0x78);
+        with_contract(&env, || {
+            crate::storage::set_attestation_required(&env, false);
+            assert!(require_staged_wasm_consistent(&env, &hash).is_ok());
+        });
     }
 }

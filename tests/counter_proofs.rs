@@ -107,9 +107,18 @@ fn proof_verify_increments_verified_count() {
     let vcount_before = verified_count(&env, &cid);
 
     // Preconditions
-    assert_eq!(total_before, 1, "P1 precondition: total must be 1 after register");
-    assert_eq!(verified_before, 0, "P1 precondition: verified must be 0 before verify");
-    assert_eq!(vcount_before, 0, "P1 precondition: verified_count must be 0 before verify");
+    assert_eq!(
+        total_before, 1,
+        "P1 precondition: total must be 1 after register"
+    );
+    assert_eq!(
+        verified_before, 0,
+        "P1 precondition: verified must be 0 before verify"
+    );
+    assert_eq!(
+        vcount_before, 0,
+        "P1 precondition: verified_count must be 0 before verify"
+    );
 
     verify(&env, &cid, &admin, "alice");
 
@@ -164,7 +173,10 @@ fn proof_verify_increments_count_by_n() {
             .collect::<std::vec::Vec<_>>();
 
         let (_, verified_before) = stats(&env, &cid);
-        assert_eq!(verified_before, 0, "P1-batch: no verified records before verify loop");
+        assert_eq!(
+            verified_before, 0,
+            "P1-batch: no verified records before verify loop"
+        );
 
         for (name, _) in &names {
             verify(&env, &cid, &admin, name);
@@ -206,7 +218,10 @@ fn proof_remove_decrements_verified_count() {
     // Preconditions
     assert_eq!(total_before, 1, "P2 precondition: total must be 1");
     assert_eq!(verified_before, 1, "P2 precondition: verified must be 1");
-    assert_eq!(vcount_before, 1, "P2 precondition: verified_count must be 1");
+    assert_eq!(
+        vcount_before, 1,
+        "P2 precondition: verified_count must be 1"
+    );
 
     remove(&env, &cid, &user, "bob");
 
@@ -224,10 +239,7 @@ fn proof_remove_decrements_verified_count() {
         vcount_before.saturating_sub(1),
         "P2: get_verified_count() must decrement by exactly 1 on verified remove"
     );
-    assert_eq!(
-        total_after, 0,
-        "P2: total must be 0 after remove"
-    );
+    assert_eq!(total_after, 0, "P2: total must be 0 after remove");
     assert_eq!(
         verified_after, vcount_after,
         "P2: counter parity must hold after remove"
@@ -429,16 +441,19 @@ fn proof_counters_never_underflow() {
         assert_ne!(total, u32::MAX, "P6: total wrapped on remove[{i}]");
         assert_ne!(verified, u32::MAX, "P6: verified wrapped on remove[{i}]");
         assert_eq!(verified, vc, "P6: counter parity broken on remove[{i}]");
-        assert!(
-            verified <= total,
-            "P6: verified > total after remove[{i}]"
-        );
+        assert!(verified <= total, "P6: verified > total after remove[{i}]");
     }
 
     // Final state: both counters must be 0
     let (total_final, verified_final) = stats(&env, &cid);
-    assert_eq!(total_final, 0, "P6: total must be 0 after removing all records");
-    assert_eq!(verified_final, 0, "P6: verified must be 0 after removing all records");
+    assert_eq!(
+        total_final, 0,
+        "P6: total must be 0 after removing all records"
+    );
+    assert_eq!(
+        verified_final, 0,
+        "P6: verified must be 0 after removing all records"
+    );
     assert_eq!(
         verified_count(&env, &cid),
         0,
@@ -464,32 +479,19 @@ fn proof_revoke_decrements_and_is_idempotent() {
     env.mock_all_auths();
     env.as_contract(&cid, || {
         // reason_code 1 = RevokeReason::AdminOverride (or whatever code 1 maps to)
-        TrustBridgeContract::revoke_verification(
-            env.clone(),
-            admin.clone(),
-            s(&env, "eve"),
-            1,
-        )
-        .unwrap();
+        TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "eve"), 1)
+            .unwrap();
     });
 
     let (_, verified_after) = stats(&env, &cid);
     let vc_after = verified_count(&env, &cid);
-    assert_eq!(
-        verified_after, 0,
-        "P7: verified must be 0 after revoke"
-    );
+    assert_eq!(verified_after, 0, "P7: verified must be 0 after revoke");
     assert_eq!(vc_after, 0, "P7: verified_count must be 0 after revoke");
 
     // Second revoke must fail with NotVerified
     env.mock_all_auths();
     let second = env.as_contract(&cid, || {
-        TrustBridgeContract::revoke_verification(
-            env.clone(),
-            admin.clone(),
-            s(&env, "eve"),
-            1,
-        )
+        TrustBridgeContract::revoke_verification(env.clone(), admin.clone(), s(&env, "eve"), 1)
     });
     assert!(second.is_err(), "P7: second revoke must return an error");
     assert_eq!(
@@ -704,4 +706,90 @@ fn proof_failed_flag_and_rotation_paths_leave_counts_unchanged() {
     assert_eq!((st.total, st.verified, st.ever_verified), (1, 1, 1));
     assert!(!client.get_pending_reverify(&s(&env, "ivan")));
     assert!(!client.get_address(&s(&env, "ivan")).unwrap().is_bot);
+// ─── P7/P8: counters match the enumerable index under batch ops (Issue #670) ─
+
+fn index_len(env: &Env, cid: &Address) -> u32 {
+    env.mock_all_auths();
+    env.as_contract(cid, || {
+        TrustBridgeContract::get_all_registered(env.clone())
+            .unwrap()
+            .len()
+    })
+}
+
+fn names(env: &Env, list: &[&str]) -> Vec<String> {
+    let mut v = Vec::new(env);
+    for n in list {
+        v.push_back(s(env, n));
+    }
+    v
+}
+
+/// **P7** — After mixed `batch_verify` / `batch_remove` calls containing
+/// unregistered and duplicate entries, `stats().total` equals the enumerable
+/// index length and `verified` equals the live verified records.
+#[test]
+fn proof_counters_match_index_under_mixed_batches() {
+    let (env, admin, user, cid) = setup();
+    for n in ["a1", "a2", "a3", "a4", "a5"] {
+        register(&env, &cid, &user, n);
+    }
+
+    env.mock_all_auths();
+    env.as_contract(&cid, || {
+        let r = TrustBridgeContract::batch_verify(
+            env.clone(),
+            admin.clone(),
+            names(&env, &["a1", "a2", "a2", "ghost", "a3"]),
+        )
+        .unwrap();
+        assert_eq!(r.successful + r.failed, r.total);
+    });
+    assert_eq!(stats(&env, &cid), (index_len(&env, &cid), 3));
+
+    env.as_contract(&cid, || {
+        let r = TrustBridgeContract::batch_remove(
+            env.clone(),
+            admin.clone(),
+            names(&env, &["a1", "a4", "a4", "ghost"]),
+        )
+        .unwrap();
+        assert_eq!(r.successful, 2);
+    });
+
+    let (total, verified) = stats(&env, &cid);
+    assert_eq!(
+        total,
+        index_len(&env, &cid),
+        "total must equal index length"
+    );
+    assert_eq!(total, 3);
+    assert_eq!(
+        verified, 2,
+        "only the removed verified record is decremented"
+    );
+    assert_eq!(verified, verified_count(&env, &cid));
+}
+
+/// **P8** — A rejected batch (oversized) moves no counter and leaves the
+/// enumerable index untouched.
+#[test]
+fn proof_rejected_batch_moves_no_counter() {
+    let (env, admin, user, cid) = setup();
+    register(&env, &cid, &user, "a1");
+    let before = (stats(&env, &cid), index_len(&env, &cid));
+
+    let mut big = Vec::new(&env);
+    for _ in 0..101 {
+        big.push_back(s(&env, "a1"));
+    }
+    env.mock_all_auths();
+    env.as_contract(&cid, || {
+        assert_eq!(
+            TrustBridgeContract::batch_remove(env.clone(), admin.clone(), big.clone()),
+            Err(ContractError::InvalidBatchSize)
+        );
+    });
+
+    assert_eq!((stats(&env, &cid), index_len(&env, &cid)), before);
 }

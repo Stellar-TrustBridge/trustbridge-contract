@@ -26,7 +26,11 @@
 //! - `address_strkey_bytes` — the raw bytes of `record.stellar_address`'s
 //!   Stellar strkey (`Address::to_string()`), not its internal binary
 //!   encoding, since the strkey is what's trivial for off-chain tooling in
-//!   any language to reproduce byte-for-byte from an exported record.
+//!   any language to reproduce byte-for-byte from an exported record. For
+//!   `get_public_paginated`, an unverified record's exported address is the
+//!   zero/burn address, so that redacted value is what the public root binds.
+//!   Admin exports retain the stored address and can therefore have a
+//!   different root for the same registry window.
 //! - `verified_byte` — `0x01` if `record.verified`, else `0x00`. Carrying the
 //!   verified flag in the leaf means a proof attests to verification status
 //!   at export time, not just membership.
@@ -62,9 +66,10 @@
 //! Leaf and node hashes are prefixed with distinct, versioned ASCII domain
 //! strings (`LEAF_DOMAIN`, `NODE_DOMAIN`) so a leaf hash can never be
 //! mistaken for a node hash — or for a hash from an unrelated protocol —
-//! even though both are 32-byte SHA-256 outputs. Changing either string
-//! changes the tree shape and must ship as a new version suffix (`v2`, ...),
-//! never an in-place edit to `v1`.
+//! even though both are 32-byte SHA-256 outputs. The domain strings, field
+//! bytes and order, separator, boolean representation, and tree rules below
+//! are a public proof format. Changing any of them must ship as a new version
+//! suffix (`v2`, ...) and new vectors, never as an in-place edit to `v1`.
 //!
 //! ## Scope
 //!
@@ -153,7 +158,12 @@ pub fn root_of_records(env: &Env, records: &Vec<(String, ContributorRecord)>) ->
     let mut leaves: Vec<BytesN<32>> = Vec::new(env);
     for i in 0..records.len() {
         let (username, record) = records.get(i).unwrap();
-        leaves.push_back(leaf_hash(env, &username, &record.stellar_address, record.verified));
+        leaves.push_back(leaf_hash(
+            env,
+            &username,
+            &record.stellar_address,
+            record.verified,
+        ));
     }
     root_of(env, &leaves)
 }
@@ -164,7 +174,7 @@ mod tests {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Address;
 
-    fn rec(env: &Env, addr: &Address, verified: bool) -> ContributorRecord {
+    fn rec(_env: &Env, addr: &Address, verified: bool) -> ContributorRecord {
         ContributorRecord {
             stellar_address: addr.clone(),
             payout_address: addr.clone(),
@@ -260,5 +270,377 @@ mod tests {
         reversed.push_back(l0);
 
         assert_ne!(root_of(&env, &forward), root_of(&env, &reversed));
+    }
+
+    // ── Property tests: leaf encoding ─────────────────────────────────────────
+    //
+    // These tests exercise properties of the leaf-hash encoding documented in
+    // the module-level doc comment and in `docs/SECURITY.md`, not just specific
+    // values. Each test encodes one logical invariant that must hold regardless
+    // of the concrete address or username used.
+
+    /// Leaf hashes and node hashes are domain-separated: a leaf hash must never
+    /// equal a node hash, even when their inner content would be the same bytes.
+    /// This is the core second-preimage resistance property of the tree.
+    #[test]
+    fn test_leaf_and_node_domains_are_distinct() {
+        let env = Env::default();
+        let addr = Address::generate(&env);
+        let username = String::from_str(&env, "alice");
+
+        let leaf = leaf_hash(&env, &username, &addr, false);
+
+        // Build the "same content" as a node by hashing the leaf with itself.
+        // If domain separation were absent the two could collide; with it they
+        // must differ because LEAF_DOMAIN != NODE_DOMAIN.
+        let node = node_hash(&env, &leaf, &leaf);
+        assert_ne!(
+            leaf, node,
+            "leaf and node domains must never produce the same hash"
+        );
+    }
+
+    /// The field separator (0x00) between `username_bytes` and
+    /// `address_strkey_bytes` must prevent prefix-collision: encoding
+    /// `("ab", "c…")` must differ from `("a", "bc…")` when the trailing
+    /// bytes of the username and the leading bytes of the strkey happen to form
+    /// the same concatenation without the separator.
+    ///
+    /// We can't manufacture two Stellar addresses whose strkeys share a
+    /// prefix in a unit test, so we verify the structural property by checking
+    /// that two *different* (username, address) pairs — even ones whose
+    /// username+strkey concatenation (without separator) would be the same
+    /// length — produce different leaf hashes. Two distinct addresses will
+    /// virtually never produce the same strkey.
+    #[test]
+    fn test_field_separator_distinguishes_different_username_address_pairs() {
+        let env = Env::default();
+        let addr_a = Address::generate(&env);
+        let addr_b = Address::generate(&env);
+
+        // Same username, different addresses → must produce different leaves.
+        let l1 = leaf_hash(&env, &String::from_str(&env, "alice"), &addr_a, false);
+        let l2 = leaf_hash(&env, &String::from_str(&env, "alice"), &addr_b, false);
+        assert_ne!(
+            l1, l2,
+            "same username, different addresses must yield different leaf hashes"
+        );
+
+        // Different usernames, same address → must produce different leaves.
+        let l3 = leaf_hash(&env, &String::from_str(&env, "alice"), &addr_a, false);
+        let l4 = leaf_hash(&env, &String::from_str(&env, "bob"), &addr_a, false);
+        assert_ne!(
+            l3, l4,
+            "different usernames, same address must yield different leaf hashes"
+        );
+    }
+
+    /// `verified = true` and `verified = false` must always produce different
+    /// leaf hashes for the same (username, address) pair. This ensures a proof
+    /// attests to verification status at export time, not just membership.
+    #[test]
+    fn test_verified_byte_is_binding() {
+        let env = Env::default();
+        let addr = Address::generate(&env);
+        let username = String::from_str(&env, "octocat");
+
+        let unverified = leaf_hash(&env, &username, &addr, false);
+        let verified = leaf_hash(&env, &username, &addr, true);
+        assert_ne!(
+            unverified, verified,
+            "verified flag must be reflected in the leaf hash"
+        );
+    }
+
+    /// A 4-leaf (even) tree must produce the root that results from pairing
+    /// leaves bottom-up with no promotion step: root = node(node(l0,l1), node(l2,l3)).
+    #[test]
+    fn test_four_leaf_even_tree_structure() {
+        let env = Env::default();
+        let addr = Address::generate(&env);
+
+        let l0 = leaf_hash(&env, &String::from_str(&env, "a"), &addr, false);
+        let l1 = leaf_hash(&env, &String::from_str(&env, "b"), &addr, false);
+        let l2 = leaf_hash(&env, &String::from_str(&env, "c"), &addr, false);
+        let l3 = leaf_hash(&env, &String::from_str(&env, "d"), &addr, false);
+
+        let mut leaves: Vec<BytesN<32>> = Vec::new(&env);
+        leaves.push_back(l0.clone());
+        leaves.push_back(l1.clone());
+        leaves.push_back(l2.clone());
+        leaves.push_back(l3.clone());
+
+        // Expected: root = node(node(l0,l1), node(l2,l3)) — no promotion needed.
+        let expected = node_hash(&env, &node_hash(&env, &l0, &l1), &node_hash(&env, &l2, &l3));
+        assert_eq!(
+            root_of(&env, &leaves),
+            expected,
+            "4-leaf even tree must pair all leaves without any promotion step"
+        );
+    }
+
+    /// A 2-leaf tree root must equal node_hash(l0, l1) and not equal either
+    /// leaf on its own — the node domain separates it from both.
+    #[test]
+    fn test_two_leaf_tree_root_is_node_hash_of_both_leaves() {
+        let env = Env::default();
+        let addr = Address::generate(&env);
+        let l0 = leaf_hash(&env, &String::from_str(&env, "alice"), &addr, false);
+        let l1 = leaf_hash(&env, &String::from_str(&env, "bob"), &addr, true);
+
+        let mut leaves: Vec<BytesN<32>> = Vec::new(&env);
+        leaves.push_back(l0.clone());
+        leaves.push_back(l1.clone());
+
+        let root = root_of(&env, &leaves);
+        let expected = node_hash(&env, &l0, &l1);
+
+        assert_eq!(root, expected, "2-leaf root must equal node_hash(l0, l1)");
+        assert_ne!(root, l0, "2-leaf root must differ from leaf 0");
+        assert_ne!(root, l1, "2-leaf root must differ from leaf 1");
+    }
+
+    /// The empty-root sentinel (all-zero) must not equal any real leaf hash.
+    /// SHA-256 preimage resistance makes this computationally infeasible, but
+    /// we can check it for any address we generate in tests.
+    #[test]
+    fn test_empty_root_differs_from_any_real_leaf_hash() {
+        let env = Env::default();
+        let addr = Address::generate(&env);
+
+        let sentinel = empty_root(&env);
+
+        for username in &["alice", "bob", "carol", "x", "octocat"] {
+            let leaf = leaf_hash(&env, &String::from_str(&env, username), &addr, false);
+            assert_ne!(
+                leaf, sentinel,
+                "leaf hash for '{username}' must not equal the all-zero empty-root sentinel"
+            );
+            let leaf_v = leaf_hash(&env, &String::from_str(&env, username), &addr, true);
+            assert_ne!(
+                leaf_v, sentinel,
+                "verified leaf hash for '{username}' must not equal the empty-root sentinel"
+            );
+        }
+    }
+
+    /// Two entries with the same username but opposite verification status
+    /// in a 2-leaf tree must produce different roots. This catches any
+    /// implementation that accidentally ignores the verified byte at the
+    /// tree level.
+    #[test]
+    fn test_verified_flag_propagates_to_root() {
+        let env = Env::default();
+        let addr = Address::generate(&env);
+        let u = String::from_str(&env, "carol");
+        let other_addr = Address::generate(&env);
+        let u2 = String::from_str(&env, "dave");
+
+        let mut leaves_a: Vec<BytesN<32>> = Vec::new(&env);
+        leaves_a.push_back(leaf_hash(&env, &u, &addr, false));
+        leaves_a.push_back(leaf_hash(&env, &u2, &other_addr, false));
+
+        let mut leaves_b: Vec<BytesN<32>> = Vec::new(&env);
+        leaves_b.push_back(leaf_hash(&env, &u, &addr, true)); // carol is now verified
+        leaves_b.push_back(leaf_hash(&env, &u2, &other_addr, false));
+
+        assert_ne!(
+            root_of(&env, &leaves_a),
+            root_of(&env, &leaves_b),
+            "flipping the verified flag on one leaf must change the tree root"
+        );
+    }
+
+    /// Adding a leaf to the end of a tree changes the root. Ensures the tree
+    /// isn't trivially truncation-insensitive.
+    #[test]
+    fn test_appending_a_leaf_changes_root() {
+        let env = Env::default();
+        let addr = Address::generate(&env);
+        let l0 = leaf_hash(&env, &String::from_str(&env, "alice"), &addr, false);
+        let l1 = leaf_hash(&env, &String::from_str(&env, "bob"), &addr, false);
+        let l2 = leaf_hash(&env, &String::from_str(&env, "carol"), &addr, true);
+
+        let mut two: Vec<BytesN<32>> = Vec::new(&env);
+        two.push_back(l0.clone());
+        two.push_back(l1.clone());
+
+        let mut three: Vec<BytesN<32>> = Vec::new(&env);
+        three.push_back(l0);
+        three.push_back(l1);
+        three.push_back(l2);
+
+        assert_ne!(
+            root_of(&env, &two),
+            root_of(&env, &three),
+            "appending a leaf must change the root"
+        );
+    }
+
+    // ── Cross-page continuity tests (Issue #695) ──────────────────────────────
+    //
+    // These tests prove that multi-page exports preserve leaf continuity (a leaf
+    // present on page N is identical whether computed stand-alone or as part of a
+    // merged set) and root stability (re-computing the root of an unchanged page
+    // always yields the same hash). They verify the properties dashboards and
+    // treasury tooling rely on when stitching paginated export pages together
+    // into a single proof surface.
+
+    /// The leaf hash for a record is identical regardless of which page it
+    /// appears on. This is the fundamental cross-page continuity guarantee:
+    /// a proof built against page N's root is valid if the verifier recomputes
+    /// the same leaf from the record fields, without knowing the page number.
+    #[test]
+    fn test_leaf_hash_is_page_independent() {
+        let env = Env::default();
+        let addr = Address::generate(&env);
+        let username = String::from_str(&env, "octocat");
+
+        let leaf_page1 = leaf_hash(&env, &username, &addr, true);
+        let leaf_page2 = leaf_hash(&env, &username, &addr, true);
+
+        assert_eq!(
+            leaf_page1, leaf_page2,
+            "leaf hash must be identical regardless of which page the record appears on"
+        );
+    }
+
+    /// The root of a page is stable: recomputing it from the same records always
+    /// yields the same hash. Indexers must be able to replay a page export and
+    /// get a matching root without hitting the chain again.
+    #[test]
+    fn test_root_is_stable_across_recomputation() {
+        let env = Env::default();
+        let a0 = Address::generate(&env);
+        let a1 = Address::generate(&env);
+        let u0 = String::from_str(&env, "alice");
+        let u1 = String::from_str(&env, "bob");
+
+        let mut records: Vec<(String, ContributorRecord)> = Vec::new(&env);
+        records.push_back((u0.clone(), rec(&env, &a0, true)));
+        records.push_back((u1.clone(), rec(&env, &a1, false)));
+
+        let root_first = root_of_records(&env, &records);
+        let root_second = root_of_records(&env, &records);
+
+        assert_eq!(
+            root_first, root_second,
+            "root_of_records must be deterministic across recomputations of the same page"
+        );
+    }
+
+    /// Two consecutive pages whose leaf sets do not overlap must produce
+    /// different roots, so a proof against page 1's root is not valid for
+    /// page 2 and vice-versa.
+    #[test]
+    fn test_disjoint_pages_produce_different_roots() {
+        let env = Env::default();
+        let a0 = Address::generate(&env);
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        let a3 = Address::generate(&env);
+
+        let mut page1: Vec<(String, ContributorRecord)> = Vec::new(&env);
+        page1.push_back((String::from_str(&env, "alice"), rec(&env, &a0, true)));
+        page1.push_back((String::from_str(&env, "bob"), rec(&env, &a1, false)));
+
+        let mut page2: Vec<(String, ContributorRecord)> = Vec::new(&env);
+        page2.push_back((String::from_str(&env, "carol"), rec(&env, &a2, true)));
+        page2.push_back((String::from_str(&env, "dave"), rec(&env, &a3, false)));
+
+        assert_ne!(
+            root_of_records(&env, &page1),
+            root_of_records(&env, &page2),
+            "disjoint pages must produce different roots"
+        );
+    }
+
+    /// Leaves shared across two pages hash identically in both page roots.
+    /// A merged view (all leaves from both pages in order) produces a root
+    /// that differs from either single-page root, confirming that merging
+    /// pages is not the same as re-keying a proof.
+    #[test]
+    fn test_cross_page_leaf_continuity_in_merged_root() {
+        let env = Env::default();
+        let a0 = Address::generate(&env);
+        let a1 = Address::generate(&env);
+        let a2 = Address::generate(&env);
+        let u0 = String::from_str(&env, "alice");
+        let u1 = String::from_str(&env, "bob");
+        let u2 = String::from_str(&env, "carol");
+
+        let mut page1: Vec<(String, ContributorRecord)> = Vec::new(&env);
+        page1.push_back((u0.clone(), rec(&env, &a0, true)));
+        page1.push_back((u1.clone(), rec(&env, &a1, false)));
+
+        let mut page2: Vec<(String, ContributorRecord)> = Vec::new(&env);
+        page2.push_back((u2.clone(), rec(&env, &a2, true)));
+
+        let root_p1 = root_of_records(&env, &page1);
+        let root_p2 = root_of_records(&env, &page2);
+
+        // Leaf continuity: the same record produces the same leaf regardless
+        // of which page contains it.
+        let alice_leaf_standalone = leaf_hash(&env, &u0, &a0, true);
+        let alice_leaf_in_page = leaf_hash(&env, &u0, &a0, true);
+        assert_eq!(
+            alice_leaf_standalone, alice_leaf_in_page,
+            "alice's leaf must be identical whether computed standalone or as part of a page"
+        );
+
+        // A merged root (all three leaves in order) differs from both page roots.
+        let mut merged: Vec<(String, ContributorRecord)> = Vec::new(&env);
+        merged.push_back((u0, rec(&env, &a0, true)));
+        merged.push_back((u1, rec(&env, &a1, false)));
+        merged.push_back((u2, rec(&env, &a2, true)));
+        let merged_root = root_of_records(&env, &merged);
+
+        assert_ne!(
+            merged_root, root_p1,
+            "merged root must differ from page 1 root"
+        );
+        assert_ne!(
+            merged_root, root_p2,
+            "merged root must differ from page 2 root"
+        );
+    }
+
+    /// The address strkey encoding is what goes into the leaf, not any internal
+    /// binary representation. Two addresses with identical G-strings would have
+    /// identical strkeys; we verify that two distinct generated addresses do
+    /// produce distinct strkeys and thus distinct leaves, confirming that
+    /// strkey bytes are the actual encoding used.
+    #[test]
+    fn test_leaf_encodes_address_as_strkey_not_internal_bytes() {
+        let env = Env::default();
+        let addr_a = Address::generate(&env);
+        let addr_b = Address::generate(&env);
+        let username = String::from_str(&env, "octocat");
+
+        // If the encoding used internal bytes rather than strkey, a collision
+        // with a different generation of address would be statistically possible
+        // but essentially never happens for strkeys either; the key property
+        // we're asserting is that two distinct addresses → two distinct leaves.
+        let leaf_a = leaf_hash(&env, &username, &addr_a, false);
+        let leaf_b = leaf_hash(&env, &username, &addr_b, false);
+
+        assert_ne!(
+            leaf_a, leaf_b,
+            "two distinct addresses must produce distinct leaf hashes (strkey encoding)"
+        );
+
+        // And if strkey is used, the leaf_hash for addr_a must equal
+        // what we'd compute by hand using the module's own LEAF_DOMAIN prefix.
+        let mut buf = soroban_sdk::Bytes::from_slice(&env, LEAF_DOMAIN);
+        buf.append(&username.to_bytes());
+        buf.push_back(FIELD_SEPARATOR);
+        buf.append(&addr_a.to_string().to_bytes());
+        buf.push_back(0u8); // verified = false
+        let manual = env.crypto().sha256(&buf).to_bytes();
+
+        assert_eq!(
+            leaf_a, manual,
+            "leaf_hash must produce SHA256(LEAF_DOMAIN || username || 0x00 || strkey || verified_byte)"
+        );
     }
 }

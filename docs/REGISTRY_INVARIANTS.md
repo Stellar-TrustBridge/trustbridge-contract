@@ -37,6 +37,23 @@ Related docs: [ABI](ABI.md) · [ARCHITECTURE](ARCHITECTURE.md) · [SECURITY](SEC
 | I8 | Counters never underflow, including removal attempts against an empty registry | `test_fuzz_counters_never_underflow_on_empty_registry` |
 | I9 | A complete paginated export visits every live username exactly once, with no duplicate, skip, or reorder across chunk boundaries | `test_paginated_export_at_10k_users` |
 | I10 | After remove → compact → re-register of the same names, `count` and `vcount` stay in sync with the live record set and the chunked index stays hole-free | `test_issue306_remove_compact_reregister_counter_parity` |
+| I11 | After mixed `batch_verify` / `batch_remove` calls (duplicates, unregistered names), `get_stats().total` equals the enumerable index length and `verified` equals live verified records | `tests/counter_proofs.rs::proof_counters_match_index_under_mixed_batches` |
+| I12 | A rejected batch (`InvalidBatchSize`) moves no counter and leaves the index untouched | `tests/counter_proofs.rs::proof_rejected_batch_moves_no_counter` |
+| I13 | A pagination cursor decodes only against the `INDEX_GEN` it was issued under; a cursor from any other generation (older, newer, or across the `u32::MAX` wrap) returns `InvalidCursor` on both `get_public_paginated` and `get_registered_paginated` | `test_public_paginated_rejects_cursor_from_any_other_generation`, `test_generation_wraps_at_u32_max_and_still_invalidates_cursors` |
+
+### Cursors from other index generations (Issue #693)
+
+Every cursor embeds the `INDEX_GEN` (`idx_gen` instance key) current when it
+was issued; `remove` bumps the generation because it shifts every later
+position. `decode_cursor` (`src/storage.rs`) rejects any mismatch — not only
+older generations — so a stale or forged cursor can never resume at a drifted
+offset and leak or skip records. The bump **wraps** at `u32::MAX` instead of
+saturating: a saturating counter would freeze at `u32::MAX`, and every later
+removal would leave outstanding cursors valid against a shifted index.
+
+Recovery for clients is unchanged: on `InvalidCursor`, restart from
+`cursor = None` (see [DASHBOARD_SYNC.md](DASHBOARD_SYNC.md)). Covered by the
+I13 tests in `tests/cursor_pagination.rs`.
 
 ### `get_verified_count()` / `get_stats().verified` parity (Issue #90)
 
@@ -66,6 +83,24 @@ chunks: it fills 400 records (8 chunks), removes a middle band to leave holes,
 compacts, re-registers the exact same names at new addresses, then asserts
 `get_stats().total`, `get_verified_count()`, the chunked index, and a full
 paginated walk all agree with the live record set (I10).
+
+### Merkle roots bind the endpoint's exported records (Issue #797)
+
+Both `get_registered_paginated` (admin) and `get_public_paginated` return an
+`ExportPage` whose `merkle_root` commits to that page's returned `records` in
+order (see `src/merkle.rs`). The record sets are not always identical:
+`get_public_paginated` replaces both `stellar_address` and `payout_address`
+with the zero/burn address for unverified contributors, while the admin export
+retains the stored addresses. Consequently, roots for the same `cursor`/`limit`
+must match only when the returned records match; a public root must never be
+compared to an admin root as if it attested to unreduced private fields.
+
+`tests/merkle_export.rs::test_public_export_redacts_unverified_addresses_and_commits_to_redaction`
+asserts that verified addresses stay visible, both unverified addresses are
+zeroed in the public page, the public root is computed over those redacted
+records, and substituting the private address invalidates that root. Existing
+same-window parity tests cover windows whose exported records match. A consumer
+must use the root from the same API and returned page it is verifying.
 
 ### Challenge-period operations preserve count invariants (Issue #214)
 
@@ -124,8 +159,32 @@ cargo test fuzz              # invariant suite only
 cargo test                   # full suite
 make fuzz                    # cargo test --lib fuzz; fails if 0 tests ran (CI runs this)
 make fuzz FUZZ_SEEDS=0x1,0x2,0x3,0x4   # explore with custom seeds
+make fuzz-parser                 # dedicated export-cursor libFuzzer smoke (1000 runs)
+make fuzz-parser FUZZ_RUNS=0     # keep fuzzing locally until interrupted
 make check                   # fmt + clippy + test + build
 ```
+
+The dedicated `fuzz/export_cursor` target calls the public paginated export
+with arbitrary 8-byte cursors and bounded page limits. It checks that valid
+offsets return bounded pages and malformed generations or out-of-range
+offsets return `InvalidCursor`, without traps or unbounded allocation. Its
+binary seeds live in `fuzz/corpus/export_cursor/`. Install `cargo-fuzz` and
+the Rust nightly toolchain before running `make fuzz-parser`; CI can use the
+default finite run count. Reproduce any crash from the saved artifact with
+`cargo +nightly fuzz run export_cursor fuzz/artifacts/export_cursor/<file>`
+and keep a minimized reproducer in the corpus. This parser target complements
+the deterministic registry-state invariant suite above.
+
+The same decode contract is replayed deterministically by the soak property
+tests in `tests/cursor_pagination.rs` (`test_soak_valid_cursor_prologue`,
+`test_soak_export_cursor_decode_never_panics`,
+`test_soak_generation_bump_invalidates_old_cursors`, Issue #650): fixed seeds
+from `tests/fuzz/seeds.txt` drive thousands of forged-cursor permutations
+through the public export path and assert adversarial bytes return
+`InvalidCursor` without ever panicking, and that a generation bump (any
+removal) invalidates previously valid cursors (I9). Default budget is 512
+iterations per seed for CI; override with `CURSOR_SOAK_ITERATIONS`, or run
+`make soak-cursor` (`CURSOR_SOAK_ITERATIONS=20000`) for a long local soak.
 
 ### 10k-user pagination scale test
 
@@ -233,6 +292,28 @@ P3 documents the "unregistered verify" edge case: the contract returns
 `ContractError::NotRegistered` before touching any counter, so a verify
 call on a non-existent username cannot inflate `verified_count`. This is
 covered by the property-fuzzing suite (I7) and confirmed by P3 and P6.
+
+### Pagination parity soak (randomized cursor walk)
+
+`tests/pagination_parity.rs::test_parity_soak_random_cursor_walk` seeds a
+23-record registry (deliberately not a multiple of common page sizes),
+removes one middle record, then walks both `get_registered_paginated`
+(admin) and `get_public_paginated` (public) end-to-end with a randomized page
+`limit` per call (1–7), re-seeded per iteration with a small xorshift32 PRNG
+— no external fuzz dependency required. It asserts the full ordered username
+sequence collected by both APIs is identical across all iterations, proving
+cursors stay interchangeable between the admin and public variants (per the
+`get_public_paginated` doc comment) under varied limit sequences, not just
+the fixed limits the other parity tests use.
+
+Run it locally with more iterations than the CI default of 6:
+
+```bash
+SOAK_ITERATIONS=50 cargo test --test pagination_parity test_parity_soak_random_cursor_walk -- --nocapture
+```
+
+Unset `SOAK_ITERATIONS` to fall back to 6 seeded runs, which keeps default
+`cargo test` fast and deterministic.
 
 ### Extending the proof suite
 

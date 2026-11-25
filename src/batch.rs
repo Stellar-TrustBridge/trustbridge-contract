@@ -2,14 +2,23 @@
 //!
 //! This module provides helpers for performing multiple operations efficiently,
 //! particularly useful for dashboard syncing and bulk verifications.
-use super::{
-    bump_ever_verified_count, clear_pending_reverify, event_domain, get_record, is_admin_caller,
-    push_audit_entry, require_initialized, require_not_paused, set_record, set_verified_count,
-    storage_get_role, storage_get_verified_count, storage_is_active_verifier,
-    verifier_allowlist_active,
+//!
+//! Imports deliberately use `crate::storage` for all storage helpers so that
+//! module boundaries are explicit and batch logic does not couple to lib.rs
+//! internals. The only `super::` import is `event_domain`, which is a private
+//! lib.rs helper that builds the event-domain stamp and has no equivalent in
+//! storage.rs (refactor(batch): import helpers from storage).
+use super::event_domain;
+use crate::audit::{AuditEventType, AuditLogEntry};
+use crate::storage::{
+    bump_ever_verified_count, charge_verify_rate, clear_pending_reverify, get_record,
+    get_role as storage_get_role, get_verified_count as storage_get_verified_count,
+    is_active_verifier as storage_is_active_verifier, is_admin_caller, is_verification_expired,
+    push_audit_entry, require_initialized, require_not_paused, require_role_not_expired,
+    set_record, set_verified_at, set_verified_count, verifier_allowlist_active,
 };
-use crate::storage::{charge_verify_rate, is_verification_expired, set_verified_at};
-use crate::{AuditEventType, AuditLogEntry, ContractError, Role, VerifiedEvent};
+use crate::utils::is_zero_address;
+use crate::{ContractError, Role, VerifiedEvent};
 use soroban_sdk::{contracttype, Address, Env, String, Vec};
 
 /// Result of a single batch operation.
@@ -65,11 +74,7 @@ impl BatchSummary {
     #[must_use]
     pub fn new(total: u32, successful: u32) -> Self {
         let failed = total.saturating_sub(successful);
-        let success_rate = if total > 0 {
-            ((successful as u64 * 100) / (total as u64)) as u32
-        } else {
-            0
-        };
+        let success_rate = crate::utils::calculate_verification_percentage(successful, total);
 
         BatchSummary {
             total,
@@ -159,9 +164,16 @@ pub(super) fn batch_verify(
         return Err(ContractError::InvalidBatchSize);
     }
 
+    if is_zero_address(&env, &caller) {
+        return Err(ContractError::ZeroAddress);
+    }
+
     caller.require_auth();
 
     let is_admin = is_admin_caller(&env, &caller);
+    if !is_admin {
+        require_role_not_expired(&env, &caller)?;
+    }
     // Verifier authorization (Issue #293): once the campaign allowlist has
     // been populated, a non-admin caller must be an active (non-expired)
     // allowlist member. Until then, pure role-based mode preserves existing
@@ -192,6 +204,10 @@ pub(super) fn batch_verify(
         let Some(record) = get_record(&env, &username) else {
             continue;
         };
+        // A zero/burn bound address is a binding failure, not a success.
+        if is_zero_address(&env, &record.stellar_address) {
+            continue;
+        }
         let active = record.verified && !is_verification_expired(&env, &username);
         if active || pending.iter().any(|existing| existing == username) {
             continue;
@@ -203,6 +219,9 @@ pub(super) fn batch_verify(
     let mut newly_verified: u32 = 0;
     for username in pending.iter() {
         let Some(mut record) = get_record(&env, &username) else {
+            continue;
+        };
+        if is_zero_address(&env, &record.stellar_address) {
             continue;
         };
 
@@ -284,7 +303,7 @@ mod tests {
         assert_eq!(summary.total, 3);
         assert_eq!(summary.successful, 2);
         assert_eq!(summary.failed, 1);
-        assert_eq!(summary.success_rate, 66);
+        assert_eq!(summary.success_rate, 67);
     }
 
     #[test]

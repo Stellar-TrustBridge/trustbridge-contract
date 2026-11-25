@@ -133,6 +133,9 @@ impl core::fmt::Display for Version {
 }
 
 /// Contract migration state.
+#[allow(dead_code)]
+// Staged migration-state machine; exercised by the tests in this file,
+// wired into `run_migration_steps` in a follow-up.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MigrationState {
     /// No migration needed
@@ -148,6 +151,9 @@ pub enum MigrationState {
 }
 
 /// Compatibility information between versions.
+#[allow(dead_code)]
+// Staged version-compatibility report; constructed by `for_upgrade` and
+// covered by the tests in this file.
 #[derive(Clone, Copy, Debug)]
 pub struct CompatibilityInfo {
     pub current_version: Version,
@@ -159,6 +165,7 @@ pub struct CompatibilityInfo {
 
 impl CompatibilityInfo {
     /// Create compatibility info for an upgrade.
+    #[allow(dead_code)] // Staged with `CompatibilityInfo`; covered by the tests in this file.
     pub fn for_upgrade(current: Version, target: Version) -> Self {
         let breaking_changes = current.major != target.major;
         let data_migration_required = breaking_changes || current.minor != target.minor;
@@ -172,6 +179,32 @@ impl CompatibilityInfo {
             breaking_changes,
             data_migration_required,
         }
+    }
+}
+
+impl core::fmt::Display for MigrationState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            MigrationState::NotRequired => write!(f, "not_required"),
+            MigrationState::Pending => write!(f, "pending"),
+            MigrationState::InProgress => write!(f, "in_progress"),
+            MigrationState::Completed => write!(f, "completed"),
+            MigrationState::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+impl core::fmt::Display for CompatibilityInfo {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "current={} target={} migration_required={} breaking_changes={} data_migration_required={}",
+            self.current_version,
+            self.target_version,
+            self.migration_required,
+            self.breaking_changes,
+            self.data_migration_required
+        )
     }
 }
 
@@ -311,6 +344,54 @@ mod tests {
         assert!(!info.data_migration_required);
     }
 
+    // ── Migrate rejection: equal/lower targets must never be treated as a
+    // valid forward migration (would otherwise let an operator "migrate"
+    // to the version already deployed, or silently downgrade). ──────────
+
+    #[test]
+    fn migrate_rejects_equal_target_tuple_comparison() {
+        // Semver tuple comparison: (major, minor, patch) == (major, minor, patch)
+        // must never register as a migration that needs to run.
+        let cases = [
+            Version::new(1, 0, 0),
+            Version::new(1, 1, 0),
+            Version::new(2, 3, 4),
+        ];
+        for v in cases {
+            assert!(
+                !v.needs_migration(v),
+                "equal target {v} must be rejected as a no-op, not a migration"
+            );
+            let info = CompatibilityInfo::for_upgrade(v, v);
+            assert!(
+                !info.migration_required,
+                "CompatibilityInfo must agree: equal target {v} requires no migration"
+            );
+        }
+    }
+
+    #[test]
+    fn migrate_rejects_lower_target_across_all_tuple_positions() {
+        // Lower patch, lower minor (same major), and lower major must all be
+        // rejected — tuple comparison, not just a single-field check.
+        let lower_patch = (Version::new(1, 0, 5), Version::new(1, 0, 4));
+        let lower_minor = (Version::new(1, 2, 0), Version::new(1, 1, 9));
+        let lower_major = (Version::new(2, 0, 0), Version::new(1, 9, 9));
+
+        for (deployed, target) in [lower_patch, lower_minor, lower_major] {
+            assert!(
+                !deployed.needs_migration(target),
+                "deployed={deployed} must reject lower target={target}"
+            );
+            // is_compatible_with must also independently refuse to treat a
+            // lower target as satisfying forward compatibility.
+            assert!(
+                deployed.is_compatible_with(target),
+                "a strictly newer deployed version remains compatible with an older minimum"
+            );
+        }
+    }
+
     #[test]
     fn test_migration_state_variants_are_distinct() {
         assert_ne!(MigrationState::NotRequired, MigrationState::Pending);
@@ -396,17 +477,195 @@ mod tests {
         env.mock_all_auths();
 
         env.as_contract(&contract_id, || {
-            let _page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+            let _page =
+                TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         });
 
         // Verify that get_registered_paginated indeed checked the admin's authorization
         let auths = env.auths();
         assert_eq!(auths.len(), 1);
-        let (auth_addr, invocation) = auths.get(0).unwrap();
-        assert_eq!(auth_addr, admin);
+        let (auth_addr, invocation) = auths.first().unwrap();
+        assert_eq!(*auth_addr, admin);
+        match &invocation.function {
+            soroban_sdk::testutils::AuthorizedFunction::Contract((_, name, _)) => assert_eq!(
+                *name,
+                soroban_sdk::Symbol::new(&env, "get_registered_paginated")
+            ),
+            other => panic!("unexpected authorized function: {other:?}"),
+        }
+    }
+
+    // ── Protocol version gate tests for outdated clients ──────────────────────
+    //
+    // These verify that `is_compatible` on the deployed contract correctly
+    // rejects clients that require a version the contract does not satisfy,
+    // and accepts clients whose minimum requirement the contract meets.
+
+    #[test]
+    fn protocol_gate_rejects_client_requiring_higher_minor() {
+        use crate::TrustBridgeContract;
+        use soroban_sdk::{testutils::Address as _, Address, Env};
+
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // CONTRACT_VERSION is 1.1.0; a client requiring 1.2.0 must be rejected.
+        env.as_contract(&contract_id, || {
+            assert!(
+                !TrustBridgeContract::is_compatible(env.clone(), 1, 2, 0),
+                "outdated contract (1.1.0) must not satisfy a client requiring 1.2.0"
+            );
+        });
+    }
+
+    #[test]
+    fn protocol_gate_rejects_client_requiring_higher_major() {
+        use crate::TrustBridgeContract;
+        use soroban_sdk::{testutils::Address as _, Address, Env};
+
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // A client requiring major 2 always signals a breaking ABI change.
+        env.as_contract(&contract_id, || {
+            assert!(
+                !TrustBridgeContract::is_compatible(env.clone(), 2, 0, 0),
+                "contract at major 1 must not satisfy a client requiring major 2"
+            );
+        });
+    }
+
+    #[test]
+    fn protocol_gate_accepts_exact_version() {
+        use crate::TrustBridgeContract;
+        use soroban_sdk::{testutils::Address as _, Address, Env};
+
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // A client whose minimum is exactly the deployed version must succeed.
+        env.as_contract(&contract_id, || {
+            let (major, minor, patch) = TrustBridgeContract::version(env.clone());
+            assert!(
+                TrustBridgeContract::is_compatible(env.clone(), major, minor, patch),
+                "contract must be compatible with its own version"
+            );
+        });
+    }
+
+    #[test]
+    fn protocol_gate_accepts_older_minimum() {
+        use crate::TrustBridgeContract;
+        use soroban_sdk::{testutils::Address as _, Address, Env};
+
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // A client that only requires 1.0.0 must pass against any 1.x deployment.
+        env.as_contract(&contract_id, || {
+            assert!(
+                TrustBridgeContract::is_compatible(env.clone(), 1, 0, 0),
+                "contract at 1.1.0 must satisfy a client requiring only 1.0.0"
+            );
+        });
+    }
+
+    #[test]
+    fn protocol_gate_version_returns_stable_tuple() {
+        use crate::TrustBridgeContract;
+        use soroban_sdk::{testutils::Address as _, Address, Env};
+
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+
+        // The stored version must match the CONTRACT_VERSION build constant.
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::version(env.clone()),
+                (1, 1, 0),
+                "version must match build constant"
+            );
+        });
+    }
+
+    #[test]
+    fn snapshot_version_tuple_vs_display_string() {
+        let v = Version::new(1, 1, 0);
+        assert_eq!(v.to_tuple(), (1, 1, 0));
+        assert_eq!(alloc::format!("{v}"), "1.1.0");
+        assert_eq!(Version::from_tuple((1, 1, 0)), v);
+    }
+
+    #[test]
+    fn snapshot_migration_state_display() {
+        let rendered = [
+            alloc::format!("{}", MigrationState::NotRequired),
+            alloc::format!("{}", MigrationState::Pending),
+            alloc::format!("{}", MigrationState::InProgress),
+            alloc::format!("{}", MigrationState::Completed),
+            alloc::format!("{}", MigrationState::Failed),
+        ];
         assert_eq!(
-            invocation.function.name,
-            soroban_sdk::Symbol::new(&env, "get_registered_paginated")
+            rendered,
+            [
+                "not_required",
+                "pending",
+                "in_progress",
+                "completed",
+                "failed"
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_compatibility_info_display() {
+        let patch = CompatibilityInfo::for_upgrade(Version::new(1, 1, 0), Version::new(1, 1, 1));
+        assert_eq!(
+            alloc::format!("{patch}"),
+            "current=1.1.0 target=1.1.1 migration_required=true breaking_changes=false data_migration_required=false"
+        );
+
+        let minor = CompatibilityInfo::for_upgrade(Version::new(1, 0, 0), Version::new(1, 1, 0));
+        assert_eq!(
+            alloc::format!("{minor}"),
+            "current=1.0.0 target=1.1.0 migration_required=true breaking_changes=false data_migration_required=true"
+        );
+
+        let major = CompatibilityInfo::for_upgrade(Version::new(1, 1, 0), Version::new(2, 0, 0));
+        assert_eq!(
+            alloc::format!("{major}"),
+            "current=1.1.0 target=2.0.0 migration_required=true breaking_changes=true data_migration_required=true"
+        );
+
+        let downgrade = CompatibilityInfo::for_upgrade(Version::new(2, 0, 0), Version::new(1, 0, 0));
+        assert_eq!(
+            alloc::format!("{downgrade}"),
+            "current=2.0.0 target=1.0.0 migration_required=false breaking_changes=true data_migration_required=true"
         );
     }
 }

@@ -1,4 +1,6 @@
+# ExportPage layout golden (Layout version: 2)
 records: Vec<(String, ContributorRecord)>
-next_cursor: Option<u32>
+next_cursor: Option<BytesN<8>>
 total: u32
+merkle_root: BytesN<32>
 has_more: bool

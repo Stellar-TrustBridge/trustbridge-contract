@@ -51,6 +51,10 @@
 36 RoleGrantNotReady
 37 ProvenanceMissing
 38 ProvenanceMismatch
+34 NoPendingRoleGrant
+35 RoleGrantNotReady
+36 ProvenanceMissing
+37 ProvenanceMismatch
 39 StagedWasmMismatch
 40 UpgradeProposalAlreadyPending
 41 NoUpgradeProposalPending
@@ -58,6 +62,7 @@
 43 UpgradeProposalDelayActive
 44 UpgradeProposalInsufficientApprovals
 !45 reserved
+45 ThresholdExceedsSignerCap
 46 FallbackListFull
 47 UsernameTaken
 48 RotationRequired
@@ -69,3 +74,9 @@
 54 DualControlRequired
 55 BatchRemoveProposalPending
 56 NoPendingBatchRemove
+57 RoleExpired
+58 OracleProofBadLayout
+59 OracleProofNotAllowlisted
+60 OracleProofExpired
+61 OracleProofBadSignature
+62 AddressMismatch

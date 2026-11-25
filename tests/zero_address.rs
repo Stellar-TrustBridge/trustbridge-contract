@@ -81,12 +81,8 @@ fn test_zero_address_register_fallback_address_rejected_with_mock_all_auths() {
     env.mock_all_auths();
 
     env.as_contract(&contract_id, || {
-        let result = TrustBridgeContract::register(
-            env.clone(),
-            s(&env, "octocat"),
-            valid_user,
-            fallbacks,
-        );
+        let result =
+            TrustBridgeContract::register(env.clone(), s(&env, "octocat"), valid_user, fallbacks);
 
         assert_eq!(result, Err(ContractError::ZeroAddress));
     });
@@ -151,6 +147,72 @@ fn test_zero_address_rotation_request_rejected_with_mock_all_auths() {
         );
 
         assert_eq!(result, Err(ContractError::ZeroAddress));
+    });
+}
+
+#[test]
+fn test_zero_address_verification_actors_rejected_before_registry_writes() {
+    let (env, _admin, contract_id) = setup();
+    let owner = Address::generate(&env);
+    let zero_addr = Address::from_string(&s(&env, ZERO_ADDRESS_STRKEY));
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "octocat"),
+            owner,
+            Vec::new(&env),
+        )
+        .unwrap();
+        assert_eq!(
+            TrustBridgeContract::verify(env.clone(), zero_addr.clone(), s(&env, "octocat")),
+            Err(ContractError::ZeroAddress)
+        );
+        assert_eq!(
+            TrustBridgeContract::batch_verify(
+                env.clone(),
+                zero_addr.clone(),
+                Vec::from_array(&env, [s(&env, "octocat")]),
+            ),
+            Err(ContractError::ZeroAddress)
+        );
+        assert!(
+            !TrustBridgeContract::get_address(env.clone(), s(&env, "octocat"))
+                .unwrap()
+                .verified
+        );
+    });
+}
+
+#[test]
+fn test_zero_address_revoke_actor_rejected_without_clearing_verification() {
+    let (env, admin, contract_id) = setup();
+    let owner = Address::generate(&env);
+    let zero_addr = Address::from_string(&s(&env, ZERO_ADDRESS_STRKEY));
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, "octocat"),
+            owner,
+            Vec::new(&env),
+        )
+        .unwrap();
+        TrustBridgeContract::verify(env.clone(), admin, s(&env, "octocat")).unwrap();
+        assert_eq!(
+            TrustBridgeContract::revoke_verification(
+                env.clone(),
+                zero_addr,
+                s(&env, "octocat"),
+                1
+            ),
+            Err(ContractError::ZeroAddress)
+        );
+        assert!(
+            TrustBridgeContract::get_address(env.clone(), s(&env, "octocat"))
+                .unwrap()
+                .verified
+        );
     });
 }
 
@@ -219,7 +281,7 @@ fn test_valid_address_register_succeeds_with_mock_all_auths() {
 
         // Confirm the record was actually written
         let record = TrustBridgeContract::get_address(env.clone(), s(&env, "octocat"));
-        assert_eq!(record, Some(valid_user));
+        assert_eq!(record.map(|r| r.stellar_address), Some(valid_user));
     });
 }
 
@@ -258,7 +320,10 @@ fn test_is_address_zero_helper_identifies_zero_address() {
 #[test]
 fn test_zero_address_error_code_is_stable() {
     assert_eq!(ContractError::ZeroAddress.code(), 16);
-    assert_eq!(ContractError::from_code(16), Some(ContractError::ZeroAddress));
+    assert_eq!(
+        ContractError::from_code(16),
+        Some(ContractError::ZeroAddress)
+    );
 }
 
 /// `ZeroAddress` error must be classified as Fatal (not retryable).
@@ -337,12 +402,8 @@ fn test_zero_address_in_mixed_fallback_list_rejected() {
     env.mock_all_auths();
 
     env.as_contract(&contract_id, || {
-        let result = TrustBridgeContract::register(
-            env.clone(),
-            s(&env, "octocat"),
-            valid_user,
-            fallbacks,
-        );
+        let result =
+            TrustBridgeContract::register(env.clone(), s(&env, "octocat"), valid_user, fallbacks);
 
         assert_eq!(result, Err(ContractError::ZeroAddress));
     });
@@ -368,8 +429,7 @@ fn test_security_md_zero_address_documentation_is_accurate() {
 
     // Confirm the strkey we're using matches the documented value
     assert_eq!(
-        ZERO_ADDRESS_STRKEY,
-        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        ZERO_ADDRESS_STRKEY, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
         "Zero address strkey must match SECURITY.md documentation"
     );
 

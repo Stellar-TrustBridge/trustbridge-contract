@@ -134,6 +134,32 @@ immediately rather than silently skipping the smoke.
 
 ---
 
+## Futurenet vs Testnet Parameters (Issue #671)
+
+Futurenet and Testnet are separate networks: a contract ID, identity funding,
+or deployment JSON from one is **not valid** on the other. Do not copy
+parameters across. `make network-params NETWORK=<net>` prints the values below
+and exits non-zero for an unknown `NETWORK`.
+
+| Parameter | Testnet | Futurenet |
+|-----------|---------|-----------|
+| `NETWORK` | `testnet` (default) | `futurenet` |
+| RPC URL | `https://soroban-testnet.stellar.org` | `https://rpc-futurenet.stellar.org` (`FUTURENET_RPC_URL`) |
+| Network passphrase | `Test SDF Network ; September 2015` | `Test SDF Future Network ; October 2022` |
+| Friendbot | `https://friendbot.stellar.org` (via `--fund`) | `https://friendbot-futurenet.stellar.org` (`FUTURENET_FRIENDBOT_URL`) |
+| Deploy target | `make deploy-testnet` | `make futurenet-smoke` |
+| Deployment record | `deployments/testnet.json` | `deployments/futurenet.json` |
+| Contract / admin addresses | Per-network; re-deploy and re-record | Per-network; re-deploy and re-record |
+| WASM pin (`wasm-hash.pin`) | Must match before release sign-off | Informational — Futurenet may run a newer protocol; rebuild with the pinned toolchain before comparing |
+| Reset cadence | Periodic resets wipe contracts | More frequent resets; expect redeploys |
+
+A `network passphrase` mismatch error almost always means `NETWORK` or the
+CLI identity points at the other network — see
+[TESTNET_CHECKLIST.md](TESTNET_CHECKLIST.md#testnet-vs-futurenet-failure-modes)
+and [FUTURENET_ONBOARDING.md](FUTURENET_ONBOARDING.md).
+
+---
+
 ## Mainnet Deployment
 
 ### Dual-confirm checklist
@@ -144,7 +170,7 @@ Before every mainnet deploy, complete both confirmation steps:
    ```bash
    make wasm-hash-pin
    # or manually:
-   sha256sum target/wasm32v1-none/release/trustbridge-contract.wasm
+   sha256sum target/wasm32v1-none/release/trustbridge_contract.wasm
    ```
    CI enforces this check automatically via the _Compute and verify WASM hash pin_ step.
    If the hash has intentionally changed (new release), run `make wasm-hash-update`, commit
@@ -283,14 +309,24 @@ Audit log lines are emitted to stdout and written to `--audit-log` file:
 | `make invoke-register` | Register a username |
 | `make invoke-lookup` | Read-only lookup |
 | `make invoke-stats` | Read statistics |
+| `make check-export-layout` | Verify an export JSON matches the v1 layout snapshot (`FILE=...`) |
 | `make invoke-verify` | Verify a contributor (admin or verifier role) |
 | `make invoke-revoke-verification` | Revoke verification (admin or verifier role) |
+| `make invoke-remove` | Remove a registration |
+| `make invoke-batch-remove` | Directly remove a batch of registrations |
+| `make invoke-set-batch-remove-threshold` | Set dual-control threshold for batch removal |
+| `make invoke-get-batch-remove-threshold` | Read configured dual-control threshold |
+| `make invoke-propose-batch-remove` | Propose dual-control batch removal (admin) |
+| `make invoke-execute-batch-remove` | Execute pending dual-control batch removal (second admin key) |
+| `make invoke-cancel-batch-remove` | Cancel pending dual-control batch removal (admin) |
+| `make invoke-get-pending-batch-remove` | Read pending dual-control proposal |
 | `make bulk-verify-dry-run` | Dry-run bulk verify from `BULK_VERIFY_FILE` |
 | `make bulk-verify` | Bulk verify with pacing and audit log |
 | `make bulk-revoke-dry-run` | Dry-run bulk revoke from `BULK_REVOKE_FILE` |
 | `make bulk-revoke` | Bulk revoke with audit log |
 | `make testnet-checklist` | Run the testnet smoke checklist |
 | `make demo-e2e` | Run the cross-repo E2E demo (register → verify → lookup → export) |
+| `make futurenet-smoke` | Deploy + smoke-check a fresh Futurenet instance (`ADMIN=G...`) |
 
 Example registration:
 
@@ -314,6 +350,31 @@ stellar contract invoke --id $CONTRACT_ID \
 `register` requires the source account to authenticate as `stellar-address`. If the
 username is already registered to a different address, that previous address must
 also sign. See [ABI.md](ABI.md#register) for full auth requirements and failure modes.
+
+---
+
+## Futurenet smoke test
+
+`scripts/futurenet_smoke_test.sh` deploys a fresh contract to Futurenet and checks
+that `get_stats` reads `{total: 0, verified: 0}` and that `has_record` returns
+`false` for an unregistered username. It is a deploy sanity check, not a
+replacement for `cargo test`.
+
+```bash
+ADMIN=G... make futurenet-smoke
+# or: ADMIN=G... ./scripts/futurenet_smoke_test.sh
+```
+
+The script prints the failing check by name and exits non-zero. If the deploy
+phase reports `429`, `too many requests`, `rate limit`, or a friendbot/funding
+error, it prints the faucet remediation directly: reuse an already-funded
+identity, retry with exponential backoff (30s → 60s → 120s → 240s), or fall back
+to testnet. Those limits are per account/IP and per time window, so repeated
+`stellar keys generate --fund` calls make the problem worse.
+
+Full contributor walkthrough:
+[FUTURENET_ONBOARDING.md § Faucet rate limits and workarounds](FUTURENET_ONBOARDING.md#faucet-rate-limits-and-workarounds).
+Threat-model rationale: [SECURITY.md § Futurenet Deploy Smoke Workflow](SECURITY.md#futurenet-deploy-smoke-workflow).
 
 ---
 
@@ -365,7 +426,11 @@ make export-registry CONTRACT_ID=$CONTRACT_ID SOURCE=admin
 The script fails with a clear error and a non-zero exit code if `CONTRACT_ID`,
 `SOURCE`, the Stellar CLI, or `jq` are missing.
 
-**Output schema** (stable field names for dashboard/indexer consumers):
+**Output schema** (stable field names for dashboard/indexer consumers): the
+field order and integer widths are pinned as a v1 snapshot in
+[ABI.md § Export page byte layout (v1)](ABI.md#export-page-byte-layout-v1).
+Verify any generated file with
+`make check-export-layout FILE=registry-export-testnet.json`.
 
 ```json
 {
@@ -398,6 +463,7 @@ which covers staging restores and migration dry-runs.
 | `SOURCE` | No | Identity for per-record reads (default: `default`); `get_address` needs no auth, so any funded identity works |
 | `ADMIN_SOURCE` | No | Admin identity; when set, also detects on-chain registrations **missing from** the export via admin-gated `get_registered_paginated` |
 | `PAGE_LIMIT` | No | Records per page for the admin-side check (default: `100`) |
+| `REPORT_FILE` | No | Writes a versioned JSON dry-run repair report with counter proofs (see below) |
 
 ```bash
 CONTRACT_ID=$CONTRACT_ID NETWORK=testnet ./scripts/validate_registry.sh registry-export-testnet.json
@@ -415,6 +481,20 @@ The script reports every mismatch it finds and exits `1` if any are present,
 | `ADDRESS_MISMATCH` | `stellar_address` differs between export and chain |
 | `VERIFIED_MISMATCH` | `verified` flag differs between export and chain |
 | `MISSING_FROM_EXPORT` | Contract has the username; the export file does not (`ADMIN_SOURCE` only) |
+
+For machine consumers, set `REPORT_FILE` to emit a versioned JSON report with
+the same categories plus `get_stats()` counter proofs:
+
+```bash
+CONTRACT_ID=$CONTRACT_ID ADMIN_SOURCE=admin REPORT_FILE=repair-report.json \
+  ./scripts/validate_registry.sh registry-export-testnet.json
+```
+
+The report shape (`schema_version`, `export`, `counters`, `mismatches`,
+`result`) is pinned in [ABI.md § Dry-run repair report](ABI.md#dry-run-repair-report);
+operator interpretation is in
+[CONTRACT_HEALTH.md § Dry-run repair report](CONTRACT_HEALTH.md#dry-run-repair-report).
+The script remains validate-only — the report never triggers a write.
 
 **Safety warning:** this tool is validate-only by design. It does not replay
 writes. Never use an export file to blindly overwrite mainnet state —
@@ -581,12 +661,28 @@ artifact hash does not match the pinned value, preventing silent deploy of a wro
 
 ### How it works
 
-1. CI builds the WASM via `stellar contract build`.
-2. The _Compute and verify WASM hash pin_ CI step runs `sha256sum` on the artifact.
+1. The CI `make check` job builds the WASM via `stellar contract build`.
+2. Its _Compute and verify WASM hash pin_ step runs `make wasm-hash-pin WASM_HASH_STRICT=1`,
+   which runs `sha256sum` on `target/wasm32v1-none/release/trustbridge_contract.wasm`.
 3. The computed hash is compared to the value in `wasm-hash.pin`.
 4. A mismatch fails CI with clear instructions to update the pin.
 5. CI runs the gate with `WASM_HASH_STRICT=1`, so an unpinned `PLACEHOLDER` value also
    fails. The computed hash is written to the job summary so it can be copied into the pin.
+
+### Reproducible inputs
+
+The hash is only stable across machines when every input that ends up in the
+WASM is pinned. `stellar contract build` embeds the rustc version (`rsver`),
+the soroban-sdk version (`rssdkver`), and the CLI version (`cliver`) as
+contract metadata, so the pin depends on:
+
+- the Rust toolchain in `rust-toolchain.toml` (pinned, not `stable`),
+- Stellar CLI `26.1.0` (the CI `make check` job installs this exact release),
+- the committed `Cargo.lock` (dependency versions).
+
+Changing any of these is a WASM change: re-pin in the same commit. The build
+output does not depend on the checkout path, so a Linux workstation with the
+same three inputs reproduces the CI hash.
 
 ### Operator flow for (re)pinning
 
@@ -608,6 +704,17 @@ make wasm-hash-update
 git add wasm-hash.pin
 git commit -m "chore: bump wasm-hash.pin after <feature>"
 ```
+
+### Operator verification before deploy
+
+On the release commit, with the pinned toolchain and Stellar CLI 26.1.0:
+
+```bash
+make wasm-hash-pin WASM_HASH_STRICT=1   # must print "OK: WASM hash matches pin."
+```
+
+After uploading, `stellar contract fetch --id <CONTRACT_ID> --network <NETWORK> --out-file deployed.wasm`
+followed by `sha256sum deployed.wasm` must print the same value as `wasm-hash.pin`.
 
 ### Explorer verification
 
@@ -731,6 +838,66 @@ If intentional feature growth pushes the binary past 200 KB:
 4. Document the new limit and the feature that required the bump in this table.
 5. Include before/after sizes in the PR description.
 
+### Local wasm-size gate
+
+Before opening a PR, always run the wasm size check locally to catch oversized
+builds early:
+
+```bash
+make wasm-size
+```
+
+This command builds the optimized release WASM and compares its size against
+`WASM_SIZE_LIMIT` in the Makefile. If the build exceeds the budget, the command
+exits with a non-zero status and prints the current size vs. the limit.
+
+**Important**: Always run `make wasm-size` after making changes to the contract
+code, especially when adding new features or dependencies. CI runs this check
+immediately after the release build, so a size increase beyond the budget will
+fail the CI job.
+
+### Intentional limit bump process
+
+If a new feature legitimately requires increasing the WASM size budget, follow
+this process:
+
+1. **Document the reason** in the PR description: explain why the size increase
+   is necessary and reference the relevant benchmark data (see
+   [BENCHMARK_BUDGETS.md](./BENCHMARK_BUDGETS.md)).
+2. **Update the Makefile**: increase `WASM_SIZE_LIMIT` in the Makefile.
+3. **Update CI**: increase the corresponding limit in
+   `.github/workflows/ci.yml`.
+4. **Update documentation**: update this section (DEPLOYMENT.md) to reflect the
+   new budget.
+5. **Get approval**: the PR must be reviewed and approved by maintainers before
+   merging.
+
+**Note**: Debug builds are not compared against the release limit. Only
+optimized release builds are checked.
+
+### Troubleshooting
+
+If `make wasm-size` reports a size that differs from what you expect:
+
+- **Stellar contract build vs. cargo build**: The check uses
+  `stellar contract build` (the same command used for deployment), not plain
+  `cargo build`. If you see a size discrepancy, ensure you're comparing release
+  builds, not debug builds.
+- **Feature flags**: Size can vary based on enabled feature flags. Check the
+  Makefile for any feature flags that affect the build.
+- **wasm-opt**: The release build runs wasm-opt for size optimization. If you're
+  building locally without wasm-opt, the size will be larger.
+- **wasm-hash.pin**: The wasm hash pin is separate from the size check. See the
+  [WASM Hash Verification](#wasm-hash-verification) section for details.
+
+### Related documentation
+
+- [BENCHMARK_BUDGETS.md](./BENCHMARK_BUDGETS.md) — Benchmark data and size
+  budgets for different features
+- [CONTRIBUTING.md](./CONTRIBUTING.md) — Contribution guidelines and quality
+  gates
+- [DEPLOYMENT.md](./DEPLOYMENT.md) — This file (deployment guide)
+
 ## Provenance digests: SBOM and source (Issue #224)
 
 `WasmProvenance` carries two digests beyond `wasm_hash`:
@@ -793,4 +960,19 @@ against, and the check fails closed rather than passing.
 stellar contract build
 HASH=$(sha256sum target/wasm32v1-none/release/trustbridge_contract.wasm | cut -d' ' -f1)
 make assert-build CONTRACT_ID=$CONTRACT_ID WASM_HASH=$HASH
+```
+
+## Version Inspection for CLI Operators
+
+Contract entrypoints (`version()`, `get_version()`, `migrate()`) return and accept
+`(u32, u32, u32)` tuples, which `stellar contract invoke` prints as JSON arrays
+(e.g. `[1, 1, 0]`). In Rust/CLI diagnostics (`src/version.rs`), `Display`
+formats `Version` as `"1.1.0"`, `MigrationState` as `not_required` / `pending` /
+`in_progress` / `completed` / `failed`, and `CompatibilityInfo` as
+`current=1.0.0 target=1.1.0 migration_required=true breaking_changes=false data_migration_required=true`.
+
+```bash
+stellar contract invoke --id $CONTRACT_ID --source deployer --network testnet \
+  -- version
+# Output: [1,1,0]  (equivalent to Version::Display "1.1.0")
 ```

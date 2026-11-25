@@ -21,6 +21,7 @@ Related docs: [SECURITY](SECURITY.md) · [ABI](ABI.md) · [DEPLOYMENT](DEPLOYMEN
 - [Recovery notes](#recovery-notes)
 - [Guardian Circuit Breaker (Issue #196)](#guardian-circuit-breaker-issue-196)
 - [Wave Pause Checklist](#wave-pause-checklist)
+- [Oracle Outage Incident Checklist](#oracle-outage-incident-checklist-issue-694)
 
 ## Routine actions
 
@@ -58,6 +59,34 @@ operation with an actionable error instead of being inferred with `grep` or
 `jq`. Keep the Stellar CLI identity and network explicit for every operation;
 the WASM hash remains independently checked by `make wasm-hash-pin`.
 
+### Error handling and exit codes
+
+`StellarCLIError` appends a `HINT:` line for common failure classes so the
+next step is visible without re-reading CLI internals:
+
+| Failure text (stderr) | Hint points at |
+|---|---|
+| RPC connect / reset / timeout / DNS | `--network` / `NETWORK`, RPC connectivity, retry with backoff |
+| Contract ID not found | `CONTRACT_ID` and network-vs-deployment mismatch |
+| Account missing / unfunded / insufficient balance | `SOURCE` funding on that network |
+| `require_auth` / not authorized / signature | `--caller` must equal the signing `--source-account` |
+| Contract paused | `is_paused` / `is_emergency_paused` before retrying writes |
+| Rate-limited / overloaded RPC | Backoff, slower pacing, smaller `--page-limit` |
+| CLI binary missing / not executable | Install `stellar-cli >= 26.x`, `PATH`, or `STELLAR=<path>` |
+| Non-JSON CLI output | CLI version and live `<fn> --help` signature match |
+
+Exit contract for `scripts/export_registry.py` and
+`scripts/payout_allowlist.py` (both delegate to this client):
+
+- `0` — success; the artifact was written.
+- `1` — CLI/RPC failure, malformed response, pagination stall, or invalid
+  response shape. The `ERROR:` line goes to stderr and carries the hint.
+- `2` — argument/config errors via `argparse` (missing `--contract` /
+  `CONTRACT_ID`, bad `--page-limit`).
+
+These examples keep working unchanged — same environment-variable interface,
+same commands as above. Only the failure output is richer.
+
 ---
 
 ## Stellar Lab & CLI invoke recipes
@@ -75,6 +104,11 @@ stellar contract invoke --id "$CONTRACT_ID" --network "$NETWORK" -- --help
 stellar contract invoke --id "$CONTRACT_ID" --network "$NETWORK" -- <fn> --help
 ```
 
+For routine operations, use the [Makefile invoke targets](../README.md#common-admin-operations)
+with `CONTRACT_ID` (or `CONTRACT`), `NETWORK`, and `SOURCE` set explicitly.
+`make help` lists them. Set `SEND=no` to simulate before submitting; the direct
+CLI recipes below show the equivalent submitted commands.
+
 ### Conventions & auth gotchas
 
 | Item | Rule |
@@ -84,7 +118,8 @@ stellar contract invoke --id "$CONTRACT_ID" --network "$NETWORK" -- <fn> --help
 | **`--source-account` vs `caller` arg** | Two independent things. `--source-account` signs and pays the transaction. Functions like `verify`, `revoke_verification`, `batch_verify`, `batch_remove`, `set_bot_status`, `execute_admin_transfer` **also** take a `caller: Address` argument that the contract checks against the admin / role holder. They must normally be the **same** identity: pass `--caller "$ADMIN"` and sign with the admin identity. |
 | **Admin is immutable** | Set once by `initialize`. It is never rotated in place — use the [admin-transfer](#admin-transfer-recipes) flow, which redeploys admin rights atomically. |
 | **Role holders** | `verify` / `batch_verify` accept the admin **or** a `Role::Verifier` holder. `revoke_verification` accepts the admin **or** a `Role::Revoker` holder. A `Verifier` cannot revoke; a `Revoker` cannot verify. Everything else is admin-only. |
-| **Pause interaction** | Most mutating admin ops return `Paused` (code 7) while the contract is paused. Exceptions that work while paused: `pause`, `unpause`, `set_paused`, `emergency_pause`, `clear_emergency_pause`, `attest_upgrade`, `clear_attestation`, `set_attestation_required`, `upgrade`, `migrate`, and all reads. |
+| **Pause interaction** | Most mutating admin ops return `Paused` (code 7) while the contract is paused. Exceptions that work while paused: `pause`, `unpause`, `set_paused`, `emergency_pause`, `clear_emergency_pause`, `attest_upgrade`, `clear_attestation`, `set_attestation_required`, `upgrade`, `migrate`, `extend_registry_ttl` (permissionless rent keeper — see below), and all reads. |
+| **TTL extension during pause** | `extend_registry_ttl` is intentionally callable by anyone, paused or not (Issue #791). It only ever bumps a record's storage TTL — it cannot corrupt state — so gating it behind the pause flag would mean an emergency pause also starves the rent-keeper job and lets cold entries expire mid-incident. Keep the off-chain keeper running unmodified through a pause; do not add a pause check before calling it. Covered by `tests/extend_registry_ttl.rs`. |
 | **Simulate first** | Drop `--send=yes` to simulate only — the CLI prints the result and diagnostic events without submitting. In Lab, use **Simulate** before **Sign & Submit**. Always simulate a role, pause, upgrade, or admin-transfer call before sending. |
 | **WASM hash** | `upgrade` / `attest_upgrade` take the **hex** SHA-256 of the `.wasm` (`stellar contract install` prints it; `make wasm-hash-pin` checks it against `wasm-hash.pin`). Not the contract ID, not base64. |
 | **No secrets in examples** | Never paste a secret seed into Lab's request body or a shell history. Use a named CLI identity (`stellar keys …`) or a hardware/multisig signer. |
@@ -101,7 +136,7 @@ procedure; these are the bare invoke lines.
 
 ```bash
 stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
-  -- pause
+  -- pause --reason-code 1
 ```
 
 - **Auth:** admin only. **Works while paused:** yes (idempotent).
@@ -112,7 +147,7 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 
 ```bash
 stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
-  -- unpause
+  -- unpause --reason-code 4
 ```
 
 - **Auth:** admin only. Emits `UnpausedEvent`.
@@ -124,8 +159,12 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 
 ```bash
 stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
-  -- set_paused --paused true      # or --paused false
+  -- set_paused --paused true --reason-code 1
 ```
+
+Use `--paused false --reason-code 4` to resume. Reason codes are `1`
+maintenance, `2` security incident, `3` regulatory hold, `4` unpause, and
+`99` other.
 
 - **Auth:** admin only. Emits `PausedEvent` / `UnpausedEvent` **only on a state
   change** (Issue #197) — a no-op call is silent, which is what makes it safe
@@ -150,6 +189,9 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 
 - **Auth:** admin **only** — the guardian deliberately cannot clear it.
   Emits `EmergencyClearedEvent`.
+- After clearing, verify both `is_emergency_paused` and `is_paused` are false
+  before retrying writes; clearing the emergency flag does not clear a normal
+  pause. Register and verify writes are available again once both flags are off.
 
 ---
 
@@ -174,6 +216,58 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 ```
 
 - **Auth:** admin only. After this, only the admin can `emergency_pause`.
+
+> Capability table: [SECURITY.md guardian vs admin](SECURITY.md#guardian-vs-admin-capabilities-issue-635) — guardian can only `emergency_pause`; all upgrade, role-grant, and `batch_remove` paths are admin-only.
+
+#### Guardian rotation during an incident (Issue #779)
+
+`remove_guardian` and `set_guardian` are **single-admin-signature**
+calls — there is no on-chain dual-control for guardian rotation, unlike
+`batch_remove` (see [Dual-Control `batch_remove`](#dual-control-batch_remove-issue-219)).
+Whoever holds the admin key can rotate the guardian unilaterally in one
+transaction. Treat the steps below as an operational checklist, not an
+on-chain guarantee — a compromised admin key defeats this procedure
+entirely, so key custody is the real control here.
+
+Rotate the guardian when: the guardian's signing key is suspected
+compromised, the operator holding it is unreachable during an incident, or
+responsibility is handing off to a different on-call operator.
+
+1. **Confirm the current guardian** before changing anything:
+   ```bash
+   stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" \
+     -- get_guardian
+   ```
+2. **Remove the old guardian first**, rather than overwriting it with
+   `set_guardian` directly, when the old key is suspected compromised —
+   this creates an auditable gap with no guardian at all rather than a
+   single `set_guardian` call that silently replaces one key with another:
+   ```bash
+   stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
+     -- remove_guardian
+   ```
+3. **Verify removal** by confirming `get_guardian` returns no address, and
+   check the transaction's emitted events for `guardian_changed_event`
+   with no guardian topic value (see `tests/remove_guardian_auth.rs` for
+   the exact event-emission contract this locks).
+4. **Set the new guardian** once the replacement's address is confirmed
+   out-of-band (e.g. a second operator reads it back over a separate
+   channel) — do not take a pasted address on faith during a live incident:
+   ```bash
+   stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
+     -- set_guardian --guardian "$NEW_GUARDIAN_ADDRESS"
+   ```
+5. **Confirm the new guardian can pause**: have the new guardian run
+   `emergency_pause` against a non-production or rehearsal contract if one
+   is available, to confirm the key itself works before relying on it live.
+6. **Record the rotation** — old guardian address, new guardian address,
+   admin address that performed the rotation, timestamp, and reason — in
+   the incident log, not only in the on-chain event history.
+
+Since removal and re-set are both single-signature, the only time-critical
+risk during rotation is step 2 → step 4: any `emergency_pause` need that
+arises in that window must be performed by the admin directly, since no
+guardian is set.
 
 ---
 
@@ -293,9 +387,42 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   -- batch_remove --caller "$ADMIN" --usernames '["octocat","alice"]'
 ```
 
+Or via Makefile:
+
+```bash
+make invoke-batch-remove \
+  CONTRACT_ID=$CONTRACT_ID \
+  SOURCE=admin \
+  CALLER=$ADMIN \
+  USERNAMES='["octocat","alice"]'
+```
+
 - **Auth:** strictly admin (unlike single `remove`, registrants cannot use it).
   Capped at 25. Returns a `BatchSummary`. Decrements total and verified counters
   for each removed record.
+
+#### `repair_index` — dry-run and fix drifted counters
+
+```bash
+# Dry run first: writes nothing, just reports drift.
+stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=no \
+  -- repair_index --apply false
+
+# Only after reviewing the dry-run report: apply the fix.
+stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
+  -- repair_index --apply true
+```
+
+- **Auth:** admin-only.
+- **Dry run (`apply = false`) is a pure read** — it never writes `count` or
+  `verified`, even when it finds no drift. Always run this first.
+- **`apply = true` corrects both `count` and `verified` together in a
+  single invocation** — there is no partial state where only one counter
+  gets fixed; Soroban commits all of an invocation's storage writes or none
+  of it. A call that finds no drift is a no-op even with `apply = true`.
+- See [SECURITY.md § Index Repair](SECURITY.md#index-repair-repair_index)
+  for the full atomicity and dry-run-write guarantees, and
+  `tests/repair_index.rs` for the automated proof.
 
 #### `set_bot_status` — flag / unflag a CI account
 
@@ -304,8 +431,23 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   -- set_bot_status --caller "$ADMIN" --github-username ci-bot --is_bot true
 ```
 
-- **Auth:** admin only. Dashboards exclude `is_bot == true` records from human
-  contributor stats. Note the arg is `--is_bot` (underscore), matching the ABI.
+- **Auth:** the contract admin **or the record's own registrant** (the
+  `stellar_address` on the record). Any other caller gets `NotAuthorized`; an
+  unknown username gets `NotRegistered`; the call is rejected with `Paused`
+  while the contract is paused. This matches the `set_bot_status` rows in
+  `tests/auth_matrix.csv` and the ABI reference.
+- Dashboards exclude `is_bot == true` records from human contributor stats.
+  Note the arg is `--is_bot` (underscore), matching the ABI.
+
+#### `get_bot_status` — permissionless bot flag read
+
+```bash
+stellar contract invoke --id "$CONTRACT_ID" --network "$NETWORK" \
+  -- get_bot_status --github-username ci-bot
+```
+
+- Returns `true` or `false` for a registered account without requiring auth;
+  returns `NotRegistered` for an unknown username and works while paused.
 
 #### `adopt_network_tag` — tag a pre-network-tagging instance
 
@@ -318,6 +460,46 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   passphrase) on an instance deployed before Issue #231. Fails
   `NetworkMismatch` if a different tag is already recorded. Read with
   `-- get_network_tag`.
+
+---
+
+### Staged WASM CLI recipes
+
+The externally callable ABI functions are `stage_wasm`, `get_staged`,
+and `clear_staged`. In particular, `commit_staged_wasm` is **not** an
+exported function; `clear_staged_wasm` is only an internal Rust storage
+helper. See [ABI staged WASM entrypoints](ABI.md#staged-wasm-entrypoints-issue-594)
+and [staged-slot security](SECURITY.md#staged-wasm-slot-issue-300).
+
+The hash below is the 32-byte hex WASM hash returned by
+`stellar contract install`. `CONTRACT_ID`, `NETWORK`, and `ADMIN`
+follow the [CLI conventions](#conventions--auth-gotchas).
+
+```bash
+# Install the candidate WASM and obtain its hash.
+HASH=$(stellar contract install --wasm target/wasm32v1-none/release/trustbridge_contract.wasm \
+  --source-account admin --network "$NETWORK")
+
+# Stage the intended hash (admin or Upgrader); --caller must sign.
+stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
+  -- stage_wasm --caller "$ADMIN" --wasm-hash "$HASH"
+
+# Public read: inspect the staged hash before requesting an upgrade.
+stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" \
+  -- get_staged
+
+# Admin-only: retract a staged hash if the upgrade is cancelled.
+stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
+  -- clear_staged --caller "$ADMIN"
+```
+
+Staging is advisory: absent a staged hash, ordinary upgrade rules still
+apply. When a hash is staged, `execute_upgrade` must use that hash.
+`clear_staged` is idempotent and does not emit a clearing event for an
+already-empty slot. These are separate calls, not a
+`commit_staged_wasm` operation. The upgrade itself follows the
+[upgrade and attestation](#upgrade--attestation-recipes) or
+[multisig upgrade](#multisig-upgrade-flow-issue-301) recipe.
 
 ---
 
@@ -468,9 +650,38 @@ Gotchas:
   governance round can replace it.
 - If a staged WASM slot is set (`stage_wasm` / `get_staged`), the proposal hash
   must match it or `execute_upgrade` fails with `StagedWasmMismatch`.
+- `clear_staged` is **idempotent**. Admin-only. If nothing is staged (retry
+  after an aborted upgrade, a second clear, or after `execute_upgrade` already
+  emptied the slot), the call returns `Ok(())`, leaves no `stgwasm` instance
+  key, and does **not** emit `StagedWasmClearedEvent`. A non-admin caller is
+  rejected with `NotAuthorized` before any storage write. `stage_wasm` and
+  `clear_staged` are sequential on-chain operations; the contract does not
+  define extra concurrency beyond "last successful call wins".
 - Execute fails with `UpgradeProposalDelayActive` while the delay is running and
   `UpgradeProposalInsufficientApprovals` until the threshold is met — both are
   transient, so retrying after more approvals / time is expected.
+- `set_upgrade_threshold` **fails closed** with `ThresholdExceedsSignerCap`
+  (Issue #795) if `--threshold` is greater than `MAX_UPGRADE_SIGNERS` (the
+  hard cap on distinct approvers per proposal — currently 20). An impossible
+  threshold would permanently freeze every future upgrade, since no proposal
+  could ever collect enough approvals to execute. The call is rejected before
+  any storage write, so the previous threshold is left unchanged.
+  **Recovery:** if this is ever hit (e.g. a typo in `--threshold`), simply
+  retry `set_upgrade_threshold` with a value `<= MAX_UPGRADE_SIGNERS`:
+  ```bash
+  # Rejected — exceeds the signer cap, previous threshold unchanged:
+  stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
+    -- set_upgrade_threshold --caller "$ADMIN" --threshold 9999
+
+  # Recover by lowering the threshold to a reachable value:
+  stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
+    -- set_upgrade_threshold --caller "$ADMIN" --threshold 2
+  ```
+  There is no separate "add signers" step — this contract has no fixed
+  signer roster; any admin/Upgrader-privileged address may approve a given
+  proposal (see [multisig upgrade flow](#multisig-upgrade-flow-issue-301)).
+  The only hard ceiling is `MAX_UPGRADE_SIGNERS` itself, so recovery is always
+  "lower the threshold to something `<= MAX_UPGRADE_SIGNERS`".
 
 ---
 
@@ -543,7 +754,34 @@ CONTRACT_ID="$CONTRACT_ID" SOURCE=admin NETWORK="$NETWORK" ./scripts/export_regi
 
 - Pages `get_registered_paginated` and writes a single
   `registry-export-<network>.json`. `SOURCE` must sign as the admin. Take an
-  export **before** any bulk verify/remove or dashboard migration.
+  export **before** any bulk verify/remove or dashboard migration. The file
+  includes the original per-page records and `merkle_root` values as well as
+  the legacy flattened `records` list.
+
+#### Verify exported pages offline (Issue #718)
+
+Run the verifier on the captured file on an offline machine; it needs only
+Python 3 and does not contact Stellar or require a signer:
+
+```bash
+python3 scripts/verify_merkle_export.py registry-export-testnet.json
+```
+
+The export must have been created by the current `export_registry.py`, which
+records each page's records and the `merkle_root` returned by
+`get_registered_paginated`. The verifier rebuilds the v1 leaves from canonical
+username, `stellar_address` strkey, and `verified`, then applies the documented
+domain-separated SHA-256 tree (odd nodes are promoted unchanged; an empty page
+has a 32-byte zero root). Success prints verified page/record counts and exits
+0. Missing roots, malformed page/record data, invalid root encodings, or a
+root mismatch print an `ERROR` and exit non-zero. A mismatch means the
+page's committed username/address/verified data changed or was paired with a
+different page root; rerun the export and compare the captured file and
+network/contract metadata. For authenticity, retain the expected page roots
+from a trusted on-chain read or separate trusted record: the verifier proves
+that a page matches its included root, not who supplied that root. Other
+fields such as `registered_at` are not part of the Merkle leaf and are not
+authenticated by this check.
 
 #### `scripts/payout_allowlist.sh` — verified-only payout CSV (Issue #285)
 
@@ -566,12 +804,19 @@ CONTRACT_ID="$CONTRACT_ID" NETWORK="$NETWORK" \
 
 ---
 
+## Pre-Wave health probes (Issue #668)
+
+Before opening a Wave, run `get_health_probes` (no auth, works while paused)
+and confirm `paused: false` and `admin_set: true`; record `index_gen` so a
+later jump flags unexpected removals. Field meanings and remediation are in
+[`CONTRACT_HEALTH.md`](CONTRACT_HEALTH.md#pre-wave-probes-issue-668).
+
 ## Storage TTL Maintenance (Keeper)
 
 Soroban persistent entries expire unless their TTL is extended. A registry with inactive contributors will silently lose its cold entries if not maintained.
 
 ### When to run it
-Run the `ttl_keeper.sh` script periodically (e.g., weekly or monthly) to walk the entire registry and bump the TTL of every registered contributor.
+Run the `ttl_keeper.sh` script at least every ~20 days (`KEEPER_INTERVAL`, two-thirds of the 30-day `TTL_THRESHOLD`) to walk the entire registry and bump the TTL of every registered contributor. Follow the [operator playbook](STORAGE_RENT.md#operator-playbook-ttl-extension-issue-660) for sizing, dry-run, verification, and archived-entry recovery.
 
 ```bash
 # Preferred: the Makefile target, so contract id / source / network come from
@@ -903,6 +1148,16 @@ stellar contract invoke \
   -- set_batch_remove_threshold --threshold 10
 ```
 
+Or via Makefile:
+
+```bash
+# Set threshold (0 to disable)
+make invoke-set-batch-remove-threshold CONTRACT_ID=$CONTRACT_ID SOURCE=admin-identity THRESHOLD=10
+
+# Inspect configured threshold
+make invoke-get-batch-remove-threshold CONTRACT_ID=$CONTRACT_ID
+```
+
 `0` (the default) disables dual control entirely — every `batch_remove` call
 executes directly regardless of size, identical to pre-#219 behavior. With a
 threshold set, any batch **larger** than it (strictly greater; a batch
@@ -947,6 +1202,26 @@ stellar contract invoke \
   -- execute_batch_remove --caller $SECOND_KEY
 ```
 
+Or via Makefile:
+
+```bash
+# Admin proposes
+make invoke-propose-batch-remove \
+  CONTRACT_ID=$CONTRACT_ID \
+  SOURCE=admin-identity \
+  CALLER=$ADMIN \
+  USERNAMES='["squatter1","squatter2"]'
+
+# View pending proposal (read-only)
+make invoke-get-pending-batch-remove CONTRACT_ID=$CONTRACT_ID
+
+# A DIFFERENT Role::Admin holder executes
+make invoke-execute-batch-remove \
+  CONTRACT_ID=$CONTRACT_ID \
+  SOURCE=second-key-identity \
+  CALLER=$SECOND_KEY
+```
+
 `get_pending_batch_remove` shows what is queued (works while paused). A
 proposal not executed within 24 hours (`BATCH_REMOVE_PROPOSAL_TTL_SECS`) is
 treated as gone the next time anyone calls `execute_batch_remove` — propose
@@ -960,12 +1235,30 @@ stellar contract invoke \
   -- cancel_batch_remove --caller $ADMIN
 ```
 
+Or via Makefile:
+
+```bash
+make invoke-cancel-batch-remove \
+  CONTRACT_ID=$CONTRACT_ID \
+  SOURCE=admin-identity \
+  CALLER=$ADMIN
+```
+
 Available even while paused, so a stuck or mistaken proposal is never
 trapped behind the same freeze that might be the reason to cancel it.
 
 The full threshold / propose / execute / cancel / pause / auth behaviour is
 covered by `tests/batch_remove_dual_control.rs`, which also asserts the
 `BatchRemoveProposed` / `BatchRemoveExecuted` / `BatchRemoveCancelled` events.
+
+**Both approvals are required.** After only the first approval
+(`propose_batch_remove`), the usernames are still registered and
+`get_pending_batch_remove` is `Some`. A second call from the *same* key
+(`execute_batch_remove` by the proposer) is `NotAuthorized` and still
+does not delete. Removal completes only when a **different** admin-equivalent
+address executes. `tests/batch_remove_dual_control.rs::test_dual_control_batch_remove_requires_both_approvals`
+is the regression for that state machine (Issue #439): it would fail if a
+single-control bypass were introduced.
 
 ## Watchtower guardian (Issue #222)
 
@@ -1013,6 +1306,104 @@ stellar contract invoke \
   -- remove_guardian
 ```
 
+## Oracle Outage Incident Checklist (Issue #694)
+
+Use this checklist when oracle-signed verification stops working (e.g. the
+signing service is unreachable, a key is rotated, or proofs start failing with
+`OracleProofNotAllowlisted` / `OracleProofExpired`).
+
+### Step 1 — Pause the contract
+
+Stop new writes immediately so stale or forged proofs cannot be accepted while
+you investigate.
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- pause --reason-code 2
+```
+
+Confirm: `-- is_paused` must return `true`.
+
+### Step 2 — Rotate the oracle allowlist
+
+Replace the compromised or stale key(s) with the new oracle public key(s).
+An empty allowlist disables oracle-proof verification entirely; supply at least
+one key to re-enable it.
+
+```bash
+# Rotate to a single new key (replace NEW_ORACLE_PUBKEY with the hex-encoded
+# 32-byte Ed25519 public key of the replacement oracle):
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- set_oracle_allowlist \
+     --pubkeys '["<NEW_ORACLE_PUBKEY_HEX>"]'
+
+# Verify the allowlist was set correctly:
+stellar contract invoke \
+  --id $CONTRACT_ID --network testnet \
+  -- get_oracle_allowlist
+```
+
+- Supply multiple keys as a JSON array to allow rolling rotation without a
+  verification gap: `'["<KEY_A>","<KEY_B>"]'`.
+- An empty array `'[]'` disables oracle proofs completely. Only do this if you
+  intend to fall back to admin/verifier attestation for all verifications.
+- The allowlist is stored in instance storage; bump the contract's TTL if
+  needed after a long pause (see [Storage TTL Maintenance](#storage-ttl-maintenance-keeper)).
+
+### Step 3 — Communicate the outage
+
+Notify downstream consumers before unpausing so they can hold submissions:
+
+1. Post a brief incident note to your team channel with:
+   - Incident start time (ledger sequence of the first failing proof).
+   - Scope (which oracle key was affected).
+   - ETA for restoration.
+2. If `verify_with_proof` is a public endpoint, update your status page.
+3. Record the old key(s) you removed in the incident log for post-mortem.
+
+### Step 4 — Validate the new key end-to-end
+
+Before unpausing, confirm the oracle service is signing with the new key and
+that proofs pass. Use `--send=no` (simulate) to test without submitting:
+
+```bash
+# Simulate a verify_with_proof call with a fresh proof from the new oracle:
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account any-account --network testnet \
+  -- verify_with_proof \
+     --github-username octocat \
+     --proof '{"oracle_pubkey":"<NEW_KEY_HEX>","expires_at":<UNIX_TS>,"signature":"<SIG_HEX>"}'
+```
+
+A simulation that returns `Ok(())` (no error, no `OracleProofNotAllowlisted`)
+confirms the allowlist is correct.
+
+### Step 5 — Unpause and monitor
+
+```bash
+stellar contract invoke \
+  --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
+  -- unpause --reason-code 4
+```
+
+Confirm: `-- is_paused` returns `false` and `-- is_emergency_paused` returns
+`false`. Monitor `verify_with_proof` calls for the next 15 minutes via
+`scripts/event_indexer.sh` to confirm `VerifiedEvent` entries resume.
+
+### Quick-reference card
+
+| Step | Command | Expected outcome |
+|---|---|---|
+| 1 — Pause | `pause --reason-code 2` | `is_paused` → `true` |
+| 2 — Rotate allowlist | `set_oracle_allowlist --pubkeys '[...]'` | `get_oracle_allowlist` returns new key(s) |
+| 3 — Communicate | — | Team + status page notified |
+| 4 — Validate | `verify_with_proof` (simulate) | No `OracleProof*` error |
+| 5 — Unpause | `unpause --reason-code 4` | `is_paused` → `false` |
+
+---
+
 ## Timelocked role grants (Issue #220)
 
 `set_role` is instant while `get_role_delay()` is `0`. Once the admin sets a
@@ -1038,3 +1429,9 @@ stellar contract invoke --id $CONTRACT_ID --network testnet -- get_pending_role 
 stellar contract invoke --id $CONTRACT_ID --source-account admin-identity --network testnet --send=yes \
   -- activate_role --target $TARGET
 ```
+
+Subgraph consumers: `RoleGrantPendingEvent` handler mapping lives in
+[docs/subgraph/README.md](subgraph/README.md) with the entity in
+[docs/subgraph/schema.graphql](subgraph/schema.graphql); topic symbol coverage
+is enforced by `scripts/check_event_topics.sh` over `scripts/event_indexer.sh`
+`TOPIC_TABLE`. Dashboard state notes: [DASHBOARD_SYNC.md](DASHBOARD_SYNC.md).

@@ -34,7 +34,6 @@ pub fn is_zero_address(env: &Env, address: &Address) -> bool {
 /// Stack buffer size for username copies. Sized above `MAX_USERNAME_LEN`, so
 /// an over-long username is rejected on length before it is ever read.
 const USERNAME_BUF: usize = 64;
-const USERNAME_BUF_LEN: usize = USERNAME_BUF;
 
 /// Copies a username into a fixed stack buffer.
 ///
@@ -219,16 +218,24 @@ pub fn canonicalize_username(env: &Env, s: &String) -> String {
     }
 }
 
-/// Calculate the percentage of verified contributors out of total.
+/// Calculate the percentage of verified contributors out of total using standard
+/// half-up rounding: `(verified * 100 + total / 2) / total`.
 ///
-/// Staged: not yet wired into a call site — intended for the dashboard
-/// stats endpoint once a percentage field is added to `Stats`.
-#[allow(dead_code)] // Issue #248: covered by tests; staged for Stats percentage field.
+/// - Returns 0 if `total == 0` or `verified == 0`.
+/// - Returns 100 if `verified >= total` (clamped).
+/// - Rounds fractional ratios to the nearest whole percentage with round-half-up
+///   semantics (e.g. 1/3 = 33%, 2/3 = 67%, 1/6 = 17%, 5/6 = 83%).
+#[allow(dead_code)] // Issue #248: covered by tests; used by BatchSummary and staged for Stats percentage.
 pub fn calculate_verification_percentage(verified: u32, total: u32) -> u32 {
-    if total == 0 {
+    if total == 0 || verified == 0 {
         return 0;
     }
-    ((verified as u64 * 100) / (total as u64)) as u32
+    if verified >= total {
+        return 100;
+    }
+    let verified = verified as u64;
+    let total = total as u64;
+    ((verified * 100 + (total / 2)) / total) as u32
 }
 
 /// Generate a timestamped event ID for audit trails.
@@ -244,6 +251,7 @@ pub fn generate_event_id(env: &Env, nonce: u32) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::Ledger as _;
     use soroban_sdk::Env;
 
     fn s(env: &Env, value: &str) -> String {
@@ -266,6 +274,54 @@ mod tests {
         assert!(is_empty_or_whitespace(&s(&env, "")));
         assert!(is_empty_or_whitespace(&s(&env, "   ")));
         assert!(!is_empty_or_whitespace(&s(&env, "hello")));
+    }
+
+    // ── Stack-buffer boundaries (mutation-testing gaps, Issue #574) ──────────
+    //
+    // `USERNAME_BUF` (64) is the largest input copied onto the stack; one
+    // byte more must take the "too long" branch instead of overrunning it.
+
+    #[test]
+    fn test_is_empty_or_whitespace_at_buffer_boundary() {
+        let env = Env::default();
+        assert!(is_empty_or_whitespace(&s(&env, &" ".repeat(USERNAME_BUF))));
+        assert!(!is_empty_or_whitespace(&s(
+            &env,
+            &" ".repeat(USERNAME_BUF + 1)
+        )));
+    }
+
+    #[test]
+    fn test_eq_ignore_ascii_case_at_buffer_boundary() {
+        let env = Env::default();
+        let fits = s(&env, &"a".repeat(USERNAME_BUF));
+        let fits_upper = s(&env, &"A".repeat(USERNAME_BUF));
+        assert!(eq_ignore_ascii_case(&fits, &fits_upper));
+        let over = s(&env, &"a".repeat(USERNAME_BUF + 1));
+        assert!(!eq_ignore_ascii_case(&over, &over.clone()));
+    }
+
+    #[test]
+    fn test_canonicalize_username_at_buffer_boundary() {
+        let env = Env::default();
+        assert_eq!(
+            canonicalize_username(&env, &s(&env, &"A".repeat(USERNAME_BUF))),
+            s(&env, &"a".repeat(USERNAME_BUF))
+        );
+        // Too long to fold: returned unchanged.
+        let over = s(&env, &"A".repeat(USERNAME_BUF + 1));
+        assert_eq!(canonicalize_username(&env, &over), over);
+    }
+
+    #[test]
+    fn test_is_zero_address() {
+        use soroban_sdk::testutils::Address as _;
+        let env = Env::default();
+        assert!(is_zero_address(
+            &env,
+            &Address::from_str(&env, ZERO_ADDRESS_STRKEY)
+        ));
+        assert!(!is_zero_address(&env, &Address::generate(&env)));
     }
 
     // ── Valid username acceptance ─────────────────────────────────────────────
@@ -636,17 +692,47 @@ mod tests {
     // ── Percentage helper ─────────────────────────────────────────────────────
 
     #[test]
-    fn test_calculate_verification_percentage() {
+    fn test_calculate_verification_percentage_boundaries() {
+        // Zero cases
+        assert_eq!(calculate_verification_percentage(0, 0), 0);
+        assert_eq!(calculate_verification_percentage(0, 1), 0);
         assert_eq!(calculate_verification_percentage(0, 100), 0);
-        assert_eq!(calculate_verification_percentage(50, 100), 50);
-        assert_eq!(calculate_verification_percentage(100, 100), 100);
-        assert_eq!(calculate_verification_percentage(1, 3), 33);
         assert_eq!(calculate_verification_percentage(10, 0), 0);
+
+        // 100% boundary & clamping
+        assert_eq!(calculate_verification_percentage(1, 1), 100);
+        assert_eq!(calculate_verification_percentage(50, 50), 100);
+        assert_eq!(calculate_verification_percentage(100, 100), 100);
+        assert_eq!(calculate_verification_percentage(150, 100), 100);
+    }
+
+    #[test]
+    fn test_calculate_verification_percentage_fractional_rounding() {
+        // Half cases
+        assert_eq!(calculate_verification_percentage(1, 2), 50);
+
+        // Thirds (1/3 = 33.333% -> 33, 2/3 = 66.666% -> 67)
+        assert_eq!(calculate_verification_percentage(1, 3), 33);
+        assert_eq!(calculate_verification_percentage(2, 3), 67);
+
+        // Sixths (1/6 = 16.666% -> 17, 5/6 = 83.333% -> 83)
+        assert_eq!(calculate_verification_percentage(1, 6), 17);
+        assert_eq!(calculate_verification_percentage(5, 6), 83);
+
+        // Eighths (1/8 = 12.5% -> 13, 3/8 = 37.5% -> 38, 5/8 = 62.5% -> 63, 7/8 = 87.5% -> 88)
+        assert_eq!(calculate_verification_percentage(1, 8), 13);
+        assert_eq!(calculate_verification_percentage(3, 8), 38);
+        assert_eq!(calculate_verification_percentage(5, 8), 63);
+        assert_eq!(calculate_verification_percentage(7, 8), 88);
     }
 
     #[test]
     fn test_percentage_does_not_overflow_at_u32_max() {
         assert_eq!(calculate_verification_percentage(u32::MAX, u32::MAX), 100);
+        assert_eq!(
+            calculate_verification_percentage(u32::MAX / 2, u32::MAX),
+            50
+        );
     }
 
     // ── Event ID helper ───────────────────────────────────────────────────────

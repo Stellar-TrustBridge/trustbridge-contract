@@ -35,12 +35,19 @@ cargo install --locked stellar-cli@26.1.0
 make check
 ```
 
-This runs the same checks as the two jobs in `.github/workflows/ci.yml`:
+`make check` is the full local quality gate (`make fmt`, `make lint`,
+`make test`, `make docs-check`, plus error-codes / event-topics / abi-check /
+build / wasm-size). Every pull request and push to `main` runs these jobs from
+`.github/workflows/ci.yml`; each one fails the workflow on its first error:
 
 | CI job | Make targets |
 |---|---|
-| `quality` | `make fmt` (`cargo fmt --check`), `make lint` (`clippy -D warnings`), `make test`, `make docs-check` |
+| `quality` | `cargo test --test homoglyph_corpus` (named blocking step), then `make check` (`make fmt`, `make lint`, `make test`, `make docs-check`, plus error-codes / event-topics / abi-check / wasm-size) |
 | `build` | `make build` (`stellar contract build`), `make wasm-size`, `make wasm-hash-pin WASM_HASH_STRICT=1` |
+| `abi-consistency` | `./scripts/check_error_codes.sh` (`make error-codes`) and `./scripts/check_event_topics.sh` (`make event-topics`) — fails on any `ContractError` / event-topic drift |
+| `oracle-proof-tests` | `cargo test --lib oracle_proof` |
+| `cargo-deny` | `cargo deny --config deny.toml check` (see [Supply-chain checks](#supply-chain-checks)) |
+| `mutants` | `cargo mutants --config mutants.toml --file src/utils.rs` — nightly and `workflow_dispatch` only (see [Mutation Testing](#mutation-testing--utilsrs-issue-243)) |
 
 `make ci` runs the same set with the strict hash gate enabled, so it fails while
 `wasm-hash.pin` still contains `PLACEHOLDER` or does not match the built WASM.
@@ -48,12 +55,15 @@ This runs the same checks as the two jobs in `.github/workflows/ci.yml`:
 ### Codespaces / devcontainer setup
 
 The repository devcontainer installs the same pinned CLI and WASM target used
-by the documented build flow: Stellar CLI `26.1.0` and `wasm32v1-none`.
-After the container is created, verify the setup with:
+by the documented build flow: Stellar CLI `26.1.0` and `wasm32v1-none` —
+plus the `make test` / `make fuzz` prerequisites (Python 3, `jq`, Node LTS).
+No secrets are baked into the container config. After the container is
+created, smoke-verify the setup with:
 
 ```bash
 stellar --version
 rustup target list --installed | grep wasm32v1-none
+make test          # smoke-verify a fresh container
 make build
 ```
 
@@ -89,6 +99,11 @@ uses the stable Rust image to match CI.
 ### Rust / Soroban
 
 - Match existing module structure (`lib.rs`, `storage.rs`, `events.rs`, `error.rs`)
+- Before filing a PR that touches `src/*.rs`, check the module-ownership
+  table and the "Shared helper functions" section in `ARCHITECTURE.md` —
+  it names which file owns each entrypoint and which cross-module helpers
+  a change must keep in sync, so changes land in the right module instead
+  of duplicating logic
 - Use `ContractError` for recoverable errors; `require_auth()` for auth failures
 - Add unit tests in `#[cfg(test)] mod test` within `lib.rs`
 - Keep functions focused; storage helpers belong in `storage.rs`
@@ -114,7 +129,6 @@ CI compares `docs/ABI.md` with the pull request base revision. Changes to
 public function signature headings require a new versioned `CHANGELOG.md`
 heading, for example `## [1.2.0] - 2026-08-28`, with a description of the
 change. Typo fixes and prose-only ABI edits do not require a changelog entry.
-
 The check is intentionally a heuristic: it watches function signature
 headings rather than trying to understand the complete ABI. If a legitimate
 prose edit is reported as an ABI change, add a reason in the changed changelog
@@ -130,6 +144,34 @@ new version instead. Run the same check locally with the base commit:
 ```bash
 bash scripts/check_changelog_abi.sh main
 ```
+
+### ABI JSON regeneration
+
+`docs/abi.json` is generated from `docs/ABI.md` by
+`scripts/generate_abi_json.py` — never hand-edit it. Regenerate it whenever
+you touch a function signature heading, the `ContractError` table, or an
+event topic/data block in `docs/ABI.md`:
+
+```bash
+make abi        # regenerate docs/abi.json
+make abi-check  # fail with a diff if docs/abi.json or the public-entrypoint golden is stale
+```
+
+Public function names and arity are snapshotted in
+`tests/testdata/abi/public_entrypoints.golden.json` (Issue #631). After an
+intentional public interface change:
+
+```bash
+python3 scripts/generate_abi_json.py --update-entrypoints-golden
+```
+
+Commit that golden together with `docs/ABI.md` / `docs/abi.json` so reviewers
+see the entrypoint list change in Git. Do not refresh it for documentation-only
+edits. Error-enum codes remain in `abi/contract_error_codes.golden`.
+
+`make abi-check` runs in `make check` and in the CI `quality` job, so a
+release that skips regeneration fails the gate. Commit the regenerated
+`docs/abi.json` alongside the `docs/ABI.md` change.
 
 ### Rustdoc
 
@@ -212,17 +254,30 @@ Configuration lives in `mutants.toml` at the repository root. The scope is
 intentionally limited to `src/utils.rs`; the rest of the crate is excluded to
 keep job time bounded.
 
+The `mutants` job in `.github/workflows/ci.yml` runs nightly (03:00 UTC) and
+on demand via **Actions → CI → Run workflow**; it does not run on pull
+requests because a full run is long: about 60 mutants, each needing an
+incremental build plus a test run (~18 minutes on an 8-core workstation;
+expect 30–60 minutes on a GitHub-hosted runner, hence the 90-minute job
+timeout). It fails when any mutant survives and uploads
+`mutants.out/missed.txt` (the survived list) and `outcomes.json` as the
+`mutants-survived` artifact. Each mutant is
+tested against the `utils::` unit tests and `tests/homoglyph_corpus.rs` only
+(`additional_cargo_test_args` in `mutants.toml`), which keeps runs short and
+independent of unrelated test failures elsewhere in the crate.
+
 ### Running locally
 
 ```bash
-# Install (one-time)
-cargo install cargo-mutants
+# Install (one-time; same version as CI)
+cargo install --locked cargo-mutants@27.1.0
 
-# Run mutations on utils.rs only
-cargo mutants --file src/utils.rs
+# Run mutations on utils.rs only (same command as CI; --config is required
+# because cargo-mutants otherwise only reads .cargo/mutants.toml)
+cargo mutants --config mutants.toml --file src/utils.rs
 
-# View survived mutants
-cat mutants-out/survived.txt
+# View survived mutants (cargo-mutants calls them "missed")
+cat mutants.out/missed.txt
 ```
 
 ### Interpreting results
@@ -243,6 +298,21 @@ test must **fail** on the mutated code and **pass** on the original.
 Test helpers and `#[cfg(test)]` modules are excluded in `mutants.toml`.
 Mutating test code produces meaningless results (a mutation that breaks a test
 is a bug in the test, not a gap in coverage).
+
+### Why `src/error.rs` is excluded (Issue #434)
+
+`src/error.rs` is an exhaustive discriminant table (`code()` /
+`from_code()`), a total retry-classification match (`category()` /
+`is_retryable()`), and derived impls — there is no branching logic for a
+mutant to weaken. Mutating it yields brittle noise: discriminant swaps and
+reordered `from_code` arms either fail to compile or are semantically
+identical, and a `category()` re-label is already pinned by
+`tests/contract_error_codes.rs` plus the `scripts/check_error_codes.sh`
+golden gate (enum ↔ `from_code` ↔ `abi/contract_error_codes.golden` ↔
+`docs/ABI.md`). `mutants.toml` therefore excludes `error.rs` boilerplate
+(`src/error.rs`, `fn code`, `fn from_code`, `fn category`, `fn is_retryable`)
+so mutation runs keep covering validation, storage, and business logic
+instead of re-proving a mapping that the error-code gate already freezes.
 
 ---
 
@@ -285,7 +355,68 @@ rejected in code review.
 
 ---
 
-CI runs `cargo audit` and `cargo deny check` on every PR. These catch:
+## Fuzz Testing
+
+The `fuzz/` directory contains `cargo-fuzz` targets that complement the
+homoglyph corpus and unit tests with random byte-level exploration.
+
+**Requires a nightly toolchain** — `cargo-fuzz` is a nightly-only tool.
+Install it once:
+
+```bash
+rustup toolchain install nightly
+cargo install --locked cargo-fuzz
+```
+
+### Available targets
+
+| Target | Path | What it fuzzes |
+|---|---|---|
+| `export_cursor` | `fuzz/fuzz_targets/export_cursor.rs` | Paginated-export cursor parsing (`get_public_paginated`) |
+| `pending_reverify_page` | `fuzz/fuzz_targets/pending_reverify_page.rs` | Hostile `offset` / `limit` values for `get_pending_reverify` and its bounded storage scan |
+| `username_validate` | `fuzz/fuzz_targets/username_validate.rs` | `is_valid_github_username` — no-panic guarantee |
+| `github_username` | `fuzz/fuzz_targets/github_username.rs` | `is_valid_github_username` — non-ASCII rejection invariant |
+
+### Running a target
+
+```bash
+# Run the github_username target for 1 000 iterations (smoke test)
+cargo +nightly fuzz run github_username -- -max_total_time=10
+cargo +nightly fuzz run pending_reverify_page -- -max_total_time=10
+
+# Longer soak (10 million inputs)
+cargo +nightly fuzz run github_username -- -runs=10000000
+```
+
+The `github_username` target asserts two invariants on every input:
+
+1. **No panics** — the validator must never trap.
+2. **Non-ASCII rejection** — any byte ≥ 0x80 must cause the validator
+   to return `false`.  This rules out homoglyph substitution via
+   multi-byte UTF-8 (Cyrillic, Arabic, CJK, accented Latin, emoji).
+
+The `pending_reverify_page` target decodes arbitrary byte strings into
+32-bit offset and limit values. Limits over 100 must return
+`InvalidBatchSize`; all other values must return a bounded page without a
+panic. A zero limit exercises the documented default of 20, and offsets past
+the three-record fixture must return an empty page. No environment variables
+are required.
+
+### Adding a new target
+
+1. Create `fuzz/fuzz_targets/<name>.rs`.
+2. Add a `[[bin]]` entry in `fuzz/Cargo.toml` pointing to it.
+3. Document the target in the table above.
+4. Ensure the target contains an assertion (not just a no-panic check)
+   so it provides more than the existing `username_validate` coverage.
+
+---
+
+## Supply-chain checks
+
+The `cargo-deny` CI job runs `cargo deny --config deny.toml check` on every
+pull request (including fork PRs) and push to `main`; any `deny`-level finding
+fails the job. These catch:
 
 - **Known vulnerabilities** in dependencies (via RustSec advisory database)
 - **Yanked crates** that should not be in the dependency tree
@@ -295,9 +426,8 @@ CI runs `cargo audit` and `cargo deny check` on every PR. These catch:
 ### Running locally
 
 ```bash
-cargo install --locked cargo-audit cargo-deny
-cargo audit
-cargo deny check
+cargo install --locked cargo-deny@0.20.2
+cargo deny --config deny.toml check
 ```
 
 ### Adding an exception
@@ -314,6 +444,47 @@ Undocumented exceptions are rejected in code review.
 - CI runs `cargo fmt --check` and `cargo test`.
 - Prefer fixing clippy warnings locally before opening a PR.
 - Any `#[allow(clippy::*)]` attribute should include a short rationale comment.
+
+### Intentional clippy allow inventory (Issue #696)
+
+Wave reviews enforce strict clippy compliance. Any `#[allow(clippy::*)]`
+suppression that is intentional and not a quick fix must be justified here so
+reviewers can verify intent and future contributors do not silently remove it.
+
+**Rules:**
+
+1. Add a row to the table below when you introduce a new `#[allow(clippy::*)]`
+   that you cannot or deliberately choose not to fix.
+2. The inline comment on the attribute and the table row must agree on the
+   reason. The table is the durable record; the inline comment is the
+   point-of-use reminder.
+3. Remove the row (and the attribute) when the suppression is no longer needed.
+   Stale rows are rejected in code review just like undocumented ones.
+4. Crate-level `#![allow(clippy::*)]` suppressions are banned. Use per-item
+   attributes only, so the scope is as narrow as possible.
+
+**Current intentional allowlist:**
+
+| File | Line (approx.) | Lint | Reason |
+|---|---|---|---|
+| _(none at this time)_ | — | — | — |
+
+**Example** — adding a new entry:
+
+```rust
+// src/batch.rs
+
+// clippy::too_many_arguments: this function mirrors the on-chain ABI exactly;
+// splitting it would require a builder struct that obscures the call surface
+// visible to off-chain tooling. Tracked: N/A (ABI-stable).
+#[allow(clippy::too_many_arguments)]
+pub fn batch_remove(...) { ... }
+```
+
+```markdown
+<!-- docs/CONTRIBUTING.md intentional allowlist row -->
+| `src/batch.rs` | ~42 | `clippy::too_many_arguments` | Mirrors on-chain ABI exactly; splitting requires a builder that obscures the ABI surface |
+```
 
 ---
 
@@ -334,6 +505,36 @@ Run tests:
 ```bash
 cargo test
 ```
+
+### Homoglyph corpus
+
+The homoglyph corpus in `tests/homoglyph_corpus.rs` is a security regression
+suite for lookalike Unicode characters, invisible formatting characters,
+bidirectional controls, and any entry point that must reject them. Extend it
+whenever a new confusable or spoofing vector is reported, discovered during
+review, or introduced by a change to username handling. Keep the ASCII-only
+acceptance cases as positive controls.
+
+Add each attack string to the relevant corpus category with a brief description
+and code point, and add an entry-point regression test when the vector could
+expose a validation bypass. Update the documented corpus scope and expected
+minimum in `test_homoglyph_corpus_coverage_complete` as needed. Do not normalize
+or permit a new character as a local exception; changes to the ASCII-only
+policy require an explicit security review.
+
+Run the dedicated test before submitting changes:
+
+```bash
+cargo test --test homoglyph_corpus
+# equivalent: make test-homoglyph
+```
+
+CI runs this target as a dedicated blocking job on every pull request and
+push to `main`: the `homoglyph_corpus` job in `.github/workflows/ci.yml`
+executes `cargo test --test homoglyph_corpus` (no path filters, no
+`continue-on-error`), so a failing corpus test fails the `homoglyph_corpus`
+check. Maintainers should mark `homoglyph_corpus` as a required status check
+in branch protection. The `smoke` job's `cargo test` also includes this suite.
 
 ### WASM Integration Tests
 
@@ -367,11 +568,118 @@ make bench-register-budget
 Thresholds are configurable via `REGISTER_BUDGET_CPU_MAX` / `REGISTER_BUDGET_MEM_MAX`
 make variables (see `Makefile`).
 
+To reproduce and validate batch register size limits (`MAX_WRITE_BATCH = 25`) and metered
+CPU/memory budget headroom locally:
+
+```bash
+make bench-batch-register-budget
+# Or directly via cargo:
+cargo test --test integration test_batch_register -- --nocapture --test-threads=1
+# Optional extended multi-batch load test:
+cargo test --test integration test_scale_batch_register --features scale-test -- --nocapture
+```
+
 In CI, the `quality` job runs this test, publishes the results as a job summary
 table, and uploads the raw CSV as the `register-budget-report` build artifact
 (14-day retention). This check is **advisory**: the step is allowed to fail
 (`continue-on-error`) without failing the overall job, so a cap breach is
 visible in the CI summary and artifact without blocking merges.
+
+### Bindings golden refresh (simulate XDR fixtures)
+
+`tests/bindings_golden.rs` pins the base64 XDR that `simulateTransaction`
+returns for `get_address` (hit and miss) against the checked-in fixture
+`tests/testdata/bindings/get_address_simulate.v1.json`. `trustbridge-action`
+(`src/soroban.ts`) vendors that fixture instead of hand-mocking XDR, so an
+intentional return-type change here must ship with a coordinated fixture
+bump — see [`tests/testdata/bindings/README.md`](../tests/testdata/bindings/README.md)
+for the fixture format and the action-side consumption steps.
+
+To verify the fixture matches the current contract encoding:
+
+```bash
+make bindings-golden
+# equivalent: cargo test --test bindings_golden
+```
+
+To regenerate after an intentional change to `get_address`'s return type or
+the fixture format:
+
+```bash
+UPDATE_GOLDEN=1 cargo test --test bindings_golden
+```
+
+Then, in the same PR:
+
+1. **Bump `FIXTURE_VERSION`** in `tests/bindings_golden.rs` and rename the
+   fixture file to `get_address_simulate.vN.json` on **any breaking change**
+   (return-type shape, `ScMap` key set/order, or field types). Additive-only
+   changes that keep the existing decode path working keep the version.
+2. **Update the TypeScript side.** `scripts/check_fixture_pairing.sh` fails
+   when the Rust fixtures change without a matching `ts-differential-tests/`
+   update (or the reverse), so land the decoder/fixture change in
+   `ts-differential-tests/` in the same PR.
+3. **Notify `trustbridge-action` consumers.** Open or update an issue in
+   `Stellar-TrustBridge/trustbridge-action` so the pinned fixture version is
+   bumped in the action's tests in the same release window. CI uploads the
+   fixture as the `bindings-golden-fixtures` workflow artifact, which the
+   action can vendor from a tagged run.
+4. **Note the bump in `CHANGELOG.md`.**
+
+CI fails the fixture comparison until the regenerated JSON is committed, so
+an un-bumped golden blocks the pipeline by design.
+
+Cross-ABI goldens that follow the same "regenerate + commit" rule:
+`abi/contract_error_codes.golden` (error-code stability, Issue #402) and
+`abi/export_page.layout.golden` (export page layout). The
+`abi` make target checks the error-code golden; see `make help` for the
+individual targets.
+
+### Storage rent estimator golden refresh
+
+`scripts/testdata/storage-rent-estimator.golden.txt` pins the text report of
+`scripts/storage_rent_estimator.py --users 250 --roles 3 --lastact 100`. CI
+(`make storage-rent-estimator`) fails if the output drifts, so a stale golden
+can't hide a storage-cost regression for Wave operators.
+
+**When to refresh.** Only when the estimate is *meant* to change:
+
+- the storage layout or TTL constants in `src/storage.rs` change (`CHUNK_SIZE`,
+  `TTL_THRESHOLD`, `TTL_BUMP`, `LEDGERS_PER_DAY`, or new/removed keys), together
+  with `docs/storage-rent-estimator.inputs.v1.json` (or a new `vN` file), or
+- the estimator's formula or report format in `scripts/storage_rent_estimator.py`
+  changes.
+
+If the check fails and you did not intend either, the golden is not stale:
+your change has altered storage cost. Investigate before refreshing.
+
+**Toolchain.** Python 3.8+ only (standard library; no packages). Rust is not
+needed: the estimator reads `src/storage.rs` as text for the `CHUNK_SIZE`
+cross-check.
+
+**Procedure.**
+
+```bash
+# 1. Update the inputs first (layout change only), following the re-computation
+#    checklist in docs/STORAGE_RENT_ESTIMATOR.md.
+# 2. Regenerate the golden from the current script and inputs:
+make storage-rent-estimator-golden      # = UPDATE_GOLDEN=1 bash scripts/test_storage_rent_estimator.sh
+# 3. Review the diff, then re-run the check (golden + invalid-input cases):
+git diff scripts/testdata/storage-rent-estimator.golden.txt
+make storage-rent-estimator
+```
+
+**Review checklist** (author and reviewer):
+
+- [ ] The golden diff matches the intended change line for line (for example, a
+      `CHUNK_SIZE` change moves `chunk size` and `index chunks` only).
+- [ ] No `WARNING: chunk_size ... != CHUNK_SIZE` line appears in the golden. The
+      inputs JSON and `src/storage.rs` must agree before refreshing.
+- [ ] `docs/storage-rent-estimator.inputs.v1.json`, `docs/STORAGE_RENT_ESTIMATOR.md`
+      (constants and example tables) and the golden are updated **in the same PR**.
+- [ ] `estimator_inputs_version` is bumped (and the old JSON kept) if the layout changed.
+- [ ] The PR description includes the `make storage-rent-estimator` output and a
+      one-line risk note on how the per-user persistent entry count changed.
 
 ---
 
@@ -441,14 +749,23 @@ CI does not compare snapshots against a baseline — snapshots are gitignored an
 
 The checked-in [auth matrix](../tests/auth_matrix.csv) is the source of truth
 for actor coverage across public mutating entrypoints. Each row contains an
-entrypoint, an actor class (`admin`, `verifier`, `revoker`, `upgrader`, `user`,
-`random`, or `none`), and an optional expected `ContractError` variant.
+entrypoint, an actor class (`admin`, `second_admin`, `guardian`, `verifier`,
+`revoker`, `upgrader`, `user`, `random`, or `none`), and an optional expected
+`ContractError` variant.
 
-When adding a mutating public function, add it to the matrix and to the
-coverage list in `tests/integration.rs`. Add rows for every meaningful actor
-boundary, especially Admin, Verifier, Revoker, Upgrader, registrant, and an
-unrelated address. Leave `expected_error` empty for a successful cell. The
-driver fails when an entrypoint is missing from the table.
+[`tests/auth_matrix.rs`](../tests/auth_matrix.rs) executes every row
+(`cargo test --test auth_matrix`): it builds a fresh fixture, sets up the
+operation's preconditions, and invokes the entrypoint with only that actor
+signing. An empty `expected_error` must return `Ok`; `NotAuthorized` also
+matches a host auth failure for entrypoints that `require_auth` a fixed
+identity such as the stored admin. Failures cite the CSV line, operation, and
+actor.
+
+When adding a mutating public function, add rows for every meaningful actor
+boundary (especially Admin, Verifier, Revoker, Upgrader, registrant, and an
+unrelated address) and a dispatcher arm in `plan()` in `tests/auth_matrix.rs`.
+The driver fails when an entrypoint that calls `require_auth` has no row, or a
+row has no dispatcher arm.
 
 This repo uses the Soroban SDK test host. Tests live in `src/lib.rs` inside `#[cfg(test)] mod test` for unit tests and in `tests/integration.rs` for integration tests.
 
@@ -526,10 +843,11 @@ network.
 make bench-budget-ci
 
 # Individual bench targets (output only, no regression gate):
-make bench-register-budget   # register CPU/mem with hard-cap check
-make bench-export            # get_all_registered sweep
-make bench-username          # usernames_match sweep
-make bench-double-verify     # verify success vs rejection
+make bench-register-budget        # register CPU/mem with hard-cap check
+make bench-batch-register-budget  # batch register ceiling CPU/mem integration tests
+make bench-export                 # get_all_registered sweep
+make bench-username               # usernames_match sweep
+make bench-double-verify          # verify success vs rejection
 ```
 
 Always run with `--test-threads=1` (the Makefile targets do this automatically).
@@ -607,3 +925,113 @@ Do not open public issues for security vulnerabilities. See `SECURITY.md` for re
 - Check Stellar Soroban docs
 
 We appreciate your contributions to decentralized open-source identity on Stellar!
+
+---
+
+## Storage Key Best Practices
+
+Storage keys are **on-chain correctness concerns**: a collision is a catastrophic bug, and key layout changes must stay synchronized across `docs/STORAGE_KEYS.md`, `src/storage.rs`, and test fixtures.
+
+### Temporary test-only keys
+
+Tests may use an ad-hoc `Symbol::new` key in a fresh `Env` when a fixture needs
+to exercise storage without introducing a production key. Such a key is local
+to that test environment and is never deployed; “temporary” here does not mean
+the Soroban temporary TTL partition. Keep it in test code, use a clearly
+test-only name, and do not move it into `src/storage.rs` or production contract
+code. See
+`tests/storage_keys_collision.rs::test_temporary_test_keys_stay_out_of_production_inventory`.
+
+CI checks only production declarations in `src/storage.rs`: `make
+storage-keys-check` requires each declared key to be documented and rejects
+dynamic `Symbol::new` there, while `tests/storage_keys_collision.rs` checks
+declared symbol uniqueness and inventory coverage. Test-local symbols are
+intentionally outside that production inventory, and must remain isolated in
+their own `Env`.
+
+### When adding a new storage key
+
+1. **Pick the partition**:
+   - **Instance**: Use for singleton state (admin address, pause flag, network ID, etc.). No TTL, no per-entry context.
+   - **Persistent**: Use for per-entry data (registrations, roles, pending operations). TTL-managed; requires a context type (username, address, etc.).
+
+2. **Pick a unique symbol**:
+   - Use `symbol_short!("name")` — limited to 9 bytes (ASCII alphanumerics, underscore).
+   - Inspect `src/storage.rs` to ensure your symbol is not already defined.
+   - Run `make storage-keys-check` to lint; CI will fail if the symbol is not documented.
+
+3. **For persistent keys, choose a context type**:
+   - `String` for usernames (context: GitHub username, e.g. `(Symbol("reg"), "alice")`).
+   - `Address` for Stellar accounts (context: account ID).
+   - `u32` for integers (context: chunk index, ledger sequence).
+   - Different context types serialize to different bytes in Soroban's XDR — no collision even if two namespaces use overlapping values.
+
+4. **Verify collision-free**:
+   - Instance keys: Ensure your symbol is not already used in the instance table in `docs/STORAGE_KEYS.md`.
+   - Persistent keys with new discriminator: Ensure the symbol is not in the persistent table.
+   - Persistent keys reusing an existing discriminator: **Never**. Each persistent namespace must have a unique discriminator.
+   - If in doubt, see `docs/STORAGE_KEYS.md` § Key Namespace Diagram.
+
+5. **Document before committing**:
+   - Add a row to the appropriate table in `docs/STORAGE_KEYS.md`.
+   - Add a row to the "Complete Key Inventory" section.
+   - Run `make storage-keys-check` to confirm both tables are consistent.
+   - If persistent, update the TTL behavior table.
+   - Link the issue or feature in the "Purpose" column if applicable.
+
+6. **Update tests**:
+   - Add a test to `tests/storage_keys_collision.rs` (see below) to verify the key is stored/read correctly.
+   - If the key participates in a workflow, add an integration test to `tests/integration.rs`.
+
+### Collision detection automation
+
+`scripts/check_storage_keys.sh` is run in CI as `make storage-keys-check`. It:
+- Parses all `const NAME: Symbol = symbol_short!("...")` from `src/storage.rs`.
+- Verifies each constant name and symbol string appear in `docs/STORAGE_KEYS.md`.
+- Rejects `Symbol::new()` — all keys must be statically defined constants.
+- Fails if `CHUNK_CNT_KEY` is not exactly one definition with symbol `"chkcnt"` (Issue #468).
+
+**Fix**: Add your key to both the inline constant table and the Complete Key Inventory section of `docs/STORAGE_KEYS.md`, then re-run.
+
+### TTL best practices (persistent keys only)
+
+- **Default TTL threshold**: `LEDGERS_PER_DAY * 30` (~30 days).
+- **Default TTL bump**: `LEDGERS_PER_DAY * 90` (~90 days).
+- Document the exact conditions when TTL is extended (read vs. write, or both).
+- See `docs/STORAGE_RENT.md` before changing TTL constants — storage rent is sensitive.
+
+### Testing storage keys
+
+New storage key workflows are tested in:
+- `tests/storage_keys_collision.rs` — automated collision detection and namespace validation.
+- `tests/integration.rs` — end-to-end workflows using the key.
+
+Add a test case for the happy path (key is stored, retrieved, updated correctly) and at least one failure path (e.g. attempting to write while paused, or accessing a non-existent entry).
+
+### Example: Adding a new instance key
+
+```rust
+// src/storage.rs
+pub const MY_STATE_KEY: Symbol = symbol_short!("my_state");
+
+// docs/STORAGE_KEYS.md — Instance Storage table
+| `"my_state"` | `MY_STATE_KEY` | `MyStateType` | Description of the state |
+
+// docs/STORAGE_KEYS.md — Complete Key Inventory
+| `"my_state"` | `MY_STATE_KEY` | line_number | Description |
+
+// tests/storage_keys_collision.rs
+#[test]
+fn test_my_state_key_stored_correctly() {
+    let (env, _admin, _user1, _user2, contract_id) = setup_test_env();
+    env.as_contract(&contract_id, || {
+        // Happy path: set and read
+        TrustBridgeContract::my_getter(env.clone()).unwrap();
+        // Failure path: verify error on invalid input
+    });
+}
+
+// Run
+make storage-keys-check
+make test
+```

@@ -7,10 +7,37 @@ for this repo — [`scripts/event_indexer.sh`](../../scripts/event_indexer.sh)
 remains the runnable local reference.
 
 - [`schema.graphql`](schema.graphql) — entities for every contributor-directed
-  contract event (`RegisteredEvent`, `VerifiedEvent`,
+  contract event (`RegisteredEvent`, `BotStatusChangedEvent`, `VerifiedEvent`,
   `VerificationRevokedEvent`, `RemovedEvent`, `RenamedEvent`, the challenge
   lifecycle, and the address-rotation lifecycle), plus a derived `Contributor`
   aggregate.
+
+## Schema Overview & Evolution
+
+The [`schema.graphql`](schema.graphql) file defines the entities that model the contract's state. It includes 1-to-1 mappings for every contributor-directed event (e.g., `RegisteredEvent`, `VerifiedEvent`) and a mutable `Contributor` aggregate that tracks the current state of a registered user.
+
+**Schema Evolution:**
+- The contract uses an `EventDomain` payload (introduced in 1.1.0) on most events, which includes `contractVersion`.
+- If the smart contract is upgraded and new fields are added to an event, or if new events are introduced, this `schema.graphql` and the corresponding mapping handlers must be updated to support them.
+- The `Contributor` aggregate might also need to be evolved if new core properties are tracked on-chain.
+
+## Sync Flow & Caveats
+
+When onboarding a new indexer (like Graph Node or Envio) using this schema, be aware of the following sync assumptions:
+
+- **Idempotency & Event IDs:** Entity IDs are stable, following the format `{networkId}:{contractId}:{ledgerSequence}:{txHash}:{eventIndex}` (see [`DASHBOARD_SYNC.md`](../DASHBOARD_SYNC.md#stable-event-id-issue-283)). Using this as the primary key ensures that ingestion is replay-idempotent.
+- **Event Ordering:** The indexer must process events strictly in order of `ledgerSequence` and then `eventIndex` within the transaction to maintain the correct state in the `Contributor` aggregate.
+- **Reconciliation:** Treat the subgraph as a change-notification cache. After any indexing gap or indexer restart, you should reconcile the indexer's state against the contract's authoritative storage using `get_public_paginated` (see [`DASHBOARD_SYNC.md`](../DASHBOARD_SYNC.md)).
+- **Re-orgs:** While standard indexers handle ledger rollbacks, the last-write-wins approach on the `Contributor` entity helps ensure the state eventually matches the chain even if events are re-processed.
+
+## Network & Address Configuration
+
+To deploy a subgraph from this schema, your indexer configuration (e.g., `subgraph.yaml`) must specify the exact environment:
+
+- **Contract Address (`contractId`):** The indexer must be scoped to the specific `C...` address of the deployed TrustBridge contract.
+- **Network / Passphrase:** You must configure the target network (e.g., Testnet or Public). Note that the `networkId` (SHA-256 of the network passphrase) is also emitted inside the `EventDomain` of most events for cross-verification.
+- **Start Ledger:** To avoid scanning the entire Stellar history from ledger 1, always set the start block/ledger to the sequence number where the contract was deployed.
+- For local testing and raw event viewing without a full indexer stack, refer to [`scripts/event_indexer.sh`](../../scripts/event_indexer.sh).
 
 ## Event → entity mapping
 
@@ -21,6 +48,7 @@ the contract does not emit.
 | Contract event | Topic symbol | Payload fields (from `src/events.rs`) | Entity |
 |---|---|---|---|
 | `RegisteredEvent` | `registered_event` | `github_username` (topic), `stellar_address`, `timestamp`, `sponsor: Option<Address>`, `domain` | `RegisteredEvent` |
+| `BotStatusChangedEvent` | `bot_status_changed_event` | `github_username` (topic), `is_bot`, `actor`, `timestamp`, `domain` | `BotStatusChangedEvent` |
 | `VerifiedEvent` | `verified_event` | `github_username` (topic), `stellar_address`, `timestamp`, `domain` | `VerifiedEvent` |
 | `VerificationRevokedEvent` | `verification_revoked_event` | `github_username` (topic), `stellar_address`, `timestamp`, `reason_code`, `domain` | `VerificationRevokedEvent` |
 | `RemovedEvent` | `removed_event` | `github_username` (topic), `stellar_address`, `timestamp`, `domain` | `RemovedEvent` |
@@ -31,6 +59,46 @@ the contract does not emit.
 | `RotationRequestedEvent` | `rotation_requested_event` | `github_username` (topic), `current_address`, `new_address`, `executable_at`, `timestamp` | `RotationRequestedEvent` |
 | `RotationExecutedEvent` | `rotation_executed_event` | `github_username` (topic), `old_address`, `new_address`, `timestamp` | `RotationExecutedEvent` |
 | `RotationCancelledEvent` | `rotation_cancelled_event` | `github_username` (topic), `cancelled_by`, `timestamp` | `RotationCancelledEvent` |
+| `RoleGrantPendingEvent` | `role_grant_pending_event` | `address` (topic), `role`, `admin`, `activate_at`, `timestamp` | `RoleGrantPendingEvent` |
+
+> **Pending role grants (Issue #630):** `set_role` behind a `set_role_delay`
+> timelock emits `RoleGrantPendingEvent` instead of `RoleGrantedEvent`. Handler:
+> upsert a `RoleGrantPendingEvent` entity keyed by the stable event id above,
+> keyed additionally on `(address)` for dashboard lookup of the queued grant;
+> on `RoleGrantedEvent` (activation) or `RoleGrantCancelledEvent` /
+> `remove_role`, mark the pending row superseded/cancelled so no orphan remains.
+> `activate_at == 0` never occurs on-chain (queued grants always carry a future
+> `activate_at`); treat `activate_at == 0` as the instant-grant path, i.e. expect
+> `RoleGrantedEvent` directly. Only one pending grant per target exists by design
+> (`set_pending_role` overwrites). Topic symbols: see `TOPIC_TABLE` in
+> [`scripts/event_indexer.sh`](../../scripts/event_indexer.sh) and
+> [`scripts/check_event_topics.sh`](../../scripts/check_event_topics.sh).
+> Timelock operator flow: [ADMIN_RUNBOOK timelocked role grants](../ADMIN_RUNBOOK.md#timelocked-role-grants-issue-220).
+> Instant vs pending: `RoleGrantedEvent` fires on immediate `set_role` or on
+> `activate_role`; `RoleGrantPendingEvent` fires only when the grant is queued.
+> Dashboard state: cross-link [DASHBOARD_SYNC.md](../DASHBOARD_SYNC.md#abi-event-reference).
+
+> **Role expiry cleanup (Issue #697):** Expired time-bounded role grants
+> (`set_role_with_expiry`) are reclaimed lazily — `get_role` stops reporting
+> them when the clock passes `expires_at`, but their storage entry remains until
+> an explicit `remove_role` call or the keeper's expiry-cleanup sweep. When
+> `remove_role` runs against an already-expired grant it still emits
+> `RoleRevokedEvent` (the same event as a live revocation), so the subgraph
+> handler for `role_revoked_event` covers both live revocations and expiry
+> cleanups. No separate event type exists for expiry cleanup. Subgraph handlers
+> must therefore distinguish the two cases by comparing the event's
+> `ledgerSequence` against the `expires_at` value from the most recent
+> `RoleGrantedEvent` for that address:
+>
+> | Scenario | Event emitted | Handler action |
+> |---|---|---|
+> | Active role explicitly revoked | `role_revoked_event` | Mark role removed; timestamp = event timestamp |
+> | Expired role cleaned up via `remove_role` | `role_revoked_event` | Mark role removed; note: `expires_at` already passed |
+> | `prune_expired_verifiers` removes an allowlist slot | _(no event)_ | No handler; reconcile via `get_verifier_allowlist` read |
+>
+> The `role_revoked_event` waiver row in the explicit waivers table below covers
+> all of these paths. The raw event log (`scripts/event_indexer.sh`) remains the
+> authoritative source for RBAC telemetry including expiry cleanup.
 
 Notes and gotchas:
 
@@ -191,3 +259,59 @@ CONTRACT_ID=C... ONESHOT=1 ./scripts/event_indexer.sh
   }
 }
 ```
+## Topic coverage across docs (Issue #754)
+
+Every published topic appears in exactly one of the two tables in this file:
+the *Event → entity mapping* table or the waiver table below. It also appears
+in the [`EVENT_INDEXING.md` topic table](../EVENT_INDEXING.md#topic-classification),
+whose **Subgraph** column must show the same outcome: the entity name, or
+`waived`. `make subgraph-parity` enforces all of this in CI, including the
+`event_kind` / `category` columns against `TOPIC_TABLE` in
+`scripts/event_indexer.sh`. Operational topics (pause, upgrade, attestation,
+batch, audit config) are waived here and are consumed from the raw indexer.
+
+## Explicit subgraph event waivers (Issue #600)
+
+The contributor-history subgraph intentionally excludes the operational events
+listed below. These are explicit per-topic waivers, **not** mappings; raw
+contract events remain available through `scripts/event_indexer.sh`. Every
+`#[contractevent]` must have either an `@entity` type of the same name and a
+mapping-table row above, or one waiver row below. The parity check rejects
+missing, duplicate, stale or ambiguous entries.
+
+| Waived topic | Reason |
+|---|---|
+| `upgraded_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `paused_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+| `unpaused_event` | Operational event outside contributor-history schema; available via raw event indexer |
+| `emergency_paused_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+| `emergency_cleared_event` | Operational event outside contributor-history schema; available via raw event indexer |
+| `guardian_changed_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+| `role_grant_cancelled_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+| `wasm_staged_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `upgrade_attested_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `attestation_cleared_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `role_granted_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+| `role_revoked_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+| `batch_remove_proposed_event` | Batch administration event; individual removed records use RemovedEvent entity |
+| `batch_remove_executed_event` | Batch administration event; individual removed records use RemovedEvent entity |
+| `batch_remove_cancelled_event` | Batch administration event; individual removed records use RemovedEvent entity |
+| `staged_wasm_cleared_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `upgrade_proposed_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `upgrade_approved_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `upgrade_proposal_executed_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `upgrade_proposal_cancelled_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
+| `verification_configured_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+| `audit_config_changed_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+
+Run `make subgraph-parity` to verify the event inventory, mapping table,
+Graph schema, and waivers locally. Changes to an event name (including topic
+renames) require corresponding schema or waiver changes. `Address` and
+`BytesN<32>` on-chain values map to Graph `Bytes` in the schema; this check
+validates event/entity identity, not payload field type equivalence.
+
+`AttestationClearedEvent` remains intentionally waived: its `wasm_hash`
+(`BytesN<32>`, topic), `expires_at` (`u64`), and `timestamp` (`u64`) describe
+contract upgrade telemetry, not contributor history. Decode it from the raw
+event stream and clear the matching pending-attestation indicator; do not infer
+that attestation-required mode changed.

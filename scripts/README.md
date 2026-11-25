@@ -11,8 +11,13 @@ out of the repo, and default to **testnet** (never mainnet).
 | `event_indexer.sh` | **Reference event indexer** — tails contract events into local JSONL with an on-disk resume cursor (Issue #288) and classifies topic symbols (Issue #399). See below. |
 | `check_event_topics.sh` | Fails if the indexer's topic table drifts from `src/events.rs`, and asserts replay idempotency (Issue #399). |
 | `check_error_codes.sh` | Fails if `ContractError` discriminants disagree across the enum, `from_code`, the golden file, and `docs/ABI.md` (Issue #402). |
+| `check_fixture_pairing.sh` | Fails if Rust differential fixtures change without a `ts-differential-tests/` update, or the reverse (Issue #577). |
 | `export_registry.sh` | Page the admin export into a single registry JSON snapshot. |
+| `export_registry.py --dry-run` | Validate export attestation without writing: paginates, verifies identity fields, prints count + merkle root (Issue #637). |
+| `verify_merkle_export.py` | Recompute and verify each page's Merkle root from a captured registry export (Issue #718). |
 | `validate_registry.sh` | Diff an export JSON against live on-chain state. |
+| Dry-run export validation | `CONTRACT_ID=C... SOURCE=admin python3 scripts/export_registry.py --dry-run` — exits 0 on valid attestation, writes nothing, prints count + merkle root. |
+| Offline Merkle verification | `python3 scripts/verify_merkle_export.py registry-export-testnet.json` — no network or signer required; exits non-zero for missing roots, malformed pages, or mismatches. |
 | `ttl_keeper.sh` | Walk the index and bump persistent-entry TTLs. |
 | `bulk_verify.sh` / `bulk_revoke.sh` | Batched verify / revoke from a username list, with RPC pacing. |
 | `simulate_pause.sh` | Exercise the pause / unpause lifecycle. |
@@ -162,4 +167,6 @@ only (XLM conversion needs operator-supplied `network_rent_params`). It also
 compares `chunk_size` in the inputs JSON against `CHUNK_SIZE` in
 `src/storage.rs` and prints a warning to stderr on any drift.
 
-Golden-output test: `bash scripts/test_storage_rent_estimator.sh`.
+Golden-output test: `make storage-rent-estimator` (runs in CI). Refresh after an intentional change with
+`make storage-rent-estimator-golden`; see `docs/CONTRIBUTING.md` → *Storage rent estimator golden refresh*.
+Invalid inputs exit 2 with the stable messages listed in `docs/STORAGE_RENT_ESTIMATOR.md`.

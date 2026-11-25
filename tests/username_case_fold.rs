@@ -49,8 +49,14 @@ fn test_username_case_variant_looks_up_the_same_record() {
         let stats = TrustBridgeContract::get_stats(env.clone());
         assert_eq!(stats.total, 1);
 
-        assert!(TrustBridgeContract::has_record(env.clone(), s(&env, "alice")));
-        assert!(TrustBridgeContract::has_record(env.clone(), s(&env, "ALICE")));
+        assert!(TrustBridgeContract::has_record(
+            env.clone(),
+            s(&env, "alice")
+        ));
+        assert!(TrustBridgeContract::has_record(
+            env.clone(),
+            s(&env, "ALICE")
+        ));
     });
 }
 
@@ -103,7 +109,7 @@ fn test_export_and_index_show_canonical_username_form() {
         TrustBridgeContract::register(env.clone(), s(&env, "Alice"), alice.clone(), Vec::new(&env))
             .unwrap();
 
-        let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+        let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
         assert_eq!(page.records.len(), 1);
         let (stored_username, _) = page.records.get(0).unwrap();
         assert_eq!(stored_username, s(&env, "alice"));
@@ -123,8 +129,14 @@ fn test_remove_by_case_variant_removes_the_canonical_record() {
         // Remove using a different case than the one used to register.
         TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "ALICE")).unwrap();
 
-        assert!(!TrustBridgeContract::has_record(env.clone(), s(&env, "alice")));
-        assert!(!TrustBridgeContract::has_record(env.clone(), s(&env, "Alice")));
+        assert!(!TrustBridgeContract::has_record(
+            env.clone(),
+            s(&env, "alice")
+        ));
+        assert!(!TrustBridgeContract::has_record(
+            env.clone(),
+            s(&env, "Alice")
+        ));
         let stats = TrustBridgeContract::get_stats(env.clone());
         assert_eq!(stats.total, 0);
     });

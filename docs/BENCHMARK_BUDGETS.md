@@ -1,3 +1,98 @@
+# Benchmark Budgets & Recommended Page Sizes
+
+Operational guidance for dashboard and indexer consumers of the paginated
+registry reads. It records the contract's hard limits, a recommended page size
+for each reader, and the failure symptoms that mean "page too big".
+
+Related: [DASHBOARD_SYNC](DASHBOARD_SYNC.md) · [ABI](ABI.md) ·
+[STORAGE_FOOTPRINT](STORAGE_FOOTPRINT.md) · `src/storage.rs`, `src/lib.rs`.
+
+---
+
+## Hard limits (contract-enforced)
+
+These are constants in `src/storage.rs` and are part of the ABI; they are
+**not** network tuning knobs:
+
+| Constant | Value | Behavior |
+|----------|------:|----------|
+| `DEFAULT_PAGE_LIMIT` | `20` | Used when the caller sends `limit = 0` |
+| `MAX_PAGE_LIMIT` | `100` | `limit > 100` is **clamped** to `100`, not rejected |
+| `CHUNK_SIZE` | `50` | Usernames per persistent chunk entry (`(chunk, idx)`) |
+
+The full index (`idx`) is one instance-storage entry that grows linearly with
+the registry size, while each returned row also requires a persistent
+`(reg, username)` read. A page is therefore bounded by both the instruction
+budget and the ledger-footprint budget, not by `MAX_PAGE_LIMIT` alone. See
+[STORAGE_FOOTPRINT.md](STORAGE_FOOTPRINT.md#estimated-footprint-by-registry-size)
+for the sizing model and the ~3,259-entry crossover point of the legacy `idx`
+entry.
+
+---
+
+## Recommended page sizes
+
+| Consumer | Endpoint | Recommended `limit` | Rationale |
+|----------|----------|--------------------:|-----------|
+| Public dashboard poll | `get_public_paginated` | `20` (`DEFAULT_PAGE_LIMIT`) | Smallest footprint, no admin key, cheap to retry; blocks while paused |
+| Indexer backfill / reconciliation | `get_public_paginated` | `50` (`CHUNK_SIZE`) | Aligns one page with one persistent chunk entry |
+| Admin export / audit snapshot | `get_registered_paginated` | `50` | Same footprint as above, plus one admin signature per page |
+| Recovery from a suspected OOG | Either | `10`, then increase | Establish a working baseline before tuning upward |
+
+`100` is the ceiling, not the target. Use it only after a successful
+`make bench-export` on a comparable registry size. A request above `100`
+silently returns `100`, so an apparently "ignored" page size is the clamp, not
+a server bug.
+
+CLI examples:
+
+```bash
+# Public dashboard poll (default page)
+stellar contract invoke --id $ID --network testnet \
+  -- get_public_paginated --cursor 0 --limit 20
+
+# Admin export aligned to one chunk
+stellar contract invoke --id $ID --source-account admin --network testnet \
+  -- get_registered_paginated --cursor 0 --limit 50
+```
+
+Always follow `next_cursor` until `has_more == false` / `next_cursor == null`;
+never increase `limit` to compensate for a stalled cursor.
+
+---
+
+## Failure symptoms of an oversized page
+
+| Symptom | Meaning | Action |
+|---------|---------|--------|
+| `Budget exceeded` / `Exceeded resource limit` / instruction-limit error | CPU budget exhausted while materialising the page | Halve `limit`, retry with the same cursor |
+| Ledger footprint / `max_contract_data_entry_size` error | Too many distinct ledger entries touched | Drop to `20`, then walk chunks one at a time |
+| RPC timeout or 5xx while returning a large page | Response/invoke budget exceeded off-chain | Use `20`, increase client timeout, keep the cursor loop |
+| Page shorter than requested without `has_more` | Registry exhausted, or a stale cursor | Trust `has_more`/`next_cursor`, re-read `get_stats()` |
+| `Paused` on `get_public_paginated` | Circuit breaker active, not a budget issue | Retry after unpause; `get_address` remains readable |
+| Requested 150, received 100 | `MAX_PAGE_LIMIT` clamp | Set the limit explicitly; split into two pages |
+
+An oversized page fails the **whole** invocation — it never returns a partial
+page. Keep the last successful cursor as the retry point.
+
+---
+
+## Reproducing the budget numbers
+
+No absolute instruction counts are pinned here: they move with `soroban-sdk`
+releases. The suite asserts on shape (monotonic cost, failure paths cheaper
+than success) so a regression is caught without brittle constants.
+
+```bash
+make bench              # CPU/memory per operation, CSV output
+make bench-export       # export-only run → bench-results.txt
+make bench-username     # case-normalization cost → bench-username-normalization.txt
+```
+
+The benchmarks live in `src/lib.rs` under `// === Cost benchmarks`; see
+[ABI.md § Cost and Benchmarks](ABI.md#cost-and-benchmarks) for the full list.
+Revisit the recommended sizes above if `CHUNK_SIZE`, `MAX_PAGE_LIMIT`, the
+`ContributorRecord` shape, or the target network's resource config changes.
 # TrustBridge Contract — Benchmark Budgets
 
 Soroban charges every invocation against a **metered instruction budget**.
@@ -91,6 +186,19 @@ regardless of the regression percentage.
 | `verify` (success) | 25 000 000 | 3 000 000 |
 | `verify` (rejection) | 25 000 000 | 3 000 000 |
 
+### Batch register limits and multi-register workloads (Issue #612)
+
+Bulk registration workloads are bounded by `MAX_WRITE_BATCH = 25` (`src/batch.rs`).
+Sequential register integration tests in `tests/integration.rs` (`test_batch_register_at_max_write_batch_ceiling`)
+meter execution costs across the entire batch ceiling:
+
+| Workload | Batch size | Observed CPU instructions | Observed Memory bytes | Headroom vs Soroban tx limit |
+|---|---|---|---|---|
+| Sequential `register` batch | 25 (`MAX_WRITE_BATCH`) | ~1 970 000 | ~910 000 | > 98 % CPU, > 97 % memory |
+
+Oversized batches (`> MAX_WRITE_BATCH`) and empty batches (`0`) are rejected immediately before
+contract budget consumption with `ContractError::InvalidBatchSize`.
+
 ---
 
 ## CI job
@@ -116,6 +224,10 @@ branches as the quality gate.
 ## Running locally
 
 ```bash
+# Repeat register/verify pairs and record the per-operation high-water budget:
+make soak-register-verify
+REGISTER_VERIFY_SOAK_ITERATIONS=1000 make soak-register-verify
+
 # Full regression check (mirrors CI exactly):
 make bench-budget-ci
 
@@ -123,11 +235,22 @@ make bench-budget-ci
 make bench-update-samples
 
 # Individual benchmark targets:
-make bench-register-budget    # register CPU/mem (with hard-cap check)
-make bench-export             # get_all_registered sweep
-make bench-username           # usernames_match sweep
-make bench-double-verify      # verify success vs rejection
+make bench-register-budget          # register CPU/mem (with hard-cap check)
+make bench-batch-register-budget    # batch register ceiling CPU/mem integration tests
+make bench-export                   # get_all_registered sweep
+make bench-username                 # usernames_match sweep
+make bench-double-verify            # verify success vs rejection
 ```
+
+The opt-in register/verify soak checks every pair's resulting counts and
+verification state, resetting the simulated budget between operations. It
+reports the maximum observed CPU and memory for `register` and `verify`
+separately and enforces the same 25M CPU / 3MB memory caps as the focused
+budget checks. Increase `REGISTER_VERIFY_SOAK_ITERATIONS` for longer local
+rehearsals; the ignored soak is not part of the default test suite.
+The soak reports CPU/memory, not XLM rent; pair it with
+`make storage-footprint-check` and `make storage-rent-estimator` when reviewing
+persistent-storage cost changes.
 
 ---
 
@@ -165,3 +288,45 @@ model. A few things to keep in mind:
 
 Do **not** bump baselines to silence a regression without understanding its
 cause. A cost increase that cannot be explained is a bug.
+
+---
+
+## Recalibrating after protocol or SDK upgrades
+
+When Soroban protocol versions, `soroban-sdk` in `Cargo.toml`, or Stellar CLI
+versions change, host metering costs can shift across all operations even when
+contract logic is unchanged. Follow this process in the upgrade PR so Wave CI
+does not false-fail on stale baselines:
+
+1. **Observe deltas first:** Run `make bench-budget-ci` before updating
+   baselines to see which operations exceed the 15% regression threshold or
+   approach hard caps (25M CPU / 3M mem).
+2. **Run protocol rehearsal (if applicable):** Run `make test-rehearsal`
+   (`test_protocol_upgrade_rehearsal --features wasm-test`) to verify upgrade
+   compatibility.
+3. **Regenerate baselines:** Run `make bench-update-samples`. This executes
+   `test_bench_username_case_normalization`, `test_bench_export_cpu_cost`,
+   `test_bench_double_verify_rejection`, and `test_report_register_budget_samples`
+   with `--nocapture --test-threads=1` and rewrites `ci/bench-samples.csv`,
+   including the `# LAST UPDATED: <date> (soroban-sdk <version>, stable toolchain)`
+   header.
+4. **Review tables & caps:** Inspect `git diff ci/bench-samples.csv` and check
+   whether any hard caps, recommended page sizes (`DEFAULT_PAGE_LIMIT` /
+   `MAX_PAGE_LIMIT`), or `MAX_WRITE_BATCH` in this document need adjustment.
+5. **PR expectations:** Commit `ci/bench-samples.csv` (and any updated tables in
+   `docs/BENCHMARK_BUDGETS.md`) in the same upgrade PR, and include a
+   before/after cost table noting the old and new protocol/`soroban-sdk`
+   versions.
+
+---
+
+## Storage footprint budget
+
+CPU/memory budgets above do not cover **bytes stored**, which drive rent.
+Those are gated separately by `make storage-footprint-check`
+(`storage_footprint_budget_tests` in `src/storage.rs`, CI job
+`storage-budgets`), against the `max_bytes` table in
+[STORAGE_FOOTPRINT.md](STORAGE_FOOTPRINT.md#measured-footprint-budget-ci-check).
+A new storage key that grows with the registry must add a row there, or the
+check fails.
+

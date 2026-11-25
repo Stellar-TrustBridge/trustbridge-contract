@@ -33,16 +33,28 @@ reference and migration guide from manual probing.
 
 ## Contract Modules
 
+Every `src/*.rs` file on disk is listed here — no more, no fewer
+(`audit.rs`, `batch.rs`, `domain.rs`, `error.rs`, `events.rs`, `lib.rs`,
+`merkle.rs`, `multisig_upgrade.rs`, `oracle_proof.rs`, `staged_wasm.rs`,
+`storage.rs`, `utils.rs`, `version.rs`). `src/lib.rs` owns the public
+contract interface (`TrustBridgeContract`) and all business logic; every
+other module is a helper it composes. Test-only code lives outside `src/`
+(see below) — no `src/` module exists solely for tests.
+
 | Module | Responsibility |
 |--------|----------------|
 | `src/lib.rs` | Public contract interface (`TrustBridgeContract`), business logic, unit tests |
-| `src/storage.rs` | Storage keys, `ContributorRecord` / `Stats` types, persistence helpers |
-| `src/events.rs` | Soroban contract events with topics |
+| `src/storage.rs` | Storage keys, `ContributorRecord` / `Stats` types, persistence helpers, flat/chunked index maintenance, opaque cursor pagination internals (Issue #215) |
+| `src/events.rs` | Soroban contract events with topics (`#[contractevent]` structs) |
 | `src/error.rs` | Typed error enum (`ContractError`) and off-chain retry classification (`ErrorCategory`) |
-| `src/audit.rs` | Append-only audit-log entry type and helpers |
+| `src/audit.rs` | Append-only audit-log entry type (`AuditLogEntry`, `AuditConfig`, `AuditStats`) and helpers |
 | `src/batch.rs` | Batch verification implementation, configuration, limits, and tests |
+| `src/merkle.rs` | Export-page Merkle leaf/node hashing and root construction (Issue #216) |
+| `src/multisig_upgrade.rs` | M-of-N multisig upgrade proposal flow (Issue #301) |
+| `src/oracle_proof.rs` | Oracle allowlist and signed proof-of-ownership verification |
+| `src/staged_wasm.rs` | Staged-WASM intent slot gating `upgrade` (Issue #300) |
 | `src/domain.rs` | `EventDomain` (contract id, network id, version) attached to every event |
-| `src/utils.rs` | Username validation and other pure helpers |
+| `src/utils.rs` | Username validation (incl. case folding) and other pure helpers |
 | `src/version.rs` | Contract version type, compatibility checks, cross-contract read gating |
 
 > There is no separate registry-read module. During a migration window the
@@ -50,6 +62,110 @@ reference and migration guide from manual probing.
 > it directly through the public read surface (see `docs/ABI.md` §
 > Cross-Contract Read Interface); a `registry_read_stub.rs` trait fixture was
 > staged for this and removed as unused (Issue #297).
+
+### `lib.rs` re-export strategy
+
+Submodules stay private (`mod audit; mod batch; …` in `lib.rs`) and the
+cross-crate surface is re-exported with `pub use`: contract types
+(`AuditConfig`, `AuditLogEntry`, `Role`, `Stats`, `PendingRoleGrant`,
+`ExportPage`, …), all events, `ContractError`, and the `OracleProof` /
+`StagedWasm` / `Version` helpers. External consumers (integration tests, SDK
+bindings) import everything from the crate root
+(`trustbridge_contract::{TrustBridgeContract, Role, …}`) and never address a
+submodule path — so a future module split only touches `lib.rs` imports, not
+downstream callers.
+
+### Module dependencies
+
+```mermaid
+flowchart TD
+    lib[lib.rs<br/>TrustBridgeContract] --> storage
+    lib --> events
+    lib --> error
+    lib --> audit
+    lib --> batch
+    lib --> merkle
+    lib --> multisig_upgrade
+    lib --> oracle_proof
+    lib --> staged_wasm
+    lib --> domain
+    lib --> utils
+    lib --> version
+    storage --> audit
+    storage --> error
+    storage --> utils
+    batch --> storage
+    batch --> utils
+    batch --> audit
+    batch --> error
+    events --> domain
+    merkle --> storage
+    oracle_proof --> storage
+    oracle_proof --> error
+    staged_wasm --> storage
+```
+
+`storage.rs` is the hub: index/counter/cursor/audit persistence plus the key
+constants everything else names. `events.rs` only depends on `domain.rs`
+(the `EventDomain` stamped on each event). Nothing depends on `lib.rs`.
+
+### Shared helper functions (cross-module surface)
+
+No module in `src/` currently uses `pub(crate)` visibility — every item one
+module exposes to another is plain `pub` at the module level, scoped only
+by the fact that the modules themselves (`mod audit; mod storage; …` in
+`lib.rs`) are private to the crate. That makes the function signature, not
+a visibility keyword, the real contract between modules. The helpers below
+are the ones called from outside their own file and are the ones a
+contributor must keep stable (or update every call site for) when editing:
+
+| Helper | Defined in | Called from |
+|--------|-------------|-------------|
+| `is_valid_github_username`, `canonicalize_username`, `eq_ignore_ascii_case`, `is_zero_address` | `src/utils.rs` | `src/lib.rs`, `src/storage.rs`, `src/batch.rs`, `fuzz/fuzz_targets/*.rs` |
+| `is_reserved`, `add_to_reserved`, `remove_from_reserved` | `src/storage.rs` | `src/lib.rs` (`register`, `rename`, `add_reserved`/`remove_reserved`/`is_reserved` entrypoints) |
+| Index/cursor/audit persistence helpers (e.g. `get_health_probes`, pagination cursor codecs) | `src/storage.rs` | `src/lib.rs`, `src/merkle.rs`, `src/batch.rs` |
+| `EventDomain` construction | `src/domain.rs` | `src/events.rs`, `src/lib.rs` (every `#[contractevent]` emission site) |
+| Oracle allowlist / proof checks | `src/oracle_proof.rs` | `src/lib.rs` (`verify_with_oracle_proof`) |
+| Staged-WASM intent slot helpers | `src/staged_wasm.rs` | `src/lib.rs` (`upgrade`, `stage_wasm`) |
+
+When adding a new cross-module helper, put it in the module that owns the
+state it touches (see the module table above), keep it `pub` at module
+scope only — never re-export it from `lib.rs` unless external crates need
+it — and add a row here so the module map stays a true file-ownership
+reference for Wave PR review.
+
+### Test locations by domain
+
+| Domain | Tests |
+|--------|-------|
+| Cursor pagination (Issues #215, #650) | `tests/cursor_pagination.rs`, `fuzz/fuzz_targets/export_cursor.rs`, `tests/fuzz/seeds.txt` |
+| Pagination parity across the three export APIs (Issue #302) | `tests/pagination_parity.rs` |
+| Export page layout golden | `tests/export_page_layout.rs`, `abi/export_page.layout.golden` |
+| Timelocked role grants (Issues #220, #648) | `tests/integration.rs`, `tests/auth_matrix.csv` |
+| Audit reads (Issue #646) | `tests/integration.rs`, `src/lib.rs` unit tests |
+| Dual-control batch_remove (Issue #219) | `tests/batch_remove_dual_control.rs` |
+| Challenge flow (Issue #214) | `tests/challenge.rs` |
+| Merkle proofs (Issue #216) | `tests/merkle_export.rs` |
+| Error-code stability (Issue #402) | `tests/contract_error_codes.rs`, `abi/contract_error_codes.golden` |
+| Bindings golden | `tests/bindings_golden.rs` |
+| Counter model proofs (Issue #241) | `tests/counter_proofs.rs` |
+| Property fuzz suite | `src/lib.rs` unit tests, `tests/fuzz/seeds.txt` — see `docs/REGISTRY_INVARIANTS.md` |
+
+Related docs: [ABI](ABI.md) (entry-point reference, pagination selection
+guide, audit reads) · [REGISTRY_INVARIANTS](REGISTRY_INVARIANTS.md)
+(counter/export invariants I1–I10, fuzzing) ·
+[ADMIN_RUNBOOK](ADMIN_RUNBOOK.md) (operator flows).
+
+### Notes
+
+- The contract crate is `#![no_std]` (`src/lib.rs`): `no_std`-incompatible
+  crates (e.g. `proptest`) cannot be used in-contract, so the property suite
+  uses a small xorshift generator instead (see
+  `docs/REGISTRY_INVARIANTS.md`). Integration tests under `tests/` link std
+  normally.
+- When splitting a module (e.g. a future pagination or governance module),
+  update this table, the sketch above, and the `pub use` list in `lib.rs` in
+  the same PR.
 
 ---
 
@@ -397,6 +513,25 @@ compatibility floor at 1.0.0 for callers that want to assert it explicitly.
 - **Username normalization:** Consider enforcing lowercase GitHub handles off-chain and in client SDKs.
 - **Multisig admin:** Admin address can be a multisig or smart account — no contract changes required.
 
+## Data Migrations — Semver Rejection Rule
+
+`Version::needs_migration(target)` and `CompatibilityInfo::for_upgrade` compare
+the deployed version and the target as a `(major, minor, patch)` tuple, not as
+independent fields. A migration is only valid when `target` is strictly ahead
+of the deployed version:
+
+- **Equal target** (`deployed == target`): rejected as a no-op. Running a
+  migration to the version already deployed must never execute storage
+  changes twice.
+- **Lower target** (`deployed > target` in any tuple position — patch, minor,
+  or major): rejected. There is no supported "downgrade migration" path;
+  attempting one must surface as `InvalidVersion`/no-op rather than silently
+  mutating state backwards.
+
+See `src/version.rs::tests::migrate_rejects_equal_target_tuple_comparison` and
+`migrate_rejects_lower_target_across_all_tuple_positions` for the automated
+proof covering all three tuple positions.
+
 ## Migration Window Reads
 
 During a registry migration window, dashboards should treat the on-chain
@@ -430,3 +565,27 @@ sequenceDiagram
         S-->>D: optional address + source registry id
     end
 ```
+
+### Storage Key Namespace
+
+The contract uses two independent storage partitions (instance and persistent).
+Storage keys are carefully designed to prevent collisions:
+
+- **Instance keys** (singleton values): Admin address, pause flag, network ID, counters, etc.
+- **Persistent keys** (per-entry, TTL-managed): Registration records, role assignments, pending operations, etc.
+
+Persistent keys use `(Symbol, Context)` tuples where the Symbol discriminator is encoded first in XDR serialization, preventing collisions even when different namespaces use the same context type.
+
+**New contributors must read [STORAGE_KEYS.md](STORAGE_KEYS.md) § Key Namespace Diagram before adding a new storage key.** The diagram shows how discriminators partition the keyspace and documents the collision-prevention strategy.
+
+Automated tests (`tests/storage_keys_collision.rs`) and a linter script (`scripts/check_storage_keys.sh`) verify:
+1. All Symbol constants are unique.
+2. All persistent discriminators are distinct.
+3. The documentation matches the implementation.
+
+Ad-hoc test fixtures may use `Symbol::new` only inside a fresh test `Env`;
+these local names are not production storage declarations and are excluded
+from the CI storage inventory. The collision test pins that separation. See
+[CONTRIBUTING.md § Temporary test-only keys](CONTRIBUTING.md#temporary-test-only-keys).
+
+See [CONTRIBUTING.md](CONTRIBUTING.md#storage-key-best-practices) for the workflow when adding a new key.

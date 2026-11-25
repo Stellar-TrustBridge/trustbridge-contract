@@ -101,6 +101,83 @@ Expected output when healthy:
 
 ---
 
+## Pre-Wave probes (Issue #668)
+
+`get_health_probes` returns the three checks operators run before a Wave.
+Unlike `get_health` it never errors, so an uninitialized deployment reports
+`admin_set: false` instead of `NotInitialized`.
+
+```bash
+stellar contract invoke --id $CONTRACT_ID --network testnet -- get_health_probes
+```
+
+| Field | Healthy value | Unhealthy → action |
+|-------|---------------|--------------------|
+| `paused` | `false` | `true` → check `get_pause_reason`, then `unpause` per the runbook |
+| `admin_set` | `true` | `false` → contract never initialized; run `initialize` before any Wave traffic |
+| `index_gen` | stable between probes | unexpected jump → removals happened; re-sync dashboards (cursors are invalidated) |
+
+---
+
+## Choosing a probe & alert SLOs (Issue #756)
+
+### Which probe to call
+
+| Use case | Call | Why |
+|---|---|---|
+| Liveness / uptime check (monitoring, load balancer, status page) | `get_health_probes` | **Never errors**, so any failure is unambiguously transport or RPC, not contract state. Cheapest read. |
+| Pre-Wave go/no-go gate | `get_health_probes` | Covers pause, initialization and index stability in one answer |
+| Dashboard status panel, on-call triage, CI post-deploy check | `get_health` | Adds version, counts, upgrade cooldown and attestation |
+| Indexer lag | `get_last_event_ledger` | Compare with your ingestion watermark (see [EVENT_INDEXING.md](EVENT_INDEXING.md)) |
+
+### Error vs never-error semantics
+
+| Situation | `get_health` | `get_health_probes` |
+|---|---|---|
+| Healthy, initialized | `Ok(HealthSnapshot)` | `HealthProbes { paused: false, admin_set: true, .. }` |
+| Not initialized (wrong `CONTRACT_ID`, network, or fresh deploy) | `Err(NotInitialized)` (code 2) | `admin_set: false`. Never an error |
+| Paused | `Ok`, `paused: true` | `paused: true` |
+| RPC unreachable / simulation transport failure | CLI/RPC error, **no** contract error | same |
+
+Rules that follow from this, and that avoid false pages:
+
+1. **A contract error from `get_health` is a real signal.** The only one it can
+   return is `NotInitialized`, so treat it the same as `admin_set: false`.
+2. **Anything that is not a contract result is an RPC/infra problem**: timeouts,
+   HTTP 5xx, `Error(Storage, ...)`, budget errors. Alert the infra on-call, not
+   the contract on-call, and never on a single failed probe.
+3. **Alert on `get_health_probes` field values, not on whether the call errored.**
+   It is built to always answer.
+
+### Suggested SLOs and alert thresholds
+
+These are starting points for Wave operators. Tune them to your RPC provider and
+traffic. Probe every **60 s** by simulation (`--send=no`); probes are read-only
+and cost no fees.
+
+| Signal | Condition | Severity | Notes |
+|---|---|---|---|
+| Probe availability SLO | ≥ **99.5 %** of probes return a contract result over 30 days | SLO | Failures here are RPC/infra (rule 2) |
+| RPC unreachable | **3 consecutive** probe failures (≈ 3 min) | Warn → page at 10 min | A single failure is noise |
+| Probe latency | p95 > **2 s** over 15 min | Warn | Usually RPC load; contract cost is constant |
+| Not initialized | `admin_set: false` **or** `get_health` → `NotInitialized` | **Page** (critical) | Wrong ID/network after a deploy, or a deploy that never ran `initialize` |
+| Unplanned pause | `paused: true` for > **5 min** outside a maintenance window | **Page** | Read `get_pause_reason`; follow [ADMIN_RUNBOOK.md](ADMIN_RUNBOOK.md) |
+| Planned pause | `paused: true` inside a maintenance window | Info | Silence via window, don't disable the rule |
+| Unexpected removals | `index_gen` changes with no scheduled removal/batch | Warn | Dashboards must re-sync; cursors invalidated |
+| Count regression | `total` or `verified` decreases between probes outside a batch window | Warn | Removals/revocations; cross-check events |
+| Unexpected upgrade window | `attestation_present: true` or `cooldown_remaining_secs > 0` outside a change window | Warn | Someone attested or upgraded; verify with the change log |
+| Indexer lag | `get_last_event_ledger` − indexer watermark > **720 ledgers** (≈ 1 h) | Warn | See [EVENT_INDEXING.md](EVENT_INDEXING.md) |
+
+**Caveat:** `cooldown_remaining_secs` counts from the last upgrade timestamp,
+and that timestamp is `0` on a never-upgraded deployment. On real networks the
+remaining time is therefore `0` until the first upgrade.
+
+Behaviour these rules depend on is pinned by
+[`tests/health_probes.rs`](../tests/health_probes.rs):
+`cargo test --test health_probes`.
+
+---
+
 ## Edge cases
 
 | Scenario | Snapshot behavior |
@@ -110,7 +187,7 @@ Expected output when healthy:
 | Zero registrations | `total: 0`, `verified: 0` |
 | Cooldown not yet elapsed | `cooldown_remaining_secs > 0` |
 | Attestation present but expired | `attestation_present: false` |
-| Never upgraded (no last_upgrade timestamp) | `cooldown_remaining_secs: 0` |
+| Never upgraded (no last_upgrade timestamp) | `cooldown_remaining_secs: 0` on real networks: counted from timestamp `0`, so non-zero only if ledger time < `cooldown_secs` |
 
 ---
 
@@ -160,6 +237,39 @@ const health = await contract.get_health();
 
 ---
 
+## Dry-run repair report
+
+Issue #811: before acting on a health snapshot or an export file, operators can produce a
+read-only **dry-run repair report** with `scripts/validate_registry.sh`:
+
+```bash
+CONTRACT_ID=$CONTRACT_ID ADMIN_SOURCE=admin REPORT_FILE=repair-report.json \
+  ./scripts/validate_registry.sh registry-export-testnet.json
+```
+
+The report proves two things without writing anything:
+
+1. **Counter proofs** — `counters.onchain_total` / `counters.onchain_verified`
+   come from a live `get_stats()` call and are compared against the counts
+   derived from the export file (`export.total` / `export.verified`).
+   `counters.parity` is `true` only when both match. A `false` parity means the
+   export is stale or the registry counters drifted; do not use that export for
+   a restore.
+2. **Mismatch categories** — `mismatches.missing_onchain`,
+   `address_mismatch`, `verified_mismatch`, and `missing_from_export` are
+   stable counters corresponding to the human-readable diff lines. The last
+   one is only populated when `ADMIN_SOURCE` is set, which is recorded in
+   `admin_diff_enabled`.
+
+`result` is `"ok"` only when every mismatch count is zero **and** counter
+parity is `true` (or `null` when `get_stats()` was unavailable). `schema_version`
+is `1`; parsers should reject unknown versions rather than guessing. The exact
+field order and types are pinned in
+[ABI.md § Dry-run repair report](ABI.md#dry-run-repair-report).
+
+This is a snapshot, not a repair plan: the script never replays writes or calls
+`compact_index`. Review every reported diff before using the normal
+admin-invoke workflow described in [DEPLOYMENT.md](DEPLOYMENT.md#import--validate-issue-133).
 ## Invoke-trace playbook for operators (Issue #329)
 
 `get_health` tells you the contract's *state*. When a specific

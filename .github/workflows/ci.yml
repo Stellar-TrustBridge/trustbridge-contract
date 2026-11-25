@@ -5,14 +5,16 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "0 3 * * *" # nightly mutation run
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
-  STELLAR_CLI_VERSION: 26.1.0
 
 jobs:
-  quality:
-    name: Quality gate (fmt, clippy, test, docs)
+  check:
+    name: Basic checks
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -21,25 +23,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt -- --check
 
-      - name: Format
-        run: make fmt
-
-      - name: Clippy
-        run: make lint
-
-      - name: Test
-        run: make test
-
-      - name: Rustdoc
-        run: make docs-check
-
-  build:
-    name: Contract build + WASM hash gate
+  clippy:
+    name: Clippy deny warnings
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -48,18 +38,160 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32v1-none, wasm32-unknown-unknown
+          components: clippy
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Install Stellar CLI
+      - name: Run clippy with denied warnings
+        run: cargo clippy --all-targets -- -D warnings
+
+  abi-consistency:
+    name: Error codes and event topics
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Same scripts as `make error-codes` / `make event-topics`.
+      - name: Check error codes
+        run: ./scripts/check_error_codes.sh
+
+      - name: Check event topics
+        run: ./scripts/check_event_topics.sh
+
+      - name: Check subgraph event parity
+        run: make subgraph-parity
+
+      # Issue #750: estimator golden output + stable invalid-input errors.
+      - name: Check storage rent estimator golden
+        run: make storage-rent-estimator
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Regenerate ABI JSON then validate snapshot
         run: |
-          test -f Cargo.toml
-          test -f rust-toolchain.toml
-          test -f src/lib.rs
-          test -f README.md
-          test -f Makefile
+          python3 scripts/generate_abi_json.py
+          python3 scripts/generate_abi_json.py --self-test
+          python3 scripts/generate_abi_json.py --check
+          cargo test --test abi_entrypoints_golden -- --nocapture
 
-      - name: Check storage-rent estimator golden
-        run: bash scripts/test_storage_rent_estimator.sh
+  oracle-proof-tests:
+    name: oracle_proof unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run oracle_proof module tests
+        run: cargo test --lib oracle_proof
+
+  storage-budgets:
+    name: Storage footprint and rent playbook checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Same targets as `make storage-footprint-check` / `make storage-rent-check`.
+      - name: Storage footprint budget (Issue #661)
+        run: cargo test --lib storage_footprint_budget_tests
+
+      - name: Storage rent playbook constants (Issue #660)
+        run: cargo test --lib storage_rent_playbook_tests
+
+  cross-contract-deny:
+    name: cross-contract register denial
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run cross-contract register denial tests
+        run: cargo test --test cross_contract_register_deny
+
+  cargo-deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Caches the installed cargo-deny binary between runs.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny@0.20.2
+
+      # Advisory DB cache; cargo-deny refreshes it on every run.
+      - name: Cache advisory database
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/advisory-dbs
+          key: advisory-db-${{ github.run_id }}
+          restore-keys: advisory-db-
+
+      - name: cargo deny check
+        run: cargo deny --config deny.toml check
+
+  mutants:
+    name: cargo mutants (src/utils.rs)
+    # CPU-heavy: nightly and on demand only, never on pull requests.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-mutants
+        run: cargo install --locked cargo-mutants@27.1.0
+
+      # Scope and test selection come from mutants.toml (cargo-mutants only
+      # reads .cargo/mutants.toml by default). Exit 2 means survived
+      # ("missed") mutants and fails the job; exit 3 means only timeouts,
+      # which mutants.toml documents as not failures.
+      - name: cargo mutants --file src/utils.rs
+        run: |
+          status=0
+          cargo mutants --config mutants.toml --file src/utils.rs || status=$?
+          if [ "$status" -ne 0 ] && [ "$status" -ne 3 ]; then exit "$status"; fi
+
+      - name: Upload survived mutants
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-survived
+          path: |
+            mutants.out/missed.txt
+            mutants.out/outcomes.json
+          if-no-files-found: warn

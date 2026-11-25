@@ -214,6 +214,7 @@ registered_event|registered|registry
 bot_status_changed_event|bot_status_changed|registry
 removed_event|removed|registry
 renamed_event|renamed|registry
+bot_status_changed_event|bot_status_changed|registry
 verified_event|verified|attest
 verification_revoked_event|verification_revoked|attest
 verification_configured_event|verification_configured|attest
@@ -244,6 +245,7 @@ upgrade_proposal_cancelled_event|upgrade_proposal_cancelled|upgrade
 batch_remove_proposed_event|batch_remove_proposed|batch
 batch_remove_executed_event|batch_remove_executed|batch
 batch_remove_cancelled_event|batch_remove_cancelled|batch
+audit_config_changed_event|audit_config_changed|audit
 TOPICS
 )"
 

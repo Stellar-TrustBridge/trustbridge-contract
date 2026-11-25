@@ -10,7 +10,13 @@ source of truth for topic symbols, field names, and types — mismatches between
 docs and on-chain `#[contractevent]` definitions are tracked as documentation
 bugs.
 
-Key events to watch:
+Cursor pagination over mirrored events must decode **topics** and **data**
+separately ([EVENT_INDEXING.md](EVENT_INDEXING.md)). `topic[0]` is always the
+snake_case event symbol. Additional `#[topic]` fields follow in struct order
+(Soroban allows at most a handful of indexed topics; this contract uses at most
+two extra). Remaining fields are in the XDR **data** map, in the order listed
+below — do not assume struct declaration order if you are looking at a wrapper
+type; these rows match `src/events.rs` emission.
 
 | Event | Topic symbol | Key data fields |
 |---|---|---|
@@ -22,14 +28,17 @@ Key events to watch:
 | `UpgradedEvent` | `upgraded_event` | `version`, `timestamp` |
 | `PausedEvent` / `UnpausedEvent` | `paused_event` / `unpaused_event` | `timestamp` |
 | `RoleGrantedEvent` / `RoleRevokedEvent` | `role_granted_event` / `role_revoked_event` | `role`, `admin`, `timestamp` / `admin`, `timestamp` |
+| `RoleGrantPendingEvent` | `role_grant_pending_event` | `address` (topic), `role`, `admin`, `activate_at`, `timestamp` — queued behind `set_role_delay`; see [subgraph handler mapping](subgraph/README.md) and [ADMIN_RUNBOOK timelocked grants](ADMIN_RUNBOOK.md#timelocked-role-grants-issue-220) |
 
 > **Bot flag:** update the dashboard's `is_bot` column from `BotStatusChangedEvent`
 > instead of re-exporting the registry; the latest event per `github_username`
 > (by ledger order) is authoritative.
 
-> **Note:** `RoleRevokedEvent` does **not** include the `role` field in its data
-> payload. If your indexer needs to know which role was revoked, correlate the
-> revocation with the most recent `RoleGrantedEvent` for that address.
+> **Pause events:** `admin` is an indexed topic. `reason_code` and `domain` are
+> data fields. `EmergencyClearedEvent` has no reason code.
+
+> **RoleGrantPendingEvent:** decode `role`, `admin`, `activate_at`, and
+> `timestamp` from data. Only `address` is topic-indexed besides the symbol.
 
 ## Features & Integration Overview
 
@@ -64,6 +73,29 @@ instead when syncing incrementally — it walks the same admin-gated index but
 in bounded chunks, so a dashboard/indexer sync job can page through without
 risking a resource-limit failure on a large registry. See
 `test_get_registered_page_paginates_and_gates_on_admin` in `src/lib.rs`.
+
+### Recommended page size versus budget
+
+`MAX_PAGE_LIMIT = 100` is a ceiling, not a recommendation. `limit > 100` is
+clamped to `100` rather than rejected, and a page that materializes too many
+ledger entries fails the whole invocation (no partial page).
+
+| Reader | Endpoint | Recommended `limit` |
+|--------|----------|--------------------:|
+| Public dashboard poll | `get_public_paginated` | `20` (`DEFAULT_PAGE_LIMIT`) |
+| Indexer backfill | `get_public_paginated` | `50` (`CHUNK_SIZE`) |
+| Admin export | `get_registered_paginated` | `50` |
+| Recovery after an OOG | Either | `10`, then increase |
+
+Typical oversized-page symptoms are `Budget exceeded` / instruction-limit
+errors, ledger-footprint errors, and RPC timeouts. On any of them, halve the
+limit and retry from the last successful `cursor`; do not treat the failure as
+an empty registry. A request of 150 returning 100 rows is the silent clamp,
+not a dropped page.
+
+Full budget model, CLI examples, and reproduction commands:
+[BENCHMARK_BUDGETS.md](BENCHMARK_BUDGETS.md). Field semantics:
+[ABI.md § ExportPage](ABI.md#exportpage).
 
 ## Event Idempotency & Replay Handling
 ## Event lag signal (Issue #282)
@@ -271,6 +303,37 @@ lives at
 `tests/event_replay.rs` (`cargo test event`) applies it through a reference
 consumer and asserts the stream is replay-safe.
 
+
+### Full contract-event replay coverage (Issue #598)
+
+The [Rust replay test](../tests/event_replay.rs) and
+[language-neutral fixture](../tests/testdata/event_replay_fixture.json)
+cover all 35 `#[contractevent]` structures declared in
+[`src/events.rs`](../src/events.rs). Each type has a unique delivery envelope
+and an exact replay. The original registration/verification scenario is preserved.
+The test compares **ordered event types and event IDs** against JSON and checks
+that its complete type catalogue equals the source declarations, preventing
+quiet fixture drift when a new event is added.
+
+Event types covered:
+
+`registered_event`, `bot_status_changed_event`, `removed_event`, `verified_event`, `verification_revoked_event`, `upgraded_event`, `paused_event`, `unpaused_event`, `emergency_paused_event`, `emergency_cleared_event`, `guardian_changed_event`, `role_grant_pending_event`, `role_grant_cancelled_event`, `renamed_event`, `rotation_requested_event`, `rotation_executed_event`, `rotation_cancelled_event`, `wasm_staged_event`, `upgrade_attested_event`, `attestation_cleared_event`, `role_granted_event`, `role_revoked_event`, `batch_remove_proposed_event`, `batch_remove_executed_event`, `batch_remove_cancelled_event`, `challenge_started_event`, `challenge_cancelled_event`, `challenge_completed_event`, `staged_wasm_cleared_event`, `upgrade_proposed_event`, `upgrade_approved_event`, `upgrade_proposal_executed_event`, `upgrade_proposal_cancelled_event`, `verification_configured_event`, `audit_config_changed_event`.
+
+For a direct read of the bot flag, use the permissionless
+`get_bot_status(github_username)` entrypoint; it returns `NotRegistered` for a
+missing record and remains available while paused. This avoids inferring status
+from event history.
+
+Events without `github_username` (upgrade hashes, roles, proposals, guardians,
+audit configuration) use their own payload subject in real indexers. Dedupe
+**must not** key on that subject: it keys solely on the network, contract,
+ledger, transaction, and event index envelope above. Multiple events in one
+ledger or transaction remain unique through `event_index`, including batch
+remove proposals and executions. A repeated upgrade delivery is not a new
+upgrade simply because an indexer reconnects. The reference consumer records
+non-registry event application counts, rather than pretending all payloads
+change the registry's username/address state.
+
 See [ABI.md — Events](ABI.md#events) for the full topic/payload reference per
 event type.
 
@@ -426,6 +489,15 @@ an instance-storage scan.
 
 ---
 
+## Health probes for dashboards (Issue #756)
+
+Status panels should call `get_health` (full snapshot). Uptime checks and alert
+rules should call `get_health_probes`, which never errors, so any failure is
+RPC or infra rather than contract state. Re-sync cached registry views when
+`index_gen` changes, the same trigger as an invalidated cursor. Suggested
+probe cadence, error semantics and alert thresholds:
+[CONTRACT_HEALTH.md → Choosing a probe & alert SLOs](CONTRACT_HEALTH.md#choosing-a-probe--alert-slos-issue-756).
+
 ## Event topic classification (Issue #399)
 
 `scripts/event_indexer.sh` is the reference indexer for this guide. Beyond
@@ -454,3 +526,23 @@ resume path appends nothing the second time.
 
 See [scripts/README.md](../scripts/README.md#topic-classification-issue-399)
 for the full field reference and local verification steps.
+
+## Contract invocation error buckets
+
+When an invocation fails, decode the `ContractError` numeric code with the
+catalog and category table in [ABI.md](ABI.md#contracterror-u32-discriminant).
+Dashboards should bucket by `ErrorCategory` (`Auth`, `Retry`, or `Fatal`), not
+by matching the display string:
+
+- `Retry`: schedule a bounded retry with backoff, only where repeating the
+  transaction is safe.
+- `Auth`: stop retries with the same signer and request action from an
+  authorized key holder.
+- `Fatal`: stop automatic retries and show the error code, variant, and
+  display text so the caller/operator can correct the request or state.
+
+The exact per-variant grouping is maintained in `src/error.rs` and documented
+in the linked ABI catalog. In particular, do not automatically reclassify
+`Paused` or `AttestationRequired` as retryable based on their wording; both are
+currently categorized as `Fatal`. `tests/contract_error_codes.rs` checks the
+documented buckets and snapshots every `Display` string against the code.

@@ -19,7 +19,7 @@
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::{Address, BytesN, Env};
 
-use trustbridge_contract::{ContractError, Role, TrustBridgeContract};
+use trustbridge_contract::{ContractError, Role, TrustBridgeContract, MAX_UPGRADE_SIGNERS};
 
 /// Test fixture: an initialized contract where `admin` is the contract admin,
 /// `upgrader` holds `Role::Upgrader`, and `random` holds no role at all.
@@ -114,8 +114,13 @@ fn test_admin_and_upgrader_can_propose() {
     // Admin proposes.
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), wasm.clone(), 3_600)
-            .unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            wasm.clone(),
+            3_600,
+        )
+        .unwrap();
     });
     env.as_contract(&contract_id, || {
         let proposal = TrustBridgeContract::get_upgrade_proposal(env.clone())
@@ -139,7 +144,8 @@ fn test_admin_and_upgrader_can_propose() {
     });
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::propose_multisig_upgrade(env.clone(), upgrader.clone(), wasm, 0).unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(env.clone(), upgrader.clone(), wasm, 0)
+            .unwrap();
     });
     env.as_contract(&contract_id, || {
         let proposal = TrustBridgeContract::get_upgrade_proposal(env.clone()).unwrap();
@@ -155,7 +161,12 @@ fn test_random_cannot_propose() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         assert_eq!(
-            TrustBridgeContract::propose_multisig_upgrade(env.clone(), random.clone(), hash(&env, 0x01), 0),
+            TrustBridgeContract::propose_multisig_upgrade(
+                env.clone(),
+                random.clone(),
+                hash(&env, 0x01),
+                0
+            ),
             Err(ContractError::NotAuthorized)
         );
     });
@@ -167,10 +178,20 @@ fn test_propose_fails_when_a_proposal_is_already_pending() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), hash(&env, 0x01), 0)
-            .unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0x01),
+            0,
+        )
+        .unwrap();
         assert_eq!(
-            TrustBridgeContract::propose_multisig_upgrade(env.clone(), upgrader.clone(), hash(&env, 0x02), 0),
+            TrustBridgeContract::propose_multisig_upgrade(
+                env.clone(),
+                upgrader.clone(),
+                hash(&env, 0x02),
+                0
+            ),
             Err(ContractError::UpgradeProposalAlreadyPending),
             "only one proposal may be live at a time"
         );
@@ -186,8 +207,13 @@ fn test_approvals_record_distinct_signers() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), hash(&env, 0x01), 0)
-            .unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0x01),
+            0,
+        )
+        .unwrap();
     });
 
     // Upgrader approves — the second distinct signer.
@@ -233,8 +259,13 @@ fn test_approve_upgrade_with_no_or_wrong_proposal_id_fails() {
             Err(ContractError::NoUpgradeProposalPending)
         );
 
-        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), hash(&env, 0x01), 0)
-            .unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0x01),
+            0,
+        )
+        .unwrap();
         // Wrong id for the live proposal.
         assert_eq!(
             TrustBridgeContract::approve_upgrade(env.clone(), upgrader.clone(), 99),
@@ -252,8 +283,13 @@ fn test_execute_fails_before_delay_elapses() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), hash(&env, 0x01), 3_600)
-            .unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0x01),
+            3_600,
+        )
+        .unwrap();
 
         // executable_at = 4_600; still inside the delay window.
         assert_eq!(
@@ -271,8 +307,13 @@ fn test_execute_fails_with_insufficient_approvals() {
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
         TrustBridgeContract::set_upgrade_threshold(env.clone(), admin.clone(), 2).unwrap();
-        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), hash(&env, 0x01), 0)
-            .unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0x01),
+            0,
+        )
+        .unwrap();
     });
 
     // Delay (0) has elapsed, but only the proposer has approved.
@@ -296,8 +337,13 @@ fn test_execute_fails_with_no_live_proposal() {
             Err(ContractError::NoUpgradeProposalPending)
         );
 
-        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), hash(&env, 0x01), 0)
-            .unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0x01),
+            0,
+        )
+        .unwrap();
         // Proposed but executed/cancelled under a different id than requested.
         assert_eq!(
             TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), 42),
@@ -313,8 +359,13 @@ fn test_random_cannot_execute_even_when_conditions_are_met() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), hash(&env, 0x01), 0)
-            .unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0x01),
+            0,
+        )
+        .unwrap();
     });
     // Delay elapsed, threshold (default 1) met — but the caller has no role.
     env.mock_all_auths();
@@ -400,8 +451,13 @@ fn test_cancel_removes_proposal_and_allows_a_new_one() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), hash(&env, 0x01), 0)
-            .unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0x01),
+            0,
+        )
+        .unwrap();
     });
 
     env.mock_all_auths();
@@ -419,8 +475,13 @@ fn test_cancel_removes_proposal_and_allows_a_new_one() {
     // A new proposal can be created after cancellation.
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::propose_multisig_upgrade(env.clone(), upgrader.clone(), hash(&env, 0x02), 0)
-            .unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            upgrader.clone(),
+            hash(&env, 0x02),
+            0,
+        )
+        .unwrap();
     });
 }
 
@@ -430,8 +491,13 @@ fn test_only_admin_can_cancel() {
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
-        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), hash(&env, 0x01), 0)
-            .unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0x01),
+            0,
+        )
+        .unwrap();
     });
 
     // Upgrader holds a privileged role but cancellation is admin-only.
@@ -470,8 +536,13 @@ fn test_cancel_with_no_or_wrong_proposal_id_fails() {
             Err(ContractError::NoUpgradeProposalPending)
         );
 
-        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), hash(&env, 0x01), 0)
-            .unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0x01),
+            0,
+        )
+        .unwrap();
         // Wrong id for the live proposal.
         assert_eq!(
             TrustBridgeContract::cancel_upgrade_proposal(env.clone(), admin.clone(), 99),
@@ -495,7 +566,12 @@ fn test_multisig_functions_require_initialization() {
             Err(ContractError::NotInitialized)
         );
         assert_eq!(
-            TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), hash(&env, 0x01), 0),
+            TrustBridgeContract::propose_multisig_upgrade(
+                env.clone(),
+                admin.clone(),
+                hash(&env, 0x01),
+                0
+            ),
             Err(ContractError::NotInitialized)
         );
         assert_eq!(
@@ -510,5 +586,215 @@ fn test_multisig_functions_require_initialization() {
             TrustBridgeContract::cancel_upgrade_proposal(env.clone(), admin.clone(), 0),
             Err(ContractError::NotInitialized)
         );
+    });
+}
+
+#[test]
+fn test_proposal_error_paths_after_cancellation() {
+    let (env, admin, upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0x01),
+            0,
+        )
+        .unwrap();
+
+        // Admin cancels proposal 0.
+        TrustBridgeContract::cancel_upgrade_proposal(env.clone(), admin.clone(), 0).unwrap();
+
+        // Approval on cancelled proposal fails with NoUpgradeProposalPending.
+        assert_eq!(
+            TrustBridgeContract::approve_upgrade(env.clone(), upgrader.clone(), 0),
+            Err(ContractError::NoUpgradeProposalPending)
+        );
+
+        // Execution on cancelled proposal fails with NoUpgradeProposalPending.
+        assert_eq!(
+            TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), 0),
+            Err(ContractError::NoUpgradeProposalPending)
+        );
+
+        // Repeat cancel on already-cancelled proposal fails with NoUpgradeProposalPending.
+        assert_eq!(
+            TrustBridgeContract::cancel_upgrade_proposal(env.clone(), admin.clone(), 0),
+            Err(ContractError::NoUpgradeProposalPending)
+        );
+    });
+}
+
+#[test]
+fn test_propose_preserves_live_proposal_state_on_already_pending_error() {
+    let (env, admin, upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+    let original_hash = hash(&env, 0xAA);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            original_hash.clone(),
+            1_800,
+        )
+        .unwrap();
+
+        // Upgrader tries to propose while one is pending -> UpgradeProposalAlreadyPending.
+        let err = TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            upgrader.clone(),
+            hash(&env, 0xBB),
+            0,
+        );
+        assert_eq!(err, Err(ContractError::UpgradeProposalAlreadyPending));
+
+        // Verify the original proposal's state is preserved intact.
+        let live = TrustBridgeContract::get_upgrade_proposal(env.clone()).unwrap();
+        assert_eq!(live.id, 0);
+        assert_eq!(live.wasm_hash, original_hash);
+        assert_eq!(live.proposed_by, admin);
+        assert_eq!(live.proposed_at, 1_000);
+        assert_eq!(live.executable_at, 2_800);
+        assert_eq!(live.approvers.len(), 1);
+    });
+}
+
+// ── Attestation-required flag (Issue #198 / #406) ────────────────────────────
+
+#[test]
+fn test_attestation_required_defaults_to_false() {
+    let (env, _admin, _upgrader, _random, contract_id) = setup();
+
+    env.as_contract(&contract_id, || {
+        assert!(
+            !TrustBridgeContract::get_attestation_required(env.clone()),
+            "attestation_required must default to false"
+        );
+    });
+}
+
+#[test]
+fn test_admin_can_set_attestation_required() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+
+    // Enable: each require_auth needs a fresh mock_all_auths frame.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+        assert!(TrustBridgeContract::get_attestation_required(env.clone()));
+    });
+
+    // Toggle back off.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), false).unwrap();
+        assert!(!TrustBridgeContract::get_attestation_required(env.clone()));
+    });
+}
+
+#[test]
+fn test_non_admin_cannot_set_attestation_required() {
+    let (env, _admin, upgrader, random, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::set_attestation_required(env.clone(), upgrader.clone(), true),
+            Err(ContractError::NotAuthorized),
+            "upgrader must not set attestation_required"
+        );
+        assert_eq!(
+            TrustBridgeContract::set_attestation_required(env.clone(), random.clone(), true),
+            Err(ContractError::NotAuthorized),
+            "random actor must not set attestation_required"
+        );
+    });
+}
+
+#[test]
+fn test_clear_attestation_does_not_disable_required_flag() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        // Turn on the gate then clear any pending attestation.
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+        TrustBridgeContract::clear_attestation(env.clone()).unwrap();
+
+        // The required flag must still be on — clearing the attestation record
+        // is a separate operation from disabling the gate.
+        assert!(
+            TrustBridgeContract::get_attestation_required(env.clone()),
+            "clear_attestation must not disable the attestation_required flag"
+        );
+    });
+}
+
+// ── Threshold above signer set must fail closed (Issue #795) ─────────────────
+
+/// Setting a threshold above `MAX_UPGRADE_SIGNERS` would make the threshold
+/// permanently unreachable — no proposal could ever collect enough distinct
+/// approvers. The contract must fail closed and reject the call rather than
+/// accept a value that freezes all future upgrades.
+#[test]
+fn test_admin_cannot_set_threshold_above_signer_cap() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::set_upgrade_threshold(
+                env.clone(),
+                admin.clone(),
+                MAX_UPGRADE_SIGNERS + 1,
+            ),
+            Err(ContractError::ThresholdExceedsSignerCap),
+            "threshold above MAX_UPGRADE_SIGNERS must be rejected"
+        );
+        // Previous (default) threshold is unchanged after the rejected call.
+        assert_eq!(TrustBridgeContract::get_upgrade_threshold(env.clone()), 1);
+    });
+}
+
+/// A threshold exactly at the hard cap is still reachable and must be
+/// accepted — only values strictly above the cap are rejected.
+#[test]
+fn test_admin_can_set_threshold_exactly_at_signer_cap() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_upgrade_threshold(env.clone(), admin.clone(), MAX_UPGRADE_SIGNERS)
+            .unwrap();
+        assert_eq!(
+            TrustBridgeContract::get_upgrade_threshold(env.clone()),
+            MAX_UPGRADE_SIGNERS
+        );
+    });
+}
+
+/// Recovery: after an over-cap threshold is rejected, the admin can set a
+/// reachable threshold (lower it) and resume normal multisig governance —
+/// the documented recovery path in `docs/ADMIN_RUNBOOK.md`.
+#[test]
+fn test_recovery_set_reachable_threshold_after_rejected_attempt() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::set_upgrade_threshold(
+            env.clone(),
+            admin.clone(),
+            MAX_UPGRADE_SIGNERS + 10,
+        )
+        .is_err());
+
+        // Admin lowers the threshold to a value within the signer cap.
+        TrustBridgeContract::set_upgrade_threshold(env.clone(), admin.clone(), 2).unwrap();
+        assert_eq!(TrustBridgeContract::get_upgrade_threshold(env.clone()), 2);
     });
 }

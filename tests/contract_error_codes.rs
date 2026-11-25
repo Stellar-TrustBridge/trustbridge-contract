@@ -6,9 +6,10 @@
 //! added without an entry, and an unrecorded code is exactly the one a later
 //! refactor feels free to renumber.
 
-use trustbridge_contract::ContractError;
+use trustbridge_contract::{ContractError, ErrorCategory};
 
 const GOLDEN: &str = include_str!("../abi/contract_error_codes.golden");
+const ABI_DOCS: &str = include_str!("../docs/ABI.md");
 
 fn variant_for_name(name: &str) -> ContractError {
     match name {
@@ -41,17 +42,20 @@ fn variant_for_name(name: &str) -> ContractError {
         "AdminTransferDelayActive" => ContractError::AdminTransferDelayActive,
         "NoPendingAdminTransfer" => ContractError::NoPendingAdminTransfer,
         "AttestationRequired" => ContractError::AttestationRequired,
+        "NetworkMismatch" => ContractError::NetworkMismatch,
         "VerifierAllowlistFull" => ContractError::VerifierAllowlistFull,
         "VerifierNotAllowlisted" => ContractError::VerifierNotAllowlisted,
         "VerifierExpiryInPast" => ContractError::VerifierExpiryInPast,
         "NoPendingRoleGrant" => ContractError::NoPendingRoleGrant,
         "RoleGrantNotReady" => ContractError::RoleGrantNotReady,
+        "RoleExpired" => ContractError::RoleExpired,
         "ProvenanceMissing" => ContractError::ProvenanceMissing,
         "ProvenanceMismatch" => ContractError::ProvenanceMismatch,
         "StagedWasmMismatch" => ContractError::StagedWasmMismatch,
         "UpgradeProposalAlreadyPending" => ContractError::UpgradeProposalAlreadyPending,
         "NoUpgradeProposalPending" => ContractError::NoUpgradeProposalPending,
         "UpgradeProposalAlreadyApproved" => ContractError::UpgradeProposalAlreadyApproved,
+        "ThresholdExceedsSignerCap" => ContractError::ThresholdExceedsSignerCap,
         "UpgradeProposalDelayActive" => ContractError::UpgradeProposalDelayActive,
         "UpgradeProposalInsufficientApprovals" => {
             ContractError::UpgradeProposalInsufficientApprovals
@@ -68,6 +72,11 @@ fn variant_for_name(name: &str) -> ContractError {
         "DualControlRequired" => ContractError::DualControlRequired,
         "BatchRemoveProposalPending" => ContractError::BatchRemoveProposalPending,
         "NoPendingBatchRemove" => ContractError::NoPendingBatchRemove,
+        "OracleProofBadLayout" => ContractError::OracleProofBadLayout,
+        "OracleProofNotAllowlisted" => ContractError::OracleProofNotAllowlisted,
+        "OracleProofExpired" => ContractError::OracleProofExpired,
+        "OracleProofBadSignature" => ContractError::OracleProofBadSignature,
+        "AddressMismatch" => ContractError::AddressMismatch,
         _ => panic!(
             "unknown ContractError in golden file: {name}. \
              Add the variant to variant_for_name, or fix the golden entry."
@@ -111,6 +120,22 @@ fn entries() -> Vec<Entry> {
             }
         })
         .collect()
+}
+
+#[test]
+fn network_mismatch_is_code_30_not_invalid_pause_reason() {
+    // Issue #459: rustdoc / abi.json had listed NetworkMismatch at 21, which
+    // is InvalidPauseReason. The contract discriminant is 30.
+    assert_eq!(ContractError::InvalidPauseReason.code(), 21);
+    assert_eq!(ContractError::NetworkMismatch.code(), 30);
+    assert_eq!(
+        ContractError::from_code(21),
+        Some(ContractError::InvalidPauseReason)
+    );
+    assert_eq!(
+        ContractError::from_code(30),
+        Some(ContractError::NetworkMismatch)
+    );
 }
 
 #[test]
@@ -198,4 +223,227 @@ fn golden_codes_are_unique_and_ascending() {
         );
         previous = code;
     }
+}
+
+// Frozen Display snapshots for every variant. The category mapping is
+// separately cross-checked against docs/ABI.md below.
+
+#[test]
+fn display_strings_match_snapshot() {
+    let cases: &[(ContractError, &str)] = &[
+        (
+            ContractError::AlreadyInitialized,
+            "contract already initialized",
+        ),
+        (ContractError::NotInitialized, "contract not initialized"),
+        (ContractError::NotAuthorized, "caller not authorized"),
+        (
+            ContractError::NotRegistered,
+            "github username not registered",
+        ),
+        (ContractError::AlreadyVerified, "username already verified"),
+        (ContractError::NotVerified, "username not verified"),
+        (ContractError::Paused, "contract is paused"),
+        (ContractError::CooldownActive, "upgrade cooldown active"),
+        (ContractError::InvalidVersion, "invalid version"),
+        (ContractError::InvalidRole, "invalid role"),
+        (ContractError::InvalidUsername, "invalid github username"),
+        (ContractError::AttestationExpired, "attestation expired"),
+        (ContractError::UnattestedWasm, "unattested wasm"),
+        (ContractError::InvalidBatchSize, "invalid batch size"),
+        (ContractError::InvalidReasonCode, "invalid reason code"),
+        (ContractError::ZeroAddress, "zero address"),
+        (
+            ContractError::ChallengeAlreadyActive,
+            "challenge already active",
+        ),
+        (ContractError::NoChallengeActive, "no challenge active"),
+        (
+            ContractError::ChallengeNotResolvable,
+            "challenge not resolvable",
+        ),
+        (ContractError::ChallengeActive, "challenge active"),
+        (ContractError::InvalidPauseReason, "invalid pause reason"),
+        (ContractError::AlreadyReserved, "username already reserved"),
+        (ContractError::NotReserved, "username not reserved"),
+        (ContractError::UsernameReserved, "username reserved"),
+        (ContractError::ReservedListFull, "reserved list full"),
+        (
+            ContractError::AdminTransferPending,
+            "admin transfer pending",
+        ),
+        (
+            ContractError::AdminTransferDelayActive,
+            "admin transfer delay active",
+        ),
+        (
+            ContractError::NoPendingAdminTransfer,
+            "no pending admin transfer",
+        ),
+        (
+            ContractError::AttestationRequired,
+            "attestation required",
+        ),
+        (ContractError::NetworkMismatch, "network mismatch"),
+        (
+            ContractError::VerifierAllowlistFull,
+            "verifier allowlist full",
+        ),
+        (
+            ContractError::VerifierNotAllowlisted,
+            "verifier not allowlisted",
+        ),
+        (
+            ContractError::VerifierExpiryInPast,
+            "verifier expiry in past",
+        ),
+        (
+            ContractError::NoPendingRoleGrant,
+            "no pending role grant",
+        ),
+        (ContractError::RoleGrantNotReady, "role grant not ready"),
+        (ContractError::ProvenanceMissing, "provenance missing"),
+        (ContractError::ProvenanceMismatch, "provenance mismatch"),
+        (
+            ContractError::StagedWasmMismatch,
+            "staged wasm mismatch",
+        ),
+        (
+            ContractError::UpgradeProposalAlreadyPending,
+            "upgrade proposal already pending",
+        ),
+        (
+            ContractError::NoUpgradeProposalPending,
+            "no upgrade proposal pending",
+        ),
+        (
+            ContractError::UpgradeProposalAlreadyApproved,
+            "upgrade proposal already approved",
+        ),
+        (
+            ContractError::ThresholdExceedsSignerCap,
+            "threshold exceeds signer cap",
+        ),
+        (
+            ContractError::UpgradeProposalDelayActive,
+            "upgrade proposal delay active",
+        ),
+        (
+            ContractError::UpgradeProposalInsufficientApprovals,
+            "upgrade proposal insufficient approvals",
+        ),
+        (ContractError::FallbackListFull, "fallback list full"),
+        (ContractError::UsernameTaken, "username taken"),
+        (ContractError::RotationRequired, "rotation required"),
+        (ContractError::RotationPending, "rotation pending"),
+        (ContractError::NoRotationPending, "no rotation pending"),
+        (ContractError::RotationNotReady, "rotation not ready"),
+        (ContractError::InvalidCursor, "invalid cursor"),
+        (ContractError::VerifyRateLimited, "verify rate limited"),
+        (
+            ContractError::DualControlRequired,
+            "dual control required",
+        ),
+        (
+            ContractError::BatchRemoveProposalPending,
+            "batch remove proposal pending",
+        ),
+        (
+            ContractError::NoPendingBatchRemove,
+            "no pending batch remove",
+        ),
+        (ContractError::RoleExpired, "role expired"),
+        (
+            ContractError::OracleProofBadLayout,
+            "oracle proof bad layout",
+        ),
+        (
+            ContractError::OracleProofNotAllowlisted,
+            "oracle proof not allowlisted",
+        ),
+        (
+            ContractError::OracleProofExpired,
+            "oracle proof expired",
+        ),
+        (
+            ContractError::OracleProofBadSignature,
+            "oracle proof bad signature",
+        ),
+        (ContractError::AddressMismatch, "address mismatch"),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(
+            error.to_string(),
+            *expected,
+            "display string drifted for {error:?}"
+        );
+    }
+    let mut live_count = 0;
+    for code in 1..=62 {
+        if let Some(error) = ContractError::from_code(code) {
+            live_count += 1;
+            assert!(
+                cases.iter().any(|(snapshot, _)| *snapshot == error),
+                "ContractError::{error:?} is missing a Display snapshot"
+            );
+        }
+    }
+    assert_eq!(
+        cases.len(),
+        live_count,
+        "every live error must have exactly one Display snapshot"
+    );
+}
+
+#[test]
+fn error_category_mapping_matches_abi_documentation() {
+    let section = ABI_DOCS
+        .split("<!-- error-category-mapping:start -->")
+        .nth(1)
+        .and_then(|tail| tail.split("<!-- error-category-mapping:end -->").next())
+        .expect("ABI.md must have a delimited error-category mapping table");
+    let mut documented = std::collections::BTreeMap::new();
+
+    for line in section.lines().filter(|line| line.starts_with("| `")) {
+        let columns: Vec<&str> = line.split('|').map(str::trim).collect();
+        assert_eq!(columns.len(), 4, "malformed category table row: {line}");
+        let category = match columns[1].trim_matches('`') {
+            "Auth" => ErrorCategory::Auth,
+            "Retry" => ErrorCategory::Retry,
+            "Fatal" => ErrorCategory::Fatal,
+            other => panic!("unknown documented error category: {other}"),
+        };
+        let names: Vec<&str> = columns[2].split('`').collect();
+        assert_eq!(
+            names.len() % 2,
+            1,
+            "malformed variant list in category row: {line}"
+        );
+        for index in (1..names.len()).step_by(2) {
+            let name = names[index].trim();
+            assert!(
+                documented.insert(name, category).is_none(),
+                "ContractError::{name} appears more than once in category table"
+            );
+        }
+    }
+
+    let mut live_count = 0;
+    for code in 1..=62 {
+        let Some(error) = ContractError::from_code(code) else {
+            continue;
+        };
+        live_count += 1;
+        let name = std::format!("{error:?}");
+        assert_eq!(
+            documented.get(name.as_str()),
+            Some(&error.category()),
+            "ABI.md category differs for ContractError::{error:?}"
+        );
+    }
+    assert_eq!(
+        documented.len(),
+        live_count,
+        "ABI.md must document every live ContractError exactly once"
+    );
 }

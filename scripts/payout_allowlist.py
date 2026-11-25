@@ -7,6 +7,13 @@ unauthenticated ``get_public_paginated`` endpoint (no admin key required),
 keeps verified records only by default, and writes one row per contributor.
 
 Read-only: no mutating call is ever made. Payment submission is out of scope.
+
+Payout mutation surface (Issue #407): the only entry point that changes a
+payout address is ``set_payout_address``. It is admin-gated (the caller must
+hold the contract admin role) and rejects malformed addresses with the stable
+error codes ``InvalidPayoutAddress`` and ``Unauthorized``. This script never
+invokes it; it only reads the resulting state, so the allowlist stays aligned
+with the documented ABI mutation surface.
 """
 
 from __future__ import annotations
@@ -14,6 +21,7 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -22,6 +30,21 @@ from trustbridge_client import StellarCLIError, TrustBridgeClient
 # Column order is aligned with the JSON export in export_registry.py, with the
 # payout destination added as the leading operational field.
 COLUMNS = ["github_username", "payout_address", "stellar_address", "verified", "registered_at"]
+
+# Stable error codes emitted by the contract's set_payout_address mutation
+# (Issue #407). Kept here so tooling and the ABI doc agree on the surface.
+PAYOUT_MUTATION = "set_payout_address"
+PAYOUT_ERROR_CODES = ("Unauthorized", "InvalidPayoutAddress")
+
+# Payout addresses are Stellar account IDs (ed25519 public keys, StrKey "G...").
+# Mirrors the on-chain validation so the allowlist never emits a row the
+# contract would reject on a subsequent set_payout_address call.
+PAYOUT_ADDRESS_RE = re.compile(r"^G[A-Z2-7]{55}$")
+
+
+def is_valid_payout_address(address: str) -> bool:
+    """Return True when *address* matches the contract's payout address format."""
+    return bool(address) and PAYOUT_ADDRESS_RE.match(address) is not None
 
 
 def main() -> int:
@@ -45,6 +68,11 @@ def main() -> int:
         action="store_true",
         help="keep records flagged as CI bots (default: excluded from payout allowlists)",
     )
+    parser.add_argument(
+        "--include-invalid-addresses",
+        action="store_true",
+        help="keep rows whose payout_address fails format validation (default: excluded)",
+    )
     args = parser.parse_args()
 
     if not args.contract:
@@ -59,6 +87,7 @@ def main() -> int:
     total = 0
     skipped_unverified = 0
     skipped_bots = 0
+    skipped_invalid = 0
     for record in client.iter_public_records(args.page_limit):
         total += 1
         if not args.include_unverified and not record.verified:
@@ -66,6 +95,9 @@ def main() -> int:
             continue
         if not args.include_bots and record.is_bot:
             skipped_bots += 1
+            continue
+        if not args.include_invalid_addresses and not is_valid_payout_address(record.payout_address):
+            skipped_invalid += 1
             continue
         rows.append(
             {
@@ -84,7 +116,8 @@ def main() -> int:
 
     print(
         f"Wrote {len(rows)} row(s) to {output} "
-        f"(scanned {total}, skipped {skipped_unverified} unverified, {skipped_bots} bot)"
+        f"(scanned {total}, skipped {skipped_unverified} unverified, "
+        f"{skipped_bots} bot, {skipped_invalid} invalid-address)"
     )
     return 0
 

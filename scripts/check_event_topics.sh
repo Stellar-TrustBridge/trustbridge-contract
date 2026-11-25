@@ -14,6 +14,11 @@
 # second pass appends nothing — the resume-idempotency guarantee the indexer's
 # header promises.
 #
+# Coverage beyond the indexer table — the docs/EVENT_INDEXING.md topic table
+# and its Subgraph column (mapped entity or waiver in docs/subgraph/README.md) —
+# is checked by scripts/check_subgraph_parity.py (`make subgraph-parity`,
+# Issue #754). Run both when adding or renaming an event.
+#
 # Usage:  ./scripts/check_event_topics.sh
 
 set -euo pipefail
@@ -33,12 +38,17 @@ trap 'rm -rf "$TMP"' EXIT
 
 # --- 1. Topic symbols the contract actually emits.
 # `PascalCaseEvent` → `pascal_case_event`, matching the SDK's derivation.
-grep -oE '^pub struct [A-Za-z0-9]+Event' "$EVENTS_RS" \
-  | sed 's/^pub struct //' \
-  | awk '{
+# Keep the struct name and source line alongside the derived topic so a
+# collision (step below) can be reported with enough detail to go fix it
+# without re-deriving it by hand (Issue #794).
+grep -noE '^pub struct [A-Za-z0-9]+Event' "$EVENTS_RS" \
+  | sed 's/:pub struct /:/' \
+  | awk -F: '{
+      line = $1
+      name = $2
       out = ""
-      for (i = 1; i <= length($0); i++) {
-        c = substr($0, i, 1)
+      for (i = 1; i <= length(name); i++) {
+        c = substr(name, i, 1)
         if (c ~ /[A-Z]/) {
           if (i > 1) out = out "_"
           out = out tolower(c)
@@ -46,9 +56,31 @@ grep -oE '^pub struct [A-Za-z0-9]+Event' "$EVENTS_RS" \
           out = out c
         }
       }
-      print out
+      print out "|" name "|" line
     }' \
-  | sort -u > "$TMP/from_rust.txt"
+  > "$TMP/from_rust_raw.txt"
+
+cut -d'|' -f1 "$TMP/from_rust_raw.txt" > "$TMP/from_rust_topics_only.txt"
+
+# Duplicate derived topics would collide on the event stream (Issue #643).
+# `#[contractevent]` derives the topic from the struct name, so two event
+# structs whose snake_case names match emit the same topic and the indexer
+# would silently label one `unknown`.
+DUPE_TOPICS="$(sort "$TMP/from_rust_topics_only.txt" | uniq -d)"
+if [[ -n "$DUPE_TOPICS" ]]; then
+  fail "duplicate event topics derived from $EVENTS_RS (two structs map to the same topic):"
+  while IFS= read -r topic; do
+    [[ -z "$topic" ]] && continue
+    printf '  topic %-30s collides between:\n' "\"$topic\"" >&2
+    # Print every colliding struct with its exact file:line so the fix is a
+    # one-line jump, not another grep.
+    awk -F'|' -v t="$topic" '$1 == t { printf "    - %s (%s:%s)\n", $2, "'"$EVENTS_RS"'", $3 }' \
+      "$TMP/from_rust_raw.txt" >&2
+  done <<<"$DUPE_TOPICS"
+  printf 'event-topics: rename one of the colliding structs so their snake_case names differ.\n' >&2
+fi
+
+sort -u "$TMP/from_rust_topics_only.txt" > "$TMP/from_rust.txt"
 
 if [[ ! -s "$TMP/from_rust.txt" ]]; then
   fail "no event structs found in $EVENTS_RS — has the file moved?"
