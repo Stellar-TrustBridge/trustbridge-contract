@@ -16,7 +16,8 @@ out of the repo, and default to **testnet** (never mainnet).
 | `ttl_keeper.sh` | Walk the index and bump persistent-entry TTLs. |
 | `bulk_verify.sh` / `bulk_revoke.sh` | Batched verify / revoke from a username list, with RPC pacing. |
 | `simulate_pause.sh` | Exercise the pause / unpause lifecycle. |
-| `futurenet_smoke_test.sh` | End-to-end smoke test against futurenet. |
+| `futurenet_smoke_test.sh` | End-to-end smoke test against futurenet (`get_health_probes` after init, `get_stats`, `has_record`). |
+| `test_futurenet_smoke.sh` | Offline regression test for `futurenet_smoke_test.sh` (dry-run, live ordering, and failure paths). |
 | `storage_rent_estimator.py` | Estimate on-chain storage entry counts from `docs/storage-rent-estimator.inputs.v1.json`; warns on `CHUNK_SIZE` drift vs `src/storage.rs` (Issue #290). |
 
 ---

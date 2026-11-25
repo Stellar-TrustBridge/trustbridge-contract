@@ -74,6 +74,7 @@ struct ContributorRecord {
 struct Stats {
     total: u32,
     verified: u32,
+    ever_verified: u32,
 }
 ```
 
@@ -218,12 +219,29 @@ struct ChallengeRecord {
 | 29 | `AttestationRequired` | `upgrade` without an attestation while attestation-required mode is on |
 | 30 | `NetworkMismatch` | Instance state was initialized on a different network than the one executing (Issue #231 / #401) |
 | 31 | `VerifierAllowlistFull` | `add_verifier` would exceed the `MAX_VERIFIERS` cap (Issue #293) |
-| 32 | `VerifierNotAllowlisted` | `remove_verifier` for an address not on the allowlist (Issue #293) |
 | 33 | `VerifierExpiryInPast` | `add_verifier` given a non-zero `expires_at` not in the future (Issue #293) |
-| 34 | `NoPendingRoleGrant` | `activate_role` / `cancel_role_grant` with no pending grant (Issue #220) |
-| 35 | `RoleGrantNotReady` | `activate_role` before the grant's timelock elapsed (Issue #220) |
-| 36 | `ProvenanceMissing` | `assert_build` / `set_provenance_digests` before any provenance record exists (Issue #225) |
-| 37 | `ProvenanceMismatch` | `assert_build` given a hash that does not match stored provenance (Issue #225) |
+| 34 | `VerifierNotAllowlisted` | `remove_verifier` for an address not on the allowlist (Issue #293) |
+| 35 | `NoPendingRoleGrant` | `activate_role` / `cancel_role_grant` with no pending grant (Issue #220) |
+| 36 | `RoleGrantNotReady` | `activate_role` before the grant's timelock elapsed (Issue #220) |
+| 37 | `ProvenanceMissing` | `assert_build` / `set_provenance_digests` before any provenance record exists (Issue #225) |
+| 38 | `ProvenanceMismatch` | `assert_build` given a hash that does not match stored provenance (Issue #225) |
+| 39 | `StagedWasmMismatch` | `upgrade` / `execute_upgrade` given a WASM hash that does not match the staged slot (Issue #300) |
+| 40 | `UpgradeProposalAlreadyPending` | `propose_multisig_upgrade` while a proposal is already live (Issue #301) |
+| 41 | `NoUpgradeProposalPending` | `approve_upgrade` / `execute_upgrade` / `cancel_upgrade_proposal` with no live proposal (Issue #301) |
+| 42 | `UpgradeProposalAlreadyApproved` | `approve_upgrade` by an address that already approved (Issue #301) |
+| 43 | `UpgradeProposalDelayActive` | `execute_upgrade` before the proposal's delay elapsed (Issue #301) |
+| 44 | `UpgradeProposalInsufficientApprovals` | `execute_upgrade` before the approval threshold was met (Issue #301) |
+| 46 | `FallbackListFull` | `register` given more fallback addresses than `MAX_FALLBACK_ADDRESSES` |
+| 47 | `UsernameTaken` | `rename` called with an already-registered `new_username` |
+| 48 | `RotationRequired` | `register` direct address change while rotation delay is armed (Issue #234) |
+| 49 | `RotationPending` | A rotation is already pending for this username (Issue #234) |
+| 50 | `NoRotationPending` | `execute_address_rotation` / `cancel_address_rotation` with no pending rotation (Issue #234) |
+| 51 | `RotationNotReady` | `execute_address_rotation` before the delay has elapsed (Issue #234) |
+| 52 | `InvalidCursor` | Pagination cursor no longer decodes against current registry state (Issue #215) |
+| 53 | `VerifyRateLimited` | Non-admin caller would exceed per-ledger verify/revoke cap (Issue #292) |
+| 54 | `DualControlRequired` | `batch_remove` above dual-control threshold (Issue #219) |
+| 55 | `BatchRemoveProposalPending` | `propose_batch_remove` while a proposal is already pending (Issue #219) |
+| 56 | `NoPendingBatchRemove` | `execute_batch_remove` / `cancel_batch_remove` with no live proposal (Issue #219) |
 
 > **`NetworkMismatch` moved from 21 to 30.** This table previously listed it at
 > code 21 while the enum had `InvalidPauseReason` there and no `NetworkMismatch`
@@ -2107,15 +2125,19 @@ a fresh off-chain GitHub identity check after an address change. See
 
 Configures whether a published attestation is mandatory before `upgrade`.
 
-When `required = true`, `upgrade` fails with `AttestationRequired` (code 20)
+When `required = true`, `upgrade` fails with `AttestationRequired` (code 29)
 if no valid attestation is published. When `required = false` (default),
 unattested upgrades are allowed and provenance notes them as such.
+
+Honors the instance's recorded network tag (`require_matching_network`), failing
+with `NetworkMismatch` (code 30) if invoked on a different network. Works while
+the contract is paused.
 
 | | |
 |---|---|
 | **Auth** | Contract admin |
 | **Mutates** | Yes |
-| **Errors** | `NotInitialized`, `NotAuthorized` |
+| **Errors** | `NotInitialized`, `NetworkMismatch`, `NotAuthorized` |
 
 **Since:** added in Issue #198. Existing deployments default to `false`.
 
@@ -2523,9 +2545,22 @@ Returns a packed health snapshot for dashboards and CI probes.
 | **Auth** | None |
 | **Mutates** | No |
 | **Works while paused** | ✅ |
-| **Errors** | `NotInitialized` |
+| **Errors** | `NotInitialized`, `NetworkMismatch` |
 
 See [CONTRACT_HEALTH.md](CONTRACT_HEALTH.md) for full reference.
+
+### `get_health_probes() -> Result<HealthSnapshot, ContractError>`
+
+Post-init smoke alias of `get_health()`. Returns the identical `HealthSnapshot`
+struct with the same read-only, pause-exempt, and network-tag semantics. Used by
+`scripts/futurenet_smoke_test.sh` and `make invoke-health-probes`.
+
+| | |
+|---|---|
+| **Auth** | None |
+| **Mutates** | No |
+| **Works while paused** | ✅ |
+| **Errors** | `NotInitialized`, `NetworkMismatch` |
 
 ---
 

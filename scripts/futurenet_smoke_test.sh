@@ -29,6 +29,7 @@ if [[ "$DRY_RUN" == "true" ]]; then
   echo "DRY RUN: Futurenet RPC: ${RPC_URL}"
   echo "DRY RUN: Fund identity '${IDENTITY}' from ${FRIENDBOT_URL}/?addr=<G-address>"
   echo "DRY RUN: NETWORK=futurenet INIT=true ADMIN=<G-address> SOURCE=${SOURCE} RPC_URL=${RPC_URL} ./scripts/deploy.sh"
+  echo "DRY RUN: stellar contract invoke --network futurenet --rpc-url ${RPC_URL} -- get_health_probes"
   echo "DRY RUN: stellar contract invoke --network futurenet --rpc-url ${RPC_URL} -- get_stats"
   echo "DRY RUN: stellar contract invoke --network futurenet --rpc-url ${RPC_URL} -- has_record --github_username smoke-test-user"
   exit 0
@@ -53,7 +54,10 @@ if [[ -z "$CONTRACT_ID" ]]; then
   exit 1
 fi
 
-echo "==> Smoke: get_stats on a fresh deploy should be {total: 0, verified: 0}"
+echo "==> Smoke: get_health_probes after init should report unpaused, total=0, verified=0"
+"$STELLAR" contract invoke --id "$CONTRACT_ID" --source-account "$SOURCE" --network futurenet --rpc-url "$RPC_URL" -- get_health_probes
+
+echo "==> Smoke: get_stats on a fresh deploy should be {total: 0, verified: 0, ever_verified: 0}"
 "$STELLAR" contract invoke --id "$CONTRACT_ID" --source-account "$SOURCE" --network futurenet --rpc-url "$RPC_URL" -- get_stats
 
 echo "==> Smoke: has_record on an unregistered username should be false"

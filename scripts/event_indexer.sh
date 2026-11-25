@@ -211,6 +211,7 @@ rpc_get_events() {
 #   batch      — batch proposals and their execution
 TOPIC_TABLE="$(cat <<'TOPICS'
 registered_event|registered|registry
+bot_status_changed_event|bot_status_changed|registry
 removed_event|removed|registry
 renamed_event|renamed|registry
 verified_event|verified|attest
@@ -234,6 +235,12 @@ rotation_cancelled_event|rotation_cancelled|admin
 upgraded_event|upgraded|upgrade
 upgrade_attested_event|upgrade_attested|upgrade
 attestation_cleared_event|attestation_cleared|upgrade
+wasm_staged_event|wasm_staged|upgrade
+staged_wasm_cleared_event|staged_wasm_cleared|upgrade
+upgrade_proposed_event|upgrade_proposed|upgrade
+upgrade_approved_event|upgrade_approved|upgrade
+upgrade_proposal_executed_event|upgrade_proposal_executed|upgrade
+upgrade_proposal_cancelled_event|upgrade_proposal_cancelled|upgrade
 batch_remove_proposed_event|batch_remove_proposed|batch
 batch_remove_executed_event|batch_remove_executed|batch
 batch_remove_cancelled_event|batch_remove_cancelled|batch

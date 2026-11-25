@@ -69,13 +69,31 @@ use soroban_sdk::contracterror;
 /// | 27 | `AdminTransferDelayActive` | `accept_admin` |
 /// | 28 | `NoPendingAdminTransfer` | `accept_admin`, `cancel_admin_transfer` |
 /// | 29 | `AttestationRequired` | `upgrade` |
-/// | 30 | — | *reserved, never assigned* |
+/// | 30 | `NetworkMismatch` | any gated call on state restored to a different network |
 /// | 31 | `VerifierAllowlistFull` | `add_verifier` |
 /// | 33 | `VerifierExpiryInPast` | `add_verifier` |
-/// | 34 | `NoPendingRoleGrant` | `activate_role`, `cancel_role_grant` |
-/// | 35 | `RoleGrantNotReady` | `activate_role` |
-/// | 36 | `ProvenanceMissing` | `assert_build` |
-/// | 37 | `ProvenanceMismatch` | `assert_build` |
+/// | 34 | `VerifierNotAllowlisted` | `remove_verifier` |
+/// | 35 | `NoPendingRoleGrant` | `activate_role`, `cancel_role_grant` |
+/// | 36 | `RoleGrantNotReady` | `activate_role` |
+/// | 37 | `ProvenanceMissing` | `assert_build`, `set_provenance_digests` |
+/// | 38 | `ProvenanceMismatch` | `assert_build` |
+/// | 39 | `StagedWasmMismatch` | `upgrade`, `execute_upgrade` |
+/// | 40 | `UpgradeProposalAlreadyPending` | `propose_multisig_upgrade` |
+/// | 41 | `NoUpgradeProposalPending` | `approve_upgrade`, `execute_upgrade`, `cancel_upgrade_proposal` |
+/// | 42 | `UpgradeProposalAlreadyApproved` | `approve_upgrade` |
+/// | 43 | `UpgradeProposalDelayActive` | `execute_upgrade` |
+/// | 44 | `UpgradeProposalInsufficientApprovals` | `execute_upgrade` |
+/// | 46 | `FallbackListFull` | `register` |
+/// | 47 | `UsernameTaken` | `rename` |
+/// | 48 | `RotationRequired` | `register` (direct address change while delay armed) |
+/// | 49 | `RotationPending` | `rename`, `request_address_rotation` |
+/// | 50 | `NoRotationPending` | `execute_address_rotation`, `cancel_address_rotation` |
+/// | 51 | `RotationNotReady` | `execute_address_rotation` |
+/// | 52 | `InvalidCursor` | `get_registered_paginated`, `get_public_paginated` |
+/// | 53 | `VerifyRateLimited` | `verify`, `revoke_verification`, `batch_verify` |
+/// | 54 | `DualControlRequired` | `batch_remove` (above threshold) |
+/// | 55 | `BatchRemoveProposalPending` | `propose_batch_remove` |
+/// | 56 | `NoPendingBatchRemove` | `execute_batch_remove`, `cancel_batch_remove` |
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -193,9 +211,6 @@ pub enum ContractError {
     /// `execute_upgrade` was called before the approval threshold was met
     /// (Issue #301).
     UpgradeProposalInsufficientApprovals = 44,
-    /// Instance state was initialized on a different network than the one
-    /// executing (Issue #231).
-    NetworkMismatch = 45,
     /// `register` was given more fallback addresses than `MAX_FALLBACK_ADDRESSES`.
     FallbackListFull = 46,
     /// `rename` was called with a `new_username` that is already registered.
@@ -285,7 +300,6 @@ impl ContractError {
             42 => Some(ContractError::UpgradeProposalAlreadyApproved),
             43 => Some(ContractError::UpgradeProposalDelayActive),
             44 => Some(ContractError::UpgradeProposalInsufficientApprovals),
-            45 => Some(ContractError::NetworkMismatch),
             46 => Some(ContractError::FallbackListFull),
             47 => Some(ContractError::UsernameTaken),
             48 => Some(ContractError::RotationRequired),
@@ -383,12 +397,25 @@ impl ContractError {
             ContractError::NoPendingRoleGrant => ErrorCategory::Fatal,
             ContractError::ProvenanceMissing => ErrorCategory::Fatal,
             ContractError::ProvenanceMismatch => ErrorCategory::Fatal,
+            ContractError::StagedWasmMismatch => ErrorCategory::Fatal,
+            ContractError::UpgradeProposalAlreadyPending => ErrorCategory::Fatal,
+            ContractError::NoUpgradeProposalPending => ErrorCategory::Fatal,
+            ContractError::UpgradeProposalAlreadyApproved => ErrorCategory::Fatal,
+            ContractError::VerifierAllowlistFull => ErrorCategory::Fatal,
+            ContractError::VerifierNotAllowlisted => ErrorCategory::Fatal,
+            ContractError::VerifierExpiryInPast => ErrorCategory::Fatal,
             // Fatal, not Retry: the executing network does not change between
             // attempts. Someone has to re-deploy or re-tag the instance.
             ContractError::NetworkMismatch => ErrorCategory::Fatal,
-
-            // A pending grant becomes activatable once its timelock elapses.
-            ContractError::RoleGrantNotReady => ErrorCategory::Retry,
+            ContractError::FallbackListFull => ErrorCategory::Fatal,
+            ContractError::UsernameTaken => ErrorCategory::Fatal,
+            ContractError::RotationRequired => ErrorCategory::Fatal,
+            ContractError::RotationPending => ErrorCategory::Fatal,
+            ContractError::NoRotationPending => ErrorCategory::Fatal,
+            ContractError::InvalidCursor => ErrorCategory::Fatal,
+            ContractError::DualControlRequired => ErrorCategory::Fatal,
+            ContractError::BatchRemoveProposalPending => ErrorCategory::Fatal,
+            ContractError::NoPendingBatchRemove => ErrorCategory::Fatal,
         }
     }
 

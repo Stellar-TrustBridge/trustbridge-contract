@@ -5,7 +5,9 @@ mod batch;
 mod domain;
 mod error;
 mod events;
+mod merkle;
 mod multisig_upgrade;
+mod oracle_proof;
 mod staged_wasm;
 mod storage;
 mod utils;
@@ -47,6 +49,7 @@ pub use events::{
     // Multisig upgrade (Issue #301)
     UpgradeProposedEvent,
     UpgradedEvent,
+    VerificationConfiguredEvent,
     VerificationRevokedEvent,
     VerifiedEvent,
     // Staged WASM (Issue #300)
@@ -71,32 +74,40 @@ use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, String, Symbol, 
 
 use crate::storage::{
     add_to_index, add_verifier as storage_add_verifier, build_record_proof,
-    bump_ever_verified_count, clear_pending_reverify, get_admin, get_audit_logs, get_audit_stats,
-    get_challenge, get_cooldown as storage_get_cooldown, get_count, get_emergency_pause,
-    get_emergency_pause_ts, get_ever_verified_count as storage_get_ever_verified_count,
+    bump_ever_verified_count, charge_verify_rate, clear_pending_reverify, get_admin,
+    get_audit_logs, get_audit_stats, get_challenge, get_cooldown as storage_get_cooldown,
+    get_count, get_emergency_pause, get_emergency_pause_ts,
+    get_ever_verified_count as storage_get_ever_verified_count,
     get_guardian as storage_get_guardian, get_index,
     get_last_event_ledger as storage_get_last_event_ledger, get_last_upgrade,
-    get_network_id as storage_get_network_id, get_pending_role as storage_get_pending_role,
+    get_network_id as storage_get_network_id,
+    get_pending_reverify as storage_get_pending_reverify,
+    get_pending_role as storage_get_pending_role,
     get_pending_rotation as storage_get_pending_rotation, get_record,
     get_registered_paginated_internal, get_role as storage_get_role,
     get_role_delay as storage_get_role_delay,
     get_role_holder_count as storage_get_role_holder_count, get_role_holders_internal,
     get_rotation_delay as storage_get_rotation_delay, get_stats as read_stats,
     get_verification_config, get_verified_count as storage_get_verified_count,
-    get_verifier_allowlist, get_version as storage_get_version, get_wasm_attestation,
-    get_wasm_provenance, has_challenge, has_pending_rotation, has_record,
-    is_active_verifier as storage_is_active_verifier, is_admin_caller, is_in_cooldown,
+    get_verifier_allowlist, get_verify_limit as storage_get_verify_limit,
+    get_version as storage_get_version, get_wasm_attestation, get_wasm_provenance, has_challenge,
+    has_pending_rotation, has_record, is_active_verifier as storage_is_active_verifier,
+    is_admin_caller, is_attestation_required, is_guardian, is_in_cooldown,
     is_paused as storage_is_paused, prune_expired_verifiers, push_audit_entry, remove_challenge,
     remove_from_index, remove_guardian as storage_remove_guardian, remove_pending_role,
     remove_pending_rotation, remove_record, remove_role as storage_remove_role,
     remove_verifier as storage_remove_verifier, remove_wasm_attestation, require_initialized,
-    require_not_paused, run_migration_steps, set_challenge, set_cooldown as storage_set_cooldown,
-    set_count, set_ever_verified_count, set_last_action, set_last_event_ledger, set_last_upgrade,
-    set_paused as set_paused_state, set_pending_reverify, set_pending_role, set_pending_rotation,
-    set_record, set_role as storage_set_role, set_role_delay as storage_set_role_delay,
-    set_rotation_delay as storage_set_rotation_delay, set_verified_count, set_version,
+    require_not_paused, run_migration_steps,
+    set_attestation_required as storage_set_attestation_required, set_challenge,
+    set_cooldown as storage_set_cooldown, set_count, set_emergency_pause, set_emergency_pause_ts,
+    set_ever_verified_count, set_guardian_address, set_last_action, set_last_event_ledger,
+    set_last_upgrade, set_network_id, set_paused as set_paused_state, set_pending_reverify,
+    set_pending_role, set_pending_rotation, set_record, set_role as storage_set_role,
+    set_role_delay as storage_set_role_delay, set_rotation_delay as storage_set_rotation_delay,
+    set_verified_count, set_verify_limit as storage_set_verify_limit, set_version,
     set_wasm_attestation, set_wasm_provenance, verifier_allowlist_active, verifier_slots_remaining,
     PendingRoleGrant as PendingRoleGrantRecord, ADMIN_KEY, DEFAULT_CHALLENGE_DELAY_SECS,
+    MAX_FALLBACK_ADDRESSES,
 };
 
 use crate::utils::{
@@ -1090,6 +1101,47 @@ impl TrustBridgeContract {
         storage_get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple())
     }
 
+    // ── Attestation-required config (Issue #198) ─────────────────────────────
+
+    /// Configures whether WASM attestation is required before an upgrade. Admin-only.
+    ///
+    /// When `required` is `true`, `upgrade` fails with
+    /// [`ContractError::AttestationRequired`] if no valid, matching attestation
+    /// is present. When `required` is `false` (default), unattested upgrades
+    /// succeed and provenance notes `attested: false`.
+    ///
+    /// Honors the instance's recorded network id via [`require_initialized`] and
+    /// [`storage_set_attestation_required`] so cross-network attestation control
+    /// fails closed with [`ContractError::NetworkMismatch`]. Intentionally works
+    /// while paused so operators can tighten upgrade safety during an incident.
+    ///
+    /// # Auth
+    ///
+    /// Requires auth from the contract admin.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NetworkMismatch`] if the recorded network id differs
+    ///   from the executing network.
+    /// - [`ContractError::NotAuthorized`] if the caller is not the contract admin.
+    pub fn set_attestation_required(env: Env, required: bool) -> Result<(), ContractError> {
+        require_initialized(&env)?;
+        let admin = get_admin(&env)?;
+        admin.require_auth();
+        storage_set_attestation_required(&env, required)?;
+        Ok(())
+    }
+
+    /// Returns whether WASM attestation is required before an upgrade.
+    ///
+    /// Read-only; no auth required. Defaults to `false` on instances that have
+    /// never called `set_attestation_required`.
+    #[must_use]
+    pub fn is_attestation_required(env: Env) -> bool {
+        is_attestation_required(&env)
+    }
+
     /// Declares in advance the WASM hash the admin intends to deploy. Admin-only.
     ///
     /// Optional two-step upgrade. While an attestation is live, `upgrade` will
@@ -1203,6 +1255,8 @@ impl TrustBridgeContract {
     /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
     /// - [`ContractError::Paused`] if the contract is paused.
     /// - [`ContractError::CooldownActive`] if the configured upgrade cooldown has not elapsed.
+    /// - [`ContractError::StagedWasmMismatch`] if a staged hash exists and differs from `new_wasm_hash`.
+    /// - [`ContractError::AttestationRequired`] if attestation-required mode is on and no live attestation exists.
     /// - [`ContractError::AttestationExpired`] if a required attestation has expired.
     /// - [`ContractError::UnattestedWasm`] if the pending attestation names a different hash.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
@@ -1215,6 +1269,7 @@ impl TrustBridgeContract {
         let now = env.ledger().timestamp();
 
         Self::require_cooldown_elapsed(&env, now)?;
+        crate::staged_wasm::require_staged_wasm_consistent(&env, &new_wasm_hash)?;
         let attested = Self::consume_attestation(&env, &new_wasm_hash, now)?;
 
         // Provenance is captured before the executable is swapped: after
@@ -1228,7 +1283,7 @@ impl TrustBridgeContract {
             &WasmProvenance {
                 wasm_hash: new_wasm_hash.clone(),
                 previous_wasm_hash,
-                upgraded_by: admin,
+                upgraded_by: admin.clone(),
                 upgraded_at: now,
                 version: soroban_sdk::vec![&env, version.0, version.1, version.2],
                 attested,
@@ -2661,6 +2716,7 @@ impl TrustBridgeContract {
 
             remove_record(env, &username);
             remove_from_index(env, &username);
+            clear_pending_reverify(env, &username);
 
             // Counters are accumulated and written once after the loop, so
             // `count` and `vcount` move together exactly once per batch rather
@@ -2836,6 +2892,7 @@ impl TrustBridgeContract {
 
         remove_record(&env, &github_username);
         remove_from_index(&env, &github_username);
+        clear_pending_reverify(&env, &github_username);
         set_count(&env, get_count(&env).saturating_sub(1));
 
         if record.verified {
@@ -3017,7 +3074,12 @@ impl TrustBridgeContract {
         let admin = get_admin(&env)?;
         admin.require_auth();
 
-        let page = get_registered_paginated_internal(&env, cursor, limit)?;
+        let opaque_cursor = if cursor == 0 {
+            None
+        } else {
+            Some(crate::storage::encode_cursor(&env, cursor))
+        };
+        let page = get_registered_paginated_internal(&env, opaque_cursor, limit)?;
         let digest = crate::storage::build_export_digest(&env, &page);
         let version = storage_get_version(&env).unwrap_or_else(|| CONTRACT_VERSION.to_tuple());
         let ledger = env.ledger().sequence();
@@ -3403,6 +3465,61 @@ impl TrustBridgeContract {
         .publish(&env);
 
         Ok(())
+    }
+
+    /// Returns whether `github_username` has a pending re-verification flag (Issue #208).
+    ///
+    /// Set automatically when a verified user re-registers to a different
+    /// Stellar address, completes an address rotation, or renames; cleared on
+    /// `verify`, `batch_verify`, or `remove`. Works while paused.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NetworkMismatch`] if the recorded network id differs
+    ///   from the executing network.
+    pub fn get_pending_reverify(
+        env: Env,
+        github_username: String,
+    ) -> Result<bool, ContractError> {
+        require_initialized(&env)?;
+        Ok(storage_get_pending_reverify(&env, &github_username))
+    }
+
+    /// Returns a page of usernames that have a pending re-verification flag (Issue #208).
+    ///
+    /// Scans the username index from `offset`, collecting up to `limit`
+    /// usernames (capped at `MAX_PAGE_LIMIT`) with the pending-reverify flag
+    /// set. Works while paused.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NetworkMismatch`] if the recorded network id differs
+    ///   from the executing network.
+    pub fn get_pending_reverify_page(
+        env: Env,
+        offset: u32,
+        limit: u32,
+    ) -> Result<Vec<String>, ContractError> {
+        require_initialized(&env)?;
+
+        let capped_limit = limit.min(crate::storage::MAX_PAGE_LIMIT);
+        let index = crate::storage::get_index_page(&env, offset, capped_limit.saturating_mul(10));
+        let mut result = Vec::new(&env);
+
+        for i in 0..index.len() {
+            if result.len() >= capped_limit {
+                break;
+            }
+            if let Some(username) = index.get(i) {
+                if storage_get_pending_reverify(&env, &username) {
+                    result.push_back(username);
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     /// Returns the number of currently verified registrations.
@@ -3910,6 +4027,22 @@ impl TrustBridgeContract {
         })
     }
 
+    /// Alias of [`Self::get_health`] for post-initialize smoke checks and
+    /// contributor onboarding scripts.
+    ///
+    /// Returns the same packed [`HealthSnapshot`] (paused state, schema version,
+    /// totals, upgrade cooldown, and live attestation presence). Read-only, no
+    /// auth required, and intentionally works while paused.
+    ///
+    /// # Errors
+    ///
+    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
+    /// - [`ContractError::NetworkMismatch`] if the recorded network id differs
+    ///   from the executing network.
+    pub fn get_health_probes(env: Env) -> Result<HealthSnapshot, ContractError> {
+        Self::get_health(env)
+    }
+
     // ── Challenge-period flow (Issue #214) ───────────────────────────────────
 
     /// Starts a challenge on a registered username. Admin-only.
@@ -4080,6 +4213,8 @@ impl TrustBridgeContract {
         // Remove the registration.
         remove_record(&env, &github_username);
         remove_from_index(&env, &github_username);
+        clear_pending_reverify(&env, &github_username);
+        clear_pending_reverify(&env, &github_username);
         set_count(&env, get_count(&env).saturating_sub(1));
         if record.verified {
             set_verified_count(&env, storage_get_verified_count(&env).saturating_sub(1));
@@ -7456,8 +7591,8 @@ mod test {
             assert_eq!(ContractError::from_code(variant.code()), Some(variant));
         }
         assert_eq!(ContractError::from_code(0), None);
-        // 30 is one past the highest assigned variant (AttestationRequired = 29):
-        assert_eq!(ContractError::from_code(30), None);
+        // 57 is one past the highest assigned variant (NoPendingBatchRemove = 56):
+        assert_eq!(ContractError::from_code(57), None);
     }
 
     // --- Issue #69: max username length guard ---
@@ -10196,9 +10331,6 @@ mod test {
 
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            register_personal(&env, &contract_id, "octocat", &user);
-            TrustBridgeContract::verify(env.clone(), username(&env, "octocat")).unwrap();
-            register_personal(&env, &contract_id, "octocat", &new_user);
             let res =
                 TrustBridgeContract::remove(env.clone(), other.clone(), username(&env, "octocat"));
             assert_eq!(res, Err(ContractError::NotAuthorized));
@@ -11929,7 +12061,7 @@ mod test {
             )
             .unwrap();
             let attestation = TrustBridgeContract::export_attestation(env.clone(), 0, 10).unwrap();
-            let page = TrustBridgeContract::get_registered_paginated(env.clone(), 0, 10).unwrap();
+            let page = TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap();
             assert_eq!(attestation.page, page);
         });
     }

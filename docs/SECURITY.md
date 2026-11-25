@@ -153,12 +153,13 @@ on-chain via `set_attestation_required(true)`.
 | `attestation_required` | No attestation published | Attestation matches | Expired / mismatch |
 |------------------------|--------------------------|--------------------|--------------------|
 | `false` (default) | Upgrade proceeds (unattested) | Upgrade proceeds (attested) | `AttestationExpired` / `UnattestedWasm` |
-| `true` | `AttestationRequired` (code 20) | Upgrade proceeds (attested) | `AttestationExpired` / `UnattestedWasm` |
+| `true` | `AttestationRequired` (code 29) | Upgrade proceeds (attested) | `AttestationExpired` / `UnattestedWasm` |
 
 Setting `required = true` means:
 - A hot admin key cannot swap the WASM binary in a single step — it must first publish the hash via `attest_upgrade`, wait for watchers, then call `upgrade` with the same hash.
 - Clearing attestation (`clear_attestation`) and then calling `upgrade` fails with `AttestationRequired`.
 - The cooldown still applies independently.
+- **Network-id binding:** `set_attestation_required`, `attest_upgrade`, and `clear_attestation` all enforce `require_initialized` / `require_matching_network` (`NetworkMismatch`, code 30), preventing cross-network replay or weakening of `attestation_required` if state is stood up on another ledger. Covered by `tests/network_mismatch.rs`.
 
 The `is_attestation_required()` read exposes the current config for monitoring and client-side enforcement.
 

@@ -34,9 +34,9 @@ FUTURENET_DRY_RUN ?= false
 
 .PHONY: help build build-legacy test test-rehearsal fuzz storage-keys-check bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
-        invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
+        invoke-register invoke-lookup invoke-init invoke-stats invoke-health invoke-health-probes install-target invoke-extend-ttl \
         ttl-keeper \
-	export-registry validate-registry dr-test futurenet-smoke assert-build
+	export-registry validate-registry dr-test futurenet-smoke test-futurenet-smoke assert-build
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -318,6 +318,20 @@ invoke-stats: require-contract-id ## Read registry statistics (read-only)
 		--network $(NETWORK) \
 		-- get_stats
 
+invoke-health: require-contract-id ## Read packed contract health snapshot (read-only)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		-- get_health
+
+invoke-health-probes: require-contract-id ## Run post-init health probes smoke check (read-only)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		-- get_health_probes
+
 BULK_VERIFY_FILE ?= usernames.txt
 BULK_VERIFY_LOG  ?= bulk-verify-audit.log
 BULK_VERIFY_PACE ?= 500
@@ -425,6 +439,9 @@ futurenet-smoke: ## Deploy and smoke-check Futurenet using pinned RPC and Friend
 	ADMIN=$(ADMIN) SOURCE=$(SOURCE) IDENTITY=$(FUTURENET_IDENTITY) \
 		RPC_URL=$(FUTURENET_RPC_URL) FRIENDBOT_URL=$(FUTURENET_FRIENDBOT_URL) \
 		STELLAR=$(STELLAR) DRY_RUN=$(FUTURENET_DRY_RUN) ./scripts/futurenet_smoke_test.sh
+
+test-futurenet-smoke: ## Offline smoke-script test (dry-run, happy path, and failure paths)
+	./scripts/test_futurenet_smoke.sh
 TTL_KEEPER_BATCH_SIZE ?=
 TTL_KEEPER_DRY_RUN ?= false
 

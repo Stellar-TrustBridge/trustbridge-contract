@@ -111,9 +111,71 @@ stellar contract invoke \
   --id $CONTRACT_ID \
   --source-account contributor \
   --network futurenet \
+  -- get_health_probes
+# Expected: {"paused":false,"version":[1,1,0],"total":0,"verified":0,"cooldown_secs":0,"cooldown_remaining_secs":0,"attestation_present":false}
+
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source-account contributor \
+  --network futurenet \
   -- get_stats
-# Expected: {"total":0,"verified":0}
+# Expected: {"total":0,"verified":0,"ever_verified":0}
 ```
+
+---
+
+## Health probes smoke
+
+Run `get_health_probes` immediately after `initialize` so deployment issues
+(uninitialized contract, wrong `CONTRACT_ID`, wrong `--network` passphrase, or
+an unexpected pause) fail fast before contributors start registering.
+
+Related references: [CONTRACT_HEALTH.md](CONTRACT_HEALTH.md) · [`scripts/futurenet_smoke_test.sh`](../scripts/futurenet_smoke_test.sh) · [`Makefile`](../Makefile)
+
+### Automated smoke via Make and `scripts/futurenet_smoke_test.sh`
+
+```bash
+# 1. Print the full deploy + post-init health probe sequence without network calls
+make futurenet-smoke FUTURENET_DRY_RUN=true
+
+# 2. Deploy + initialize + invoke get_health_probes, get_stats, and has_record
+make futurenet-smoke ADMIN=$ADMIN SOURCE=contributor IDENTITY=contributor
+
+# 3. Verify the smoke script offline against mock Stellar CLI responses
+make test-futurenet-smoke
+```
+
+### Direct health probes smoke against an already-initialized contract
+
+```bash
+make invoke-health-probes CONTRACT_ID=$CONTRACT_ID NETWORK=futurenet SOURCE=contributor
+# Equivalent:
+stellar contract invoke \
+  --id $CONTRACT_ID \
+  --source-account contributor \
+  --network futurenet \
+  -- get_health_probes
+```
+
+Expected healthy response immediately after `initialize`:
+
+```json
+{
+  "paused": false,
+  "version": [1, 1, 0],
+  "total": 0,
+  "verified": 0,
+  "cooldown_secs": 0,
+  "cooldown_remaining_secs": 0,
+  "attestation_present": false
+}
+```
+
+Common failure modes surfaced by this probe:
+
+- `Error(Contract, #2)` (`NotInitialized`) — `initialize` was not called or `CONTRACT_ID` points to an uninitialized contract.
+- `Error(Contract, #30)` (`NetworkMismatch`) — state was tagged on another network passphrase.
+- `"paused": true` — contract is frozen; see [CONTRACT_HEALTH.md](CONTRACT_HEALTH.md) and [ADMIN_RUNBOOK.md](ADMIN_RUNBOOK.md).
 
 ---
 
@@ -239,7 +301,10 @@ for filter patterns and field layouts.
 | `make invoke-lookup` | Read-only address lookup |
 | `make invoke-verify` | Verify a contributor (admin or Verifier role) |
 | `make invoke-stats` | Read registry statistics |
+| `make invoke-health` | Read packed contract health snapshot (`get_health`) |
+| `make invoke-health-probes` | Run post-init health probes smoke (`get_health_probes`) |
 | `make futurenet-smoke` | Deploy and run read-only Futurenet smoke checks using pinned endpoints |
+| `make test-futurenet-smoke` | Run offline regression tests for `scripts/futurenet_smoke_test.sh` |
 
 ---
 

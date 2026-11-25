@@ -38,8 +38,11 @@
 
 #![cfg(test)]
 
-use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
-use trustbridge_contract::{ContractError, TrustBridgeContract};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger as _},
+    Address, Env, String, Vec,
+};
+use trustbridge_contract::{ContractError, TrustBridgeContract, TrustBridgeContractClient};
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -141,7 +144,7 @@ fn proof_verify_increments_verified_count() {
 fn proof_verify_increments_count_by_n() {
     for &n in &[2u32, 4, 8] {
         let (env, admin, _user, cid) = setup();
-        let names: Vec<(&str, Address)> = (0..n)
+        let names: std::vec::Vec<(&str, Address)> = (0..n)
             .map(|i| {
                 let name = match i {
                     0 => "u0",
@@ -500,4 +503,205 @@ fn proof_revoke_decrements_and_is_idempotent() {
     let vc_final = verified_count(&env, &cid);
     assert_eq!(verified_final, 0, "P7: verified must still be 0");
     assert_eq!(vc_final, 0, "P7: verified_count must still be 0");
+}
+
+// ─── P8: pending_reverify flag across address change / rotation / rename ──────
+
+/// **P8** — Re-registering a verified user with a new address, executing an
+/// address rotation, or renaming clears `record.verified`, decrements live
+/// `verified` by 1, leaves `ever_verified` monotonic, and sets
+/// `pending_reverify = true`. Re-verifying (`verify` or `batch_verify`) clears
+/// `pending_reverify` and increments both `verified` and `ever_verified` by 1.
+#[test]
+fn proof_pending_reverify_flag_does_not_skew_verified_or_ever_verified() {
+    let (env, admin, user1, cid) = setup();
+    let client = TrustBridgeContractClient::new(&env, &cid);
+    let user2 = Address::generate(&env);
+    let user3 = Address::generate(&env);
+    env.mock_all_auths();
+
+    // 1. Register + verify -> verified=1, ever_verified=1, pending_reverify=false
+    client.register(&s(&env, "frank"), &user1, &Vec::new(&env));
+    client.verify(&admin, &s(&env, "frank"));
+    let st = client.get_stats();
+    assert_eq!((st.total, st.verified, st.ever_verified), (1, 1, 1));
+    assert_eq!(client.get_ever_verified_count(), 1);
+    assert!(!client.get_pending_reverify(&s(&env, "frank")));
+
+    // 2. Direct address-change re-register -> verified=0, ever_verified=1, pending_reverify=true
+    client.register(&s(&env, "frank"), &user2, &Vec::new(&env));
+    let st = client.get_stats();
+    assert_eq!((st.total, st.verified, st.ever_verified), (1, 0, 1));
+    assert_eq!(client.get_verified_count(), 0);
+    assert_eq!(client.get_ever_verified_count(), 1);
+    assert!(client.get_pending_reverify(&s(&env, "frank")));
+    assert_eq!(
+        client.get_pending_reverify_page(&0u32, &10u32),
+        soroban_sdk::vec![&env, s(&env, "frank")]
+    );
+
+    // Re-verify via batch_verify -> clears flag, verified=1, ever_verified=2
+    let summary = client.batch_verify(&admin, &soroban_sdk::vec![&env, s(&env, "frank")]);
+    assert_eq!(summary.successful, 1);
+    let st = client.get_stats();
+    assert_eq!((st.total, st.verified, st.ever_verified), (1, 1, 2));
+    assert!(!client.get_pending_reverify(&s(&env, "frank")));
+    assert_eq!(client.get_pending_reverify_page(&0u32, &10u32).len(), 0);
+
+    // 3. Delayed address rotation -> verified=0, ever_verified=2, pending_reverify=true
+    env.ledger().set_timestamp(1_000);
+    client.set_rotation_delay(&60u64);
+    client.request_address_rotation(&s(&env, "frank"), &user3);
+    // Pending rotation alone must not move counters or pending_reverify yet.
+    let st = client.get_stats();
+    assert_eq!((st.total, st.verified, st.ever_verified), (1, 1, 2));
+    assert!(!client.get_pending_reverify(&s(&env, "frank")));
+
+    env.ledger().set_timestamp(1_060);
+    client.execute_address_rotation(&s(&env, "frank"));
+    let st = client.get_stats();
+    assert_eq!((st.total, st.verified, st.ever_verified), (1, 0, 2));
+    assert!(client.get_pending_reverify(&s(&env, "frank")));
+
+    // Re-verify -> verified=1, ever_verified=3, pending_reverify=false
+    client.verify(&admin, &s(&env, "frank"));
+    let st = client.get_stats();
+    assert_eq!((st.total, st.verified, st.ever_verified), (1, 1, 3));
+    assert!(!client.get_pending_reverify(&s(&env, "frank")));
+
+    // 4. Rename -> moves pending_reverify to new name, verified=0, ever_verified=3
+    client.rename(&user3, &s(&env, "frank"), &s(&env, "frank2"));
+    let st = client.get_stats();
+    assert_eq!((st.total, st.verified, st.ever_verified), (1, 0, 3));
+    assert!(!client.get_pending_reverify(&s(&env, "frank")));
+    assert!(client.get_pending_reverify(&s(&env, "frank2")));
+    assert_eq!(client.get_health().verified, 0);
+}
+
+// ─── P9: is_bot, same-address re-register, and remove-with-pending-reverify ───
+
+/// **P9** — Record flags (`is_bot`, `pending_reverify` on unverified/same-addr
+/// re-register, and `remove` of a `pending_reverify` record) never skew
+/// `verified` or `ever_verified`.
+#[test]
+fn proof_flags_and_same_addr_reregister_do_not_skew_counts() {
+    let (env, admin, user1, cid) = setup();
+    let client = TrustBridgeContractClient::new(&env, &cid);
+    let user2 = Address::generate(&env);
+    env.mock_all_auths();
+
+    // Unverified user: address change + is_bot toggle must leave counts (1, 0, 0)
+    // and never set pending_reverify.
+    client.register(&s(&env, "grace"), &user1, &Vec::new(&env));
+    client.set_bot_status(&admin, &s(&env, "grace"), &true);
+    client.register(&s(&env, "grace"), &user2, &Vec::new(&env));
+    client.set_bot_status(&user2, &s(&env, "grace"), &false);
+    let st = client.get_stats();
+    assert_eq!((st.total, st.verified, st.ever_verified), (1, 0, 0));
+    assert!(!client.get_pending_reverify(&s(&env, "grace")));
+
+    // Verified user: toggling is_bot and same-address re-register must not
+    // double-increment verified or ever_verified, and must not set pending_reverify.
+    client.verify(&admin, &s(&env, "grace"));
+    client.set_bot_status(&admin, &s(&env, "grace"), &true);
+    client.register(&s(&env, "grace"), &user2, &Vec::new(&env));
+    client.set_bot_status(&admin, &s(&env, "grace"), &false);
+    let st = client.get_stats();
+    assert_eq!((st.total, st.verified, st.ever_verified), (1, 1, 1));
+    assert!(!client.get_pending_reverify(&s(&env, "grace")));
+
+    // Change address (verified=0, ever_verified=1, pending_reverify=true), then
+    // remove: total=0, verified=0, ever_verified=1, and pending_reverify cleared.
+    let user3 = Address::generate(&env);
+    client.register(&s(&env, "grace"), &user3, &Vec::new(&env));
+    assert!(client.get_pending_reverify(&s(&env, "grace")));
+    client.remove(&user3, &s(&env, "grace"));
+    let st = client.get_stats();
+    assert_eq!((st.total, st.verified, st.ever_verified), (0, 0, 1));
+    assert!(!client.get_pending_reverify(&s(&env, "grace")));
+    assert_eq!(client.get_health().verified, 0);
+}
+
+// ─── P10: failure paths leave counters and flags invariant ───────────────────
+
+/// **P10-fail-1** — Failed `verify` / `revoke_verification` calls leave
+/// `verified`, `ever_verified`, and `pending_reverify` completely unchanged.
+#[test]
+fn proof_failed_verify_and_revoke_leave_flags_and_counts_unchanged() {
+    let (env, admin, user1, cid) = setup();
+    let client = TrustBridgeContractClient::new(&env, &cid);
+    let stranger = Address::generate(&env);
+    env.mock_all_auths();
+
+    client.register(&s(&env, "heidi"), &user1, &Vec::new(&env));
+    client.verify(&admin, &s(&env, "heidi"));
+    let user2 = Address::generate(&env);
+    // Trigger pending_reverify=true, verified=0, ever_verified=1
+    client.register(&s(&env, "heidi"), &user2, &Vec::new(&env));
+
+    // Unauthorized verify
+    assert_eq!(
+        client.try_verify(&stranger, &s(&env, "heidi")),
+        Err(Ok(ContractError::NotAuthorized))
+    );
+    // Revoke on unverified (pending_reverify) record
+    assert_eq!(
+        client.try_revoke_verification(&admin, &s(&env, "heidi"), &1u32),
+        Err(Ok(ContractError::NotVerified))
+    );
+    // Verify while paused
+    client.pause(&1u32);
+    assert_eq!(
+        client.try_verify(&admin, &s(&env, "heidi")),
+        Err(Ok(ContractError::Paused))
+    );
+    client.unpause(&4u32);
+
+    let st = client.get_stats();
+    assert_eq!((st.total, st.verified, st.ever_verified), (1, 0, 1));
+    assert!(client.get_pending_reverify(&s(&env, "heidi")));
+}
+
+/// **P10-fail-2** — Failed `register` (`RotationRequired`, `InvalidUsername`),
+/// failed `execute_address_rotation` (`RotationNotReady`), and failed
+/// `set_bot_status` (`NotAuthorized`, `NotRegistered`) never alter counters or
+/// flags.
+#[test]
+fn proof_failed_flag_and_rotation_paths_leave_counts_unchanged() {
+    let (env, admin, user1, cid) = setup();
+    let client = TrustBridgeContractClient::new(&env, &cid);
+    let user2 = Address::generate(&env);
+    let stranger = Address::generate(&env);
+    env.mock_all_auths();
+
+    env.ledger().set_timestamp(2_000);
+    client.register(&s(&env, "ivan"), &user1, &Vec::new(&env));
+    client.verify(&admin, &s(&env, "ivan"));
+    client.set_rotation_delay(&120u64);
+
+    // Direct address swap blocked by rotation delay
+    assert_eq!(
+        client.try_register(&s(&env, "ivan"), &user2, &Vec::new(&env)),
+        Err(Ok(ContractError::RotationRequired))
+    );
+    // Request rotation, then try to execute early
+    client.request_address_rotation(&s(&env, "ivan"), &user2);
+    assert_eq!(
+        client.try_execute_address_rotation(&s(&env, "ivan")),
+        Err(Ok(ContractError::RotationNotReady))
+    );
+    // Unauthorized and unregistered set_bot_status
+    assert_eq!(
+        client.try_set_bot_status(&stranger, &s(&env, "ivan"), &true),
+        Err(Ok(ContractError::NotAuthorized))
+    );
+    assert_eq!(
+        client.try_set_bot_status(&admin, &s(&env, "ghost"), &true),
+        Err(Ok(ContractError::NotRegistered))
+    );
+
+    let st = client.get_stats();
+    assert_eq!((st.total, st.verified, st.ever_verified), (1, 1, 1));
+    assert!(!client.get_pending_reverify(&s(&env, "ivan")));
+    assert!(!client.get_address(&s(&env, "ivan")).unwrap().is_bot);
 }
