@@ -291,6 +291,7 @@ Setting `required = true` means:
 - A hot admin key cannot swap the WASM binary in a single step — it must first publish the hash via `attest_upgrade`, wait for watchers, then call `upgrade` with the same hash.
 - Clearing attestation (`clear_attestation`) does not disable the policy; calling either upgrade path without an attestation fails with `AttestationRequired`.
 - The cooldown still applies independently.
+- **Network-id binding:** `set_attestation_required`, `attest_upgrade`, and `clear_attestation` all enforce `require_initialized` / `require_matching_network` (`NetworkMismatch`, code 30), preventing cross-network replay or weakening of `attestation_required` if state is stood up on another ledger. Covered by `tests/network_mismatch.rs`.
 
 The `get_attestation_required()` read (no auth) exposes the current config
 for monitoring and client-side enforcement; `set_attestation_required(caller,

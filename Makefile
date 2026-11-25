@@ -46,6 +46,9 @@ FUTURENET_DRY_RUN ?= false
 .PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser soak-cursor soak-register-verify storage-check storage-keys-check storage-footprint-check storage-rent-check storage-rent-estimator storage-rent-estimator-golden bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-batch-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
         wasm-hash-pin wasm-hash-update wasm-hash-pin-test \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
+        invoke-register invoke-lookup invoke-init invoke-stats invoke-health invoke-health-probes install-target invoke-extend-ttl \
+        ttl-keeper \
+	export-registry validate-registry dr-test futurenet-smoke test-futurenet-smoke assert-build
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
         invoke-verify invoke-revoke-verification invoke-get-all-registered invoke-export-paginated \
         invoke-public-paginated invoke-remove invoke-set-paused \
@@ -413,6 +416,20 @@ invoke-stats: require-contract-id ## Read registry statistics (read-only)
 		--network $(NETWORK) \
 		-- get_stats
 
+invoke-health: require-contract-id ## Read packed contract health snapshot (read-only)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		-- get_health
+
+invoke-health-probes: require-contract-id ## Run post-init health probes smoke check (read-only)
+	$(STELLAR) contract invoke \
+		--id $(CONTRACT_ID) \
+		--source-account $(SOURCE) \
+		--network $(NETWORK) \
+		-- get_health_probes
+
 BULK_VERIFY_FILE ?= usernames.txt
 BULK_VERIFY_LOG  ?= bulk-verify-audit.log
 BULK_VERIFY_PACE ?= 500
@@ -627,6 +644,9 @@ futurenet-smoke: ## Deploy and smoke-check Futurenet using pinned RPC and Friend
 	ADMIN=$(ADMIN) SOURCE=$(SOURCE) IDENTITY=$(FUTURENET_IDENTITY) \
 		RPC_URL=$(FUTURENET_RPC_URL) FRIENDBOT_URL=$(FUTURENET_FRIENDBOT_URL) \
 		STELLAR=$(STELLAR) DRY_RUN=$(FUTURENET_DRY_RUN) ./scripts/futurenet_smoke_test.sh
+
+test-futurenet-smoke: ## Offline smoke-script test (dry-run, happy path, and failure paths)
+	./scripts/test_futurenet_smoke.sh
 network-params: ## Print RPC, passphrase, and funding parameters for NETWORK (fails on unknown NETWORK)
 	@case "$(NETWORK)" in \
 	  testnet)   echo "NETWORK=testnet";   echo "RPC_URL=https://soroban-testnet.stellar.org"; echo "PASSPHRASE=Test SDF Network ; September 2015"; echo "FRIENDBOT=https://friendbot.stellar.org" ;; \

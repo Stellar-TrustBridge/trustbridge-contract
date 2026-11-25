@@ -1032,7 +1032,7 @@ fn bump_index_generation(env: &Env) {
 /// generation, both big-endian. Callers must treat the result as opaque —
 /// this layout is an internal implementation detail, not a stabilized wire
 /// format.
-fn encode_cursor(env: &Env, offset: u32) -> BytesN<8> {
+pub fn encode_cursor(env: &Env, offset: u32) -> BytesN<8> {
     let generation = get_index_generation(env);
     let mut bytes = [0u8; 8];
     bytes[0..4].copy_from_slice(&offset.to_be_bytes());
@@ -1399,6 +1399,14 @@ pub fn get_pending_reverify(env: &Env, github_username: &String) -> bool {
 }
 
 pub fn set_pending_reverify(env: &Env, github_username: &String, flag: bool) {
+    let key = (PENDING_REVERIFY_KEY, canon(env, github_username));
+    if flag {
+        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_BUMP);
+    } else {
+        env.storage().persistent().remove(&key);
     // A `false` flag is the absence of a pending re-verification, so it is
     // stored as a removed key rather than as a persisted `false` — that keeps
     // `has` consistent with `get_pending_reverify` and leaves no stale entry
@@ -1561,10 +1569,16 @@ pub fn require_attestation_if_required(env: &Env) -> Result<(), ContractError> {
 }
 
 /// Sets the attestation-required flag.
-pub fn set_attestation_required(env: &Env, required: bool) {
+///
+/// Honors the instance's recorded network id (Issue #231): fails with
+/// [`ContractError::NetworkMismatch`] if `NETWORK_KEY` is present and differs
+/// from `env.ledger().network_id()`.
+pub fn set_attestation_required(env: &Env, required: bool) -> Result<(), ContractError> {
+    require_matching_network(env)?;
     env.storage()
         .instance()
         .set(&ATTEST_REQUIRED_KEY, &required);
+    Ok(())
 }
 
 // ── Per-user action cooldown (Wave #33) ──────────────────────────────────────
@@ -2639,7 +2653,7 @@ mod storage_dead_code_tests {
         let admin = Address::generate(env);
         env.mock_all_auths();
         env.as_contract(&contract_id, || {
-            set_admin(env, &admin);
+            env.storage().instance().set(&ADMIN_KEY, &admin);
         });
         contract_id
     }
@@ -3613,4 +3627,33 @@ mod storage_rent_playbook_tests {
             "rent playbook table is empty"
         );
     }
+}
+
+// ─── Role grant timelock (Issue #220) ────────────────────────────────────────
+
+/// Seconds a `set_role` grant waits before activation. 0 == instant grants.
+pub fn get_role_delay(env: &Env) -> u64 {
+    env.storage().instance().get(&ROLE_DELAY_KEY).unwrap_or(0)
+}
+
+pub fn set_role_delay(env: &Env, secs: u64) {
+    env.storage().instance().set(&ROLE_DELAY_KEY, &secs);
+}
+
+pub fn get_pending_role(env: &Env, address: &Address) -> Option<PendingRoleGrant> {
+    env.storage()
+        .instance()
+        .get(&(PENDING_ROLE_KEY, address.clone()))
+}
+
+pub fn set_pending_role(env: &Env, address: &Address, grant: &PendingRoleGrant) {
+    env.storage()
+        .instance()
+        .set(&(PENDING_ROLE_KEY, address.clone()), grant);
+}
+
+pub fn remove_pending_role(env: &Env, address: &Address) {
+    env.storage()
+        .instance()
+        .remove(&(PENDING_ROLE_KEY, address.clone()));
 }

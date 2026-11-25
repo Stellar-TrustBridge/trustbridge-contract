@@ -540,6 +540,11 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   -- set_attestation_required --caller "$ADMIN" --required true
 ```
 
+- **Auth:** admin only. When `true`, `upgrade` without a live matching
+  attestation fails `AttestationRequired` (code 29). Default `false`. Fails
+  with `NetworkMismatch` (code 30) if called against state tagged for another
+  network.
+
 - **Auth:** admin only. When `true`, an upgrade without an attestation record
   fails `AttestationRequired` (code 29). The regular `upgrade` path also checks
   the hash and expiry. Default `false`; available while paused. Clearing an

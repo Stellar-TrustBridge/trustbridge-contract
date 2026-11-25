@@ -154,7 +154,7 @@ These keys live in Soroban's **instance** storage partition. Each key is a `Symb
 | `"role_idx"` | `ROLE_IDX_KEY` | `Vec<Address>` | Enumeration index of addresses holding roles (Issue #228) |
 | `"chkcnt"` | `CHUNK_CNT_KEY` | `u32` | Number of chunks in the chunked username index. Authoritative persisted symbol is chkcnt (Issue #468); do not introduce a chunkcnt duplicate. |
 | `"idx_gen"` | `INDEX_GEN_KEY` | `u32` | Index generation counter for cursor invalidation (Issue #215) |
-| `"evt_ledger"` | `LAST_EVENT_LEDGER_KEY` | `u32` | Ledger sequence of most recent contract event (Issue #282) |
+| `"evtledger"` | `LAST_EVENT_LEDGER_KEY` | `u32` | Ledger sequence of most recent contract event (Issue #282) |
 | `"prov"` | `PROV_KEY` | `Option<WasmProvenance>` | WASM provenance record (Wave #24) |
 | `"attest"` | `ATTEST_KEY` | `Option<WasmAttestation>` | Pending upgrade attestation (Wave #24) |
 | `"adt_log"` | `AUDIT_LOG_KEY` | `Vec<AuditLogEntry>` | Audit log entries (Issue #217) |
@@ -314,7 +314,7 @@ numbers are informational and are not linted.
 | `"chkcnt"` | `CHUNK_CNT_KEY` | 99 | — |
 | `"idx_gen"` | `INDEX_GEN_KEY` | 105 | Monotonic counter bumped every time the flat index's existing positions shift — i.e |
 | `"lastact"` | `LAST_ACT_KEY` | 106 | — |
-| `"evt_ledger"` | `LAST_EVENT_LEDGER_KEY` | 111 | Ledger sequence containing the most recently emitted contract event (Issue #282) |
+| `"evtledger"` | `LAST_EVENT_LEDGER_KEY` | 111 | Ledger sequence containing the most recently emitted contract event (Issue #282) |
 | `"prov"` | `PROV_KEY` | 113 | Key for the WASM provenance record (Wave #24). |
 | `"attest"` | `ATTEST_KEY` | 115 | Key for the pending upgrade attestation (Wave #24). |
 | `"adt_log"` | `AUDIT_LOG_KEY` | 117 | Key for audit log entries list. Ring buffer capped at `MAX_AUDIT_LOG_ENTRIES` (100): `push_audit_entry` evicts the oldest (`pop_front`) on overflow; `AuditConfig.max_events` (default 1000, Issue #412) is the admin-tunable retention target and is not yet wired as the storage cap. |

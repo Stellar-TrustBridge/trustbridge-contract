@@ -211,6 +211,7 @@ rpc_get_events() {
 #   batch      — batch proposals and their execution
 TOPIC_TABLE="$(cat <<'TOPICS'
 registered_event|registered|registry
+bot_status_changed_event|bot_status_changed|registry
 removed_event|removed|registry
 renamed_event|renamed|registry
 bot_status_changed_event|bot_status_changed|registry

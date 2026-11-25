@@ -64,6 +64,7 @@ fn variant_for_name(name: &str) -> ContractError {
         "UpgradeProposalInsufficientApprovals" => {
             ContractError::UpgradeProposalInsufficientApprovals
         }
+        "NetworkMismatch" => ContractError::NetworkMismatch,
         "FallbackListFull" => ContractError::FallbackListFull,
         "UsernameTaken" => ContractError::UsernameTaken,
         "RotationRequired" => ContractError::RotationRequired,

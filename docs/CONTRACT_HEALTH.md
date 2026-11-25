@@ -2,7 +2,7 @@
 
 This document describes the `get_health` function added in Issue #210.
 
-Related docs: [ABI](ABI.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPLOYMENT](DEPLOYMENT.md)
+Related docs: [ABI](ABI.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPLOYMENT](DEPLOYMENT.md) · [FUTURENET_ONBOARDING](FUTURENET_ONBOARDING.md)
 
 ---
 
@@ -29,7 +29,12 @@ on-call scripts all paid that cost on every check.
 
 ```rust
 pub fn get_health(env: Env) -> Result<HealthSnapshot, ContractError>
+pub fn get_health_probes(env: Env) -> Result<HealthSnapshot, ContractError>
 ```
+
+`get_health_probes` is a read-only alias of `get_health` used by post-init
+deployment smoke scripts ([`scripts/futurenet_smoke_test.sh`](../scripts/futurenet_smoke_test.sh),
+`make invoke-health-probes`, and [FUTURENET_ONBOARDING.md](FUTURENET_ONBOARDING.md#health-probes-smoke)).
 
 ### Properties
 
@@ -38,7 +43,7 @@ pub fn get_health(env: Env) -> Result<HealthSnapshot, ContractError>
 | **Auth** | None |
 | **Mutates** | ❌ |
 | **Works while paused** | ✅ |
-| **Errors** | `NotInitialized` |
+| **Errors** | `NotInitialized`, `NetworkMismatch` |
 
 The function intentionally works while the contract is paused — that is exactly
 when operators need it most.
@@ -76,6 +81,8 @@ stellar contract invoke \
   --id $CONTRACT_ID \
   --network testnet \
   -- get_health
+# Or post-init smoke alias:
+make invoke-health-probes CONTRACT_ID=$CONTRACT_ID NETWORK=testnet
 ```
 
 Expected output when healthy:
@@ -211,6 +218,28 @@ Behaviour these rules depend on is pinned by
 | Cooldown not yet elapsed | `cooldown_remaining_secs > 0` |
 | Attestation present but expired | `attestation_present: false` |
 | Never upgraded (no last_upgrade timestamp) | `cooldown_remaining_secs: 0` on real networks: counted from timestamp `0`, so non-zero only if ledger time < `cooldown_secs` |
+
+---
+
+## Counter & Flag Semantics (`verified`, `ever_verified`, `pending_reverify`, `is_bot`)
+
+Health snapshots (`get_health`, `get_health_probes`) and registry stats
+(`get_stats`, `get_verified_count`, `get_ever_verified_count`) expose distinct
+metrics that must not be skewed by record flags:
+
+| Metric / Flag | Meaning | Moves on `verify` | Moves on `revoke` / `remove` | Moves on `pending_reverify` / `is_bot` |
+|---|---|---|---|---|
+| `verified` (`get_verified_count`) | Live count of records with `record.verified == true` | `+1` on `false -> true` only | `-1` if record was verified | Never modified directly by flags |
+| `ever_verified` (`get_ever_verified_count`) | Monotonic total of verifications ever granted (Issue #229) | `+1` on `false -> true` only | Unchanged (monotonic) | Unchanged |
+| `pending_reverify` (`get_pending_reverify`) | Off-chain queue flag set when a **verified** user changes address (`register`, `register_sponsored`, `execute_address_rotation`) or renames (`rename`) | Cleared (`false`) | Cleared (`false`) on `remove` | N/A |
+| `is_bot` (`set_bot_status`) | Off-chain payout/KPI filter flag for CI/automation accounts | Unchanged | N/A | Never alters `total`, `verified`, `ever_verified`, or `pending_reverify` |
+
+Key invariants enforced by `tests/counter_proofs.rs` (`cargo test --test counter_proofs`):
+
+- **`verified <= total`** and **`verified <= ever_verified`** at every quiescent state.
+- **Re-verify flags do not skew counts:** setting `pending_reverify` reflects that `record.verified` was already reset from `true` to `false` on an address change or rename (decrementing `verified` by 1 while preserving `ever_verified`); clearing or reading `pending_reverify` never changes either counter, and re-registering an unverified user never sets `pending_reverify` or touches `verified` / `ever_verified`.
+- **Bot flags do not skew counts:** toggling `set_bot_status` on verified, unverified, or pending-reverify records never alters `total`, `verified`, or `ever_verified`.
+- **Failed operations are no-ops:** rejected `verify`, `revoke_verification`, `register`, `execute_address_rotation`, or `set_bot_status` calls leave all counters and flags untouched.
 
 ---
 

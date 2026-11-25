@@ -86,10 +86,18 @@ use soroban_sdk::contracterror;
 /// | 27 | `AdminTransferDelayActive` | `accept_admin` |
 /// | 28 | `NoPendingAdminTransfer` | `accept_admin`, `cancel_admin_transfer` |
 /// | 29 | `AttestationRequired` | `upgrade` |
+/// | 30 | `NetworkMismatch` | any gated call on state restored to a different network |
+/// | 30 | `NetworkMismatch` | `initialize`, `require_initialized` (Issue #231 / #401) |
+
 /// | 30 | `NetworkMismatch` | `initialize`, `require_initialized` (incl. `get_pending_reverify`; Issue #231 / #401) |
 /// | 31 | `VerifierAllowlistFull` | `add_verifier` |
 /// | 32 | `VerifierNotAllowlisted` | `remove_verifier` |
 /// | 33 | `VerifierExpiryInPast` | `add_verifier` |
+/// | 34 | `VerifierNotAllowlisted` | `remove_verifier` |
+/// | 35 | `NoPendingRoleGrant` | `activate_role`, `cancel_role_grant` |
+/// | 36 | `RoleGrantNotReady` | `activate_role` |
+/// | 37 | `ProvenanceMissing` | `assert_build`, `set_provenance_digests` |
+/// | 38 | `ProvenanceMismatch` | `assert_build` |
 /// | 34 | `NoPendingRoleGrant` | `activate_role`, `cancel_role_grant` |
 /// | 35 | `RoleGrantNotReady` | `activate_role` |
 /// | 36 | `ProvenanceMissing` | `assert_build` |
@@ -100,6 +108,17 @@ use soroban_sdk::contracterror;
 /// | 42 | `UpgradeProposalAlreadyApproved` | `approve_upgrade` |
 /// | 43 | `UpgradeProposalDelayActive` | `execute_upgrade` |
 /// | 44 | `UpgradeProposalInsufficientApprovals` | `execute_upgrade` |
+/// | 46 | `FallbackListFull` | `register` |
+/// | 47 | `UsernameTaken` | `rename` |
+/// | 48 | `RotationRequired` | `register` (direct address change while delay armed) |
+/// | 49 | `RotationPending` | `rename`, `request_address_rotation` |
+/// | 50 | `NoRotationPending` | `execute_address_rotation`, `cancel_address_rotation` |
+/// | 51 | `RotationNotReady` | `execute_address_rotation` |
+/// | 52 | `InvalidCursor` | `get_registered_paginated`, `get_public_paginated` |
+/// | 53 | `VerifyRateLimited` | `verify`, `revoke_verification`, `batch_verify` |
+/// | 54 | `DualControlRequired` | `batch_remove` (above threshold) |
+/// | 55 | `BatchRemoveProposalPending` | `propose_batch_remove` |
+/// | 56 | `NoPendingBatchRemove` | `execute_batch_remove`, `cancel_batch_remove` |
 /// | 45 | `ThresholdExceedsSignerCap` | `set_upgrade_threshold` |
 /// | 46 | `FallbackListFull` | `register` |
 /// | 47 | `UsernameTaken` | `rename` |
@@ -444,6 +463,12 @@ impl ContractError {
             ContractError::UpgradeProposalAlreadyPending => ErrorCategory::Fatal,
             ContractError::NoUpgradeProposalPending => ErrorCategory::Fatal,
             ContractError::UpgradeProposalAlreadyApproved => ErrorCategory::Fatal,
+            ContractError::VerifierAllowlistFull => ErrorCategory::Fatal,
+            ContractError::VerifierNotAllowlisted => ErrorCategory::Fatal,
+            ContractError::VerifierExpiryInPast => ErrorCategory::Fatal,
+            // Fatal, not Retry: the executing network does not change between
+            // attempts. Someone has to re-deploy or re-tag the instance.
+            ContractError::NetworkMismatch => ErrorCategory::Fatal,
             ContractError::ThresholdExceedsSignerCap => ErrorCategory::Fatal,
             ContractError::FallbackListFull => ErrorCategory::Fatal,
             ContractError::UsernameTaken => ErrorCategory::Fatal,
