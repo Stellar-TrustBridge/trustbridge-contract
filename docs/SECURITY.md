@@ -30,6 +30,7 @@ Related docs: [README](../README.md) · [ARCHITECTURE](ARCHITECTURE.md) · [DEPL
 | Compromised Verifier key silently revoking payout eligibility | `Role::Verifier` and `Role::Revoker` are distinct — Issue #212 |
 | Admin force-removing a name without a grace period | Challenge flow enforces on-chain `resolve_after` delay — Issue #214 |
 | Off-boarded contractor or bot key lingering as a live `Verifier`/`Revoker` forever | Optional per-grant expiry via `set_role_with_expiry`, checked lazily by `get_role` — see [Role Expiry](#role-expiry-issue-221) |
+| A mature pending role grant mistaken for an active or expired authorization | `activate_at` is an inclusive activation boundary, not an expiry deadline. Admin activation is still required; explicitly cancel or revoke unwanted queued grants. See [timelocked role grants](ABI.md#timelocked-role-grants-issue-220). |
 | Stolen or transferred GitHub account staying `verified` (and payout-eligible) indefinitely | `config_verification`'s `expires_in` now drives an actual expiry, checked via `is_verification_active` — see [Time-Bounded Verification](#time-bounded-verification-issue-218) |
 | Single compromised admin key wiping a large slice of the registry in one `batch_remove` call | Above a configurable size threshold, `batch_remove` requires a second, distinct admin-equivalent signature — see [Dual-Control batch_remove](#dual-control-batch_remove-issue-219) |
 | Auditor trusting an unbound, unsigned `export_registry.sh` JSON dump | `export_attestation` binds a page to a SHA-256 digest, version, and ledger for offline comparison — see [Signed Export Attestation](#signed-export-attestation-issue-223) |
@@ -96,6 +97,13 @@ root impact are pinned by
 | GitHub username changes | Off-chain mapping updates; may require re-registration |
 
 ---
+
+
+**Wave RBAC audit note (Issue #855):** A queued grant does not extend an
+active role's expiry or confer new permissions. At `expires_at`, an active
+role is unavailable even if a replacement is queued. Inspect pending grants
+separately, and cancel stale requests explicitly; elapsed timelocks do not
+purge them. Activation remains admin-only and blocked during pause.
 
 ## Cross-Contract Callers and Admin Exports
 

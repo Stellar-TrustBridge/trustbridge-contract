@@ -113,6 +113,22 @@ jobs:
       - name: Storage rent playbook constants (Issue #660)
         run: cargo test --lib storage_rent_playbook_tests
 
+  role-lifecycle:
+    name: Role lifecycle boundary tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run role lifecycle integration tests
+        run: cargo test --test role_lifecycle
+
   cross-contract-deny:
     name: cross-contract register denial
     runs-on: ubuntu-latest
