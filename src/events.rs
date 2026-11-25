@@ -1,3 +1,10 @@
+//! Contract events emitted by the registry.
+//!
+//! Adding a new `#[contractevent]` requires the five-step operator checklist in
+//! [`docs/subgraph/README.md`](../docs/subgraph/README.md#contributor-checklist-adding-a-contract-event):
+//! event → `EVENT_INDEXING.md` topic row → subgraph handler/waiver → fixture →
+//! dashboard consumer note. A missing handler silently drops Wave events.
+
 use soroban_sdk::{contractevent, Address, BytesN, String, Symbol};
 
 use crate::domain::EventDomain;

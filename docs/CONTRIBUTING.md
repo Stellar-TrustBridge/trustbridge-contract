@@ -115,6 +115,13 @@ uses the stable Rust image to match CI.
 
 ### Documentation
 
+For a new `#[contractevent]`, use the five-step
+[subgraph handler checklist](subgraph/README.md#contributor-checklist-adding-a-contract-event):
+add event → update `EVENT_INDEXING.md` topic table → subgraph handler or waiver →
+fixture (`scripts/testdata/getEvents.sample.json`) → dashboard consumer note in
+`DASHBOARD_SYNC.md`. Verify with `make subgraph-parity` and
+`cargo test --test event_checklist_docs`.
+
 - Update `ABI.md` for any interface change
 - Update `CHANGELOG.md` with a new semantic version heading when a public
   function signature in `ABI.md` changes. Use a minor version for additive
