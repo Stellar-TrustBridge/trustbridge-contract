@@ -19,7 +19,9 @@
 use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::{Address, BytesN, Env};
 
-use trustbridge_contract::{ContractError, Role, TrustBridgeContract, MAX_UPGRADE_SIGNERS};
+use trustbridge_contract::{
+    ContractError, Role, TrustBridgeContract, LAST_UPG_KEY, MAX_UPGRADE_SIGNERS,
+};
 
 /// Test fixture: an initialized contract where `admin` is the contract admin,
 /// `upgrader` holds `Role::Upgrader`, and `random` holds no role at all.
@@ -734,6 +736,152 @@ fn test_clear_attestation_does_not_disable_required_flag() {
     });
 }
 
+// ── Attestation gate on propose (Issue #851) ────────────────────────────────
+
+/// Failure path: with `attestation_required` on and no attestation, an admin
+/// cannot even propose an upgrade. No live proposal or partial state is left.
+#[test]
+fn test_propose_while_attestation_required_unmet_fails() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+    });
+    // Fresh auth frame: two require_auth calls in one frame are rejected by
+    // the Soroban host.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::propose_multisig_upgrade(
+                env.clone(),
+                admin.clone(),
+                hash(&env, 0xAA),
+                0,
+            ),
+            Err(ContractError::AttestationRequired)
+        );
+        assert!(
+            TrustBridgeContract::get_upgrade_proposal(env.clone()).is_none(),
+            "failed propose must not persist a proposal"
+        );
+    });
+}
+
+/// Failure path: the gate applies to `Role::Upgrader` proposers too, not just
+/// the admin.
+#[test]
+fn test_upgrader_propose_blocked_when_attestation_unmet() {
+    let (env, admin, upgrader, _random, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+    });
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::propose_multisig_upgrade(
+                env.clone(),
+                upgrader.clone(),
+                hash(&env, 0xAA),
+                0,
+            ),
+            Err(ContractError::AttestationRequired)
+        );
+        assert!(TrustBridgeContract::get_upgrade_proposal(env.clone()).is_none());
+    });
+}
+
+/// Auth precedence: an unauthorized caller still gets `NotAuthorized` rather
+/// than the attestation error, and no proposal is created.
+#[test]
+fn test_unauthorized_propose_still_rejected_with_attestation_required() {
+    let (env, admin, _upgrader, random, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+    });
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::propose_multisig_upgrade(
+                env.clone(),
+                random.clone(),
+                hash(&env, 0xAA),
+                0,
+            ),
+            Err(ContractError::NotAuthorized)
+        );
+        assert!(TrustBridgeContract::get_upgrade_proposal(env.clone()).is_none());
+    });
+}
+
+/// Happy path: a valid attestation permits propose, but clearing it before
+/// execute still fails closed on the execute path (no bypass).
+#[test]
+fn test_propose_with_attestation_then_execute_still_gated() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+    });
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::attest_upgrade(env.clone(), hash(&env, 0xAA), 2_000).unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0xAA),
+            0,
+        )
+        .unwrap();
+    });
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::clear_attestation(env.clone()).unwrap();
+        let id = TrustBridgeContract::get_upgrade_proposal(env.clone())
+            .expect("proposal exists")
+            .id;
+        assert_eq!(
+            TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), id),
+            Err(ContractError::AttestationRequired)
+        );
+    });
+}
+
+/// Execute path must honor the required-attestation gate (main coverage).
+/// Propose first with a valid attestation, then clear it so execute fails closed
+/// and leaves the proposal intact.
+#[test]
+fn test_required_attestation_blocks_multisig_execute_without_attestation() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+    let wasm_hash = hash(&env, 0xA8);
+    env.ledger().set_timestamp(1_000);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+        TrustBridgeContract::attest_upgrade(env.clone(), wasm_hash.clone(), 2_000).unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(env.clone(), admin.clone(), wasm_hash, 0)
+            .unwrap();
+    });
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::clear_attestation(env.clone()).unwrap();
+        assert_eq!(
+            TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), 0),
+            Err(ContractError::AttestationRequired),
+            "the multisig path must honor the required-attestation gate"
+        );
+        assert!(
+            TrustBridgeContract::get_upgrade_proposal(env.clone()).is_some(),
+            "a rejected execution must leave its proposal intact"
+        );
+    });
+}
+
 // ── Threshold above signer set must fail closed (Issue #795) ─────────────────
 
 /// Setting a threshold above `MAX_UPGRADE_SIGNERS` would make the threshold
@@ -796,5 +944,196 @@ fn test_recovery_set_reachable_threshold_after_rejected_attempt() {
         // Admin lowers the threshold to a value within the signer cap.
         TrustBridgeContract::set_upgrade_threshold(env.clone(), admin.clone(), 2).unwrap();
         assert_eq!(TrustBridgeContract::get_upgrade_threshold(env.clone()), 2);
+    });
+}
+
+// ── Upgrade cooldown and monotonic remaining time assertions (Issue #758) ─────
+
+/// When upgrade cooldown is active, `execute_upgrade` must fail with
+/// `ContractError::CooldownActive`, and health snapshot `cooldown_remaining_secs`
+/// must decrease monotonically across advancing ledger timestamps until reaching zero.
+#[test]
+fn test_multisig_upgrade_cooldown_active_and_monotonic_decrease() {
+    let (env, admin, upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+
+    // Configure 3,600s cooldown and simulate a previous upgrade at timestamp 1,000.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_cooldown(env.clone(), 3_600).unwrap();
+        env.storage().instance().set(&LAST_UPG_KEY, &1_000u64);
+    });
+
+    // Propose an upgrade with delay 0; threshold default is 1 (so proposer satisfies it).
+    // An upgrader also approves to cover multi-party approval semantics.
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0xAA),
+            0,
+        )
+        .unwrap();
+        TrustBridgeContract::approve_upgrade(env.clone(), upgrader.clone(), 0).unwrap();
+    });
+
+    // Check monotonic decrease across timestamps:
+    // [timestamp, expected_remaining_secs]
+    let timeline: [(u64, u64); 6] = [
+        (1_000, 3_600),
+        (1_600, 3_000),
+        (2_200, 2_400),
+        (3_500, 1_100),
+        (4_599, 1),
+        (4_600, 0),
+    ];
+
+    let mut prev_remaining = u64::MAX;
+
+    for (ts, expected_remaining) in timeline {
+        env.ledger().set_timestamp(ts);
+
+        env.as_contract(&contract_id, || {
+            let health = TrustBridgeContract::get_health(env.clone()).unwrap();
+            assert_eq!(
+                health.cooldown_remaining_secs, expected_remaining,
+                "cooldown_remaining_secs mismatch at timestamp {}",
+                ts
+            );
+
+            // Assert monotonic decrease: strictly smaller as time advances
+            assert!(
+                health.cooldown_remaining_secs < prev_remaining,
+                "cooldown_remaining_secs must decrease monotonically (was {}, now {})",
+                prev_remaining,
+                health.cooldown_remaining_secs
+            );
+            prev_remaining = health.cooldown_remaining_secs;
+
+            // While cooldown is active (> 0), execute_upgrade must fail with CooldownActive
+            if expected_remaining > 0 {
+                let err = TrustBridgeContract::execute_upgrade(env.clone(), upgrader.clone(), 0);
+                assert_eq!(
+                    err,
+                    Err(ContractError::CooldownActive),
+                    "execute_upgrade must fail with CooldownActive while cooldown is running at ts {}",
+                    ts
+                );
+
+                // Proposal must remain pending and intact
+                assert!(
+                    TrustBridgeContract::get_upgrade_proposal(env.clone()).is_some(),
+                    "proposal must remain live despite failed execute attempt"
+                );
+            }
+        });
+    }
+
+    // After cooldown has expired, remaining time stays zero across future timestamps.
+    env.ledger().set_timestamp(5_000);
+    env.as_contract(&contract_id, || {
+        let health = TrustBridgeContract::get_health(env.clone()).unwrap();
+        assert_eq!(health.cooldown_remaining_secs, 0);
+    });
+}
+
+/// When both proposal delay and upgrade cooldown are active:
+/// 1. Before proposal delay elapses, `execute_upgrade` fails with `UpgradeProposalDelayActive`.
+/// 2. Once proposal delay elapses but cooldown has not, `execute_upgrade` fails with `CooldownActive`.
+/// 3. Monotonic decrease of `cooldown_remaining_secs` is maintained across all phases.
+#[test]
+fn test_multisig_upgrade_delay_precedes_cooldown_error() {
+    let (env, admin, _upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+
+    // Cooldown = 3,000s (expires at 4,000); proposal delay = 1,000s (executable at 2,000).
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_cooldown(env.clone(), 3_000).unwrap();
+        env.storage().instance().set(&LAST_UPG_KEY, &1_000u64);
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0xBB),
+            1_000,
+        )
+        .unwrap();
+    });
+
+    // Phase 1: Timestamp 1,500 (delay active: 1,500 < 2,000; cooldown active: 1,500 < 4,000)
+    env.ledger().set_timestamp(1_500);
+    env.as_contract(&contract_id, || {
+        let health = TrustBridgeContract::get_health(env.clone()).unwrap();
+        assert_eq!(health.cooldown_remaining_secs, 2_500);
+
+        let err = TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), 0);
+        assert_eq!(
+            err,
+            Err(ContractError::UpgradeProposalDelayActive),
+            "delay check must precede cooldown check"
+        );
+    });
+
+    // Phase 2: Timestamp 2_500 (delay elapsed: 2_500 >= 2,000; cooldown still active: 2_500 < 4,000)
+    env.ledger().set_timestamp(2_500);
+    env.as_contract(&contract_id, || {
+        let health = TrustBridgeContract::get_health(env.clone()).unwrap();
+        assert_eq!(health.cooldown_remaining_secs, 1_500);
+        assert!(1_500 < 2_500, "cooldown_remaining_secs decreased monotonically");
+
+        let err = TrustBridgeContract::execute_upgrade(env.clone(), admin.clone(), 0);
+        assert_eq!(
+            err,
+            Err(ContractError::CooldownActive),
+            "after delay elapses, cooldown failure must trigger"
+        );
+    });
+}
+
+/// A failed `execute_upgrade` due to `CooldownActive` leaves no partial privileged state.
+/// The proposal, approver roster, and last upgrade timestamp remain unchanged.
+#[test]
+fn test_multisig_upgrade_cooldown_preserves_state_on_failure() {
+    let (env, admin, upgrader, _random, contract_id) = setup();
+    env.ledger().set_timestamp(1_000);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_cooldown(env.clone(), 5_000).unwrap();
+        env.storage().instance().set(&LAST_UPG_KEY, &1_000u64);
+        TrustBridgeContract::set_upgrade_threshold(env.clone(), admin.clone(), 2).unwrap();
+        TrustBridgeContract::propose_multisig_upgrade(
+            env.clone(),
+            admin.clone(),
+            hash(&env, 0xCC),
+            0,
+        )
+        .unwrap();
+        TrustBridgeContract::approve_upgrade(env.clone(), upgrader.clone(), 0).unwrap();
+    });
+
+    // Attempt execution during cooldown window at ts 2_000
+    env.ledger().set_timestamp(2_000);
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let err = TrustBridgeContract::execute_upgrade(env.clone(), upgrader.clone(), 0);
+        assert_eq!(err, Err(ContractError::CooldownActive));
+
+        // Verify no partial state was written:
+        // 1. Proposal is still live
+        let prop = TrustBridgeContract::get_upgrade_proposal(env.clone())
+            .expect("proposal must still exist");
+        assert_eq!(prop.id, 0);
+        assert_eq!(prop.wasm_hash, hash(&env, 0xCC));
+        assert_eq!(prop.approvers.len(), 2);
+
+        // 2. last_upgrade timestamp was NOT updated
+        let last_upg: u64 = env.storage().instance().get(&LAST_UPG_KEY).unwrap();
+        assert_eq!(last_upg, 1_000);
+
+        // 3. Health cooldown remaining is correct
+        let health = TrustBridgeContract::get_health(env.clone()).unwrap();
+        assert_eq!(health.cooldown_remaining_secs, 4_000);
     });
 }

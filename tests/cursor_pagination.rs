@@ -175,6 +175,66 @@ fn test_removal_anywhere_invalidates_outstanding_cursors_even_if_already_passed(
     });
 }
 
+/// Operator acceptance: after one removal bumps the index generation,
+/// the stale page cursor is rejected and a full restart from `None` rebuilds
+/// the mirror without resurrecting the removed username.
+#[test]
+fn test_dashboard_index_generation_restart_happy_and_failure_paths() {
+    const DASHBOARD_SYNC: &str = include_str!("../docs/DASHBOARD_SYNC.md");
+    const EVENT_INDEXING: &str = include_str!("../docs/EVENT_INDEXING.md");
+
+    assert!(DASHBOARD_SYNC.contains("restart at `cursor = None`"));
+    assert!(DASHBOARD_SYNC.contains("`stellar_address`, `timestamp`, and `domain`"));
+    assert!(EVENT_INDEXING.contains("Restart export pagination with `cursor = None`"));
+
+    let (env, admin, contract_id) = setup();
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        register_n(&env, 6);
+
+        let page1 = TrustBridgeContract::get_public_paginated(env.clone(), None, 2).unwrap();
+        let stale = page1.next_cursor.clone().unwrap();
+
+        // Failure path 1: stale contract cursor after a removal.
+        TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "user001")).unwrap();
+        assert_eq!(
+            TrustBridgeContract::get_public_paginated(env.clone(), Some(stale), 2),
+            Err(ContractError::InvalidCursor)
+        );
+
+        // Failure path 2: malformed/oversized offset after the registry shrank.
+        let mut malformed = [0u8; 8];
+        malformed[0..4].copy_from_slice(&u32::MAX.to_be_bytes());
+        malformed[4..8].copy_from_slice(&1u32.to_be_bytes());
+        assert_eq!(
+            TrustBridgeContract::get_public_paginated(
+                env.clone(),
+                Some(BytesN::from_array(&env, &malformed)),
+                2,
+            ),
+            Err(ContractError::InvalidCursor)
+        );
+
+        // Happy path: discard stale state and restart pages from None.
+        let mut seen: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = TrustBridgeContract::get_public_paginated(env.clone(), cursor, 2).unwrap();
+            for i in 0..page.records.len() {
+                seen.push(page.records.get(i).unwrap().0);
+            }
+            if !page.has_more {
+                assert!(page.next_cursor.is_none());
+                break;
+            }
+            cursor = page.next_cursor;
+        }
+
+        assert_eq!(seen.len(), 5);
+        assert!(!seen.iter().any(|username| *username == s(&env, "user001")));
+    });
+}
+
 #[test]
 fn test_cursor_is_interchangeable_between_admin_and_public_paginated() {
     let (env, _admin, contract_id) = setup();

@@ -131,6 +131,24 @@ renamed, or changes arity. Refresh with
 intentional public ABI change (Issue #631). See
 [the ABI testdata README](../tests/testdata/abi/README.md).
 
+### Module-split exports (Issue #771)
+
+After moving entrypoints between `src/` modules, refresh the public snapshot in
+this order:
+
+1. Confirm every public contract function is re-exported from `src/lib.rs`.
+   Module-internal helpers — including anything `pub(crate)` or referenced as
+   `module::helper` — are **not** ABI surfaces and must not appear in
+   `docs/abi.json` or the golden.
+2. Regenerate `docs/abi.json` from this file (`make abi`), then refresh the
+   golden with `python3 scripts/generate_abi_json.py --update-entrypoints-golden`.
+3. Run `cargo test --test abi_entrypoints_golden && make abi-check` and review
+   the golden diff: only intended `(name, arity)` changes may appear.
+4. Commit `docs/ABI.md`, `docs/abi.json`, the golden, and any `src/lib.rs`
+   export change together. `tests/abi_entrypoints_golden.rs` fails on a
+   missing, renamed, or arity-changed entrypoint and on an extra helper entry;
+   error codes stay in `abi/contract_error_codes.golden`.
+
 `tests/testdata/bindings/get_address_simulate.v1.json` is a versioned golden of
 the `ScVal` XDR that `simulateTransaction` returns for `get_address` (hit and
 miss). `tests/bindings_golden.rs` fails when the contract encoding drifts, and CI
@@ -328,6 +346,40 @@ struct ChallengeRecord {
 }
 ```
 
+### PauseReason (u32 discriminant, Issue #1)
+
+Typed reason codes for `pause`, `unpause`, and `set_paused` (Issue #211). Stored
+on-chain alongside the pause flag so Wave incident responders can distinguish
+maintenance from a security freeze without replaying event history.
+
+All mutation entry points that flip the pause flag require a valid `PauseReason`;
+unknown codes fail with [`ContractError::InvalidPauseReason`] (code 21).
+
+**Exhaustiveness guarantee**: The discriminant table below is the complete set.
+Adding a new variant breaks `tests/pause_reason_exhaustiveness.rs` until this
+table, `src/storage.rs::PauseReason`, and the test's `DOCUMENTED_VARIANTS` are
+all updated together — so undocumented pause reasons cannot ship.
+
+| Code | Name | When to use |
+|------|------|-------------|
+| 1 | `Maintenance` | Planned upgrade window or routine admin maintenance |
+| 2 | `SecurityIncident` | Freeze after a detected exploit or suspicious activity |
+| 3 | `RegulatoryHold` | Compliance or legal hold requirement |
+| 4 | `Unpause` | Resuming normal operation (used with `unpause`) |
+| 99 | `Other` | Any reason not covered above |
+
+Codes are **append-only**: indexers store the numeric discriminant, so renumbering
+silently re-labels historical entries. New variants must be added with an unused
+code at the end. `PauseReason::is_valid(code)` returns `true` for every code in
+this table and `false` otherwise; `PauseReason::from_code(code)` maps back to the
+variant or `None` for unrecognized codes.
+
+**Wave operator usage**: An unprimed Wave testnet with incident responders unfamiliar
+with these codes may misclassify a `SecurityIncident` pause as routine maintenance
+or vice versa. Document the discriminant-to-meaning table in `docs/TESTNET_CHECKLIST.md`
+and `docs/ADMIN_RUNBOOK.md` so responders have it on hand during an incident (see
+Issue #4).
+
 ### RevokeReason (u32 discriminant)
 
 | Code | Name |
@@ -357,7 +409,7 @@ struct ChallengeRecord {
 | 11 | `InvalidUsername` | Username is empty, over `max_username_len`, or contains disallowed characters |
 | 12 | `AttestationExpired` | Upgrade attestation's `expires_at` has passed |
 | 13 | `UnattestedWasm` | `upgrade` hash does not match the live attestation |
-| 14 | `InvalidBatchSize` | Batch call supplied zero items or more than the configured max |
+| 14 | `InvalidBatchSize` | Batch call supplied zero items or more than the configured max, or `get_pending_reverify` called with `limit > MAX_PAGE_LIMIT` (100) |
 | 15 | `InvalidReasonCode` | `revoke_verification` reason_code is not a known `RevokeReason` value |
 | 16 | `ZeroAddress` | Supplied Stellar address is the well-known zero/burn address |
 | 17 | `ChallengeAlreadyActive` | `start_challenge` called while a challenge is already open |
@@ -402,7 +454,7 @@ struct ChallengeRecord {
 | 57 | `RoleExpired` | A role-gated privileged invocation was made at or after the role's expiry timestamp |
 | 58 | `OracleProofBadLayout` | `verify_with_proof`: empty `message` or all-zero `signature` (structurally malformed proof) |
 | 59 | `OracleProofNotAllowlisted` | `verify_with_proof`: `oracle_pubkey` is not on the oracle allowlist (always, when it is empty) |
-| 60 | `OracleProofExpired` | `verify_with_proof`: non-zero `expires_at` is earlier than the ledger timestamp |
+| 60 | `OracleProofExpired` | `verify_with_proof`: ledger timestamp exceeds non-zero `expires_at` by more than 30 seconds |
 | 61 | `OracleProofBadSignature` | `verify_with_proof`: signature is not a canonical Ed25519 encoding |
 | 62 | `AddressMismatch` | `verify_with_oracle_proof`: proof message is not bound to the record's current `stellar_address` |
 
@@ -932,6 +984,13 @@ Remove a registration.
 | **Errors** | `NotInitialized`, `Paused`, `NotRegistered`, `NotAuthorized` |
 | **Events** | `RemovedEvent` |
 
+**Registry hole policy (Issue #3)**: Removal creates a hole in the flat username
+index, which is not compacted automatically. Wave exporters must not assume dense
+indexes after removals. See [REGISTRY_INVARIANTS.md § Hole Policy](./REGISTRY_INVARIANTS.md#hole-policy)
+for the exact semantics and [DASHBOARD_SYNC.md § Handling Removals](./DASHBOARD_SYNC.md#handling-removals)
+for exporter guidance. The paginated export APIs (`get_registered_paginated`,
+`get_public_paginated`) handle holes correctly and never skip or duplicate records.
+
 ```bash
 # Self-removal (registrant signs)
 stellar contract invoke --id $ID --source registrant --network testnet --send=yes \
@@ -1023,6 +1082,13 @@ This is the batched form of `remove`, intended for admin workflows that need to 
 **Partial success is the point.** A username that cannot be removed (e.g., not registered) does not abort the batch; it is counted as a failure in the returned `BatchSummary` and the rest proceed. A cleanup of 100 contributors must not be lost wholesale because one entry was already removed.
 
 Unlike the single `remove` function which allows registrants to self-remove, `batch_remove` is strictly admin-only.
+
+**Registry hole policy (Issue #3)**: Batch removals create multiple holes in the
+username index. Wave exporters must not assume the index remains dense. After a
+batch remove, the flat index may have gaps where removed usernames were. See
+[REGISTRY_INVARIANTS.md § Hole Policy](./REGISTRY_INVARIANTS.md#hole-policy) for
+export implications and [DASHBOARD_SYNC.md § Handling Removals](./DASHBOARD_SYNC.md#handling-removals)
+for the recovery procedure after detecting a hole.
 
 | Outcome | Counted as | Notes |
 |---------|------------|-------|
@@ -1147,6 +1213,7 @@ Merkle roots in `get_public_paginated` and exported record snapshots satisfy cro
 - **Empty Tail and Single-Record Edge Cases**: An empty registry or a cursor past the end of the registry returns an empty record set with the canonical all-zero sentinel root (`[0u8; 32]`). A single-record page root is strictly equal to that single leaf's hash.
 - **Mutation Sensitivity**: Removing a record invalidates prior roots and previous page cursors. Changing bot status via `set_bot_status` preserves leaf consistency under the v1 leaf schema.
 - **Initialization Gate**: Uninitialized contract calls fail with `ContractError::NotInitialized` rather than returning an empty root.
+- **Mid-export flag flips & Wave audit restart requirement**: `PENDING_REVERIFY_KEY` (`pend_rev`) and `is_bot` are not hashed into `leaf_hash`. In-place reverify/verification transitions (`register` address change, `execute_address_rotation`, `verify`, `batch_verify`, `verify_with_oracle_proof`, `revoke_verification`) do not bump `INDEX_GEN_KEY`, so cursors stay valid and each individual page's `merkle_root` still commits accurately to that page's returned `records` at its read ledger. However, multi-page walks are not snapshot-isolated across ledgers: if a flag flips on a record after its page was read (or between pages), pre-flip proofs fail against post-flip roots and a stitched export can diverge from a single-shot snapshot. For whole-registry Wave audits, operators must either pause writes during export or detect mid-export drift (`get_last_event_ledger()`, `get_stats()`, `export_attestation().ledger`) and restart from `cursor = None` (index-shifting `remove`/`rename` calls bump `INDEX_GEN_KEY` and enforce restart with `InvalidCursor`, code `52`). See [REGISTRY_INVARIANTS.md § Mid-export reverify flag changes](REGISTRY_INVARIANTS.md#mid-export-reverify-flag-changes-and-wave-audit-restart-requirement).
 
 #### ExportPage layout compatibility
 
@@ -1186,7 +1253,12 @@ and `message` must be exactly
 `<github_username>:<stellar_address strkey>:<expires_at decimal>` for the
 record's current `stellar_address` — see
 [SECURITY.md](SECURITY.md#oracle-signed-proof-interface-signature-check).
-`expires_at = 0` skips the expiry check. On success the record, counters,
+`expires_at = 0` skips the expiry check (not recommended for production).
+For a non-zero expiry, ledger time at or before `expires_at + 30` seconds
+is accepted, including the exact boundary; a difference of 31 seconds or
+more returns `OracleProofExpired` (60). The comparison uses saturating
+subtraction to avoid overflow. The fixed 30-second grace is not configurable
+and does not change the signed message. On success the record, counters,
 `VerifiedEvent`, and audit log update exactly as for `verify`.
 
 **Auth:** the registered `stellar_address`.
@@ -1206,18 +1278,62 @@ change (`PENDING_REVERIFY_KEY`, Issue #587).
 
 | | |
 |---|---|
-| **Auth** | None (read-only) |
+| **Auth** | None (read-only; works while paused) |
 | **Mutates** | No |
-| **Errors** | `NotInitialized`, `InvalidBatchSize` (`limit > MAX_PAGE_LIMIT`) |
+| **Errors** | `NotInitialized` (code `2`), `InvalidBatchSize` (code `14`), `NetworkMismatch` (code `30`) |
+| **Events** | None emitted on `PENDING_REVERIFY_KEY` set/clear (see [EVENT_INDEXING.md](EVENT_INDEXING.md#pending-re-verification-signals-and-poll-api)) |
 | **Returns** | `Vec<String>` — flagged usernames within the scanned window |
 | **Pagination** | Offset-based over the registry index: scans entries `[offset, offset + limit)` |
-| **Limit** | `0` → `DEFAULT_PAGE_LIMIT`; `> MAX_PAGE_LIMIT` (100) → `InvalidBatchSize` |
+| **Limit** | `0` → `DEFAULT_PAGE_LIMIT` (`20`); `> MAX_PAGE_LIMIT` (`100`) → `InvalidBatchSize` (`14`) |
 
 Gas is bounded by `limit`, so a page may hold fewer than `limit` names (or
 none) while more remain. Advance `offset` by `limit` until it reaches
-`get_stats().total`. An empty registry returns an empty page. A name drops
-out once `verify` / `batch_verify` clears its flag; `rename` moves the flag
-to the new name.
+`get_stats().total`. An empty registry or `offset >= total` returns an empty
+page. A name drops out once `verify` / `batch_verify` /
+`verify_with_oracle_proof` or `remove` clears its flag; `rename` moves the flag
+to the new name. The flag is set on address change for a verified record
+(`register`, `register_sponsored`, `execute_rotation`); a successful verify
+removes the `"pend_rev"` storage key rather than writing `false`. Failed or
+unauthorized verifies leave it set. See
+[STORAGE_KEYS.md § PENDING_REVERIFY_KEY lifecycle](STORAGE_KEYS.md#pending_reverify_key-lifecycle-issue-852).
+
+#### Limit boundaries (Issue #847)
+
+| Input | Behavior |
+|-------|----------|
+| `limit == 0` | Uses `DEFAULT_PAGE_LIMIT = 20`; a page holds at most 20 names and the next offset is 20 |
+| `1 <= limit <= 100` | Scans at most `limit` index entries and returns the flagged subset |
+| `limit == 100` | Largest accepted page (`MAX_PAGE_LIMIT = 100`) |
+| `limit > 100`, including `u32::MAX` | Fails with `InvalidBatchSize` (code 14) before any scan; no partial page is returned |
+
+An offset at or beyond the index length is an empty page. The limit is rejected
+(not clamped) on this endpoint, unlike the other paginated export endpoints.
+Unit tests in `src/storage.rs` cover 0, 100, 101 and `u32::MAX`. Operator risk:
+a rejected oversized limit is a failed read-only call, not a cursor invalidation;
+retry with `limit <= 100`.
+
+#### Error codes & integrator notes for `get_pending_reverify`
+
+| Code | Variant | Category | When raised | Integrator handling |
+|---|---|---|---|---|
+| `2` | `NotInitialized` | `Fatal` | Contract `initialize` has not been called | Verify `CONTRACT_ID` and run `initialize` before polling |
+| `14` | `InvalidBatchSize` | `Fatal` | `limit > MAX_PAGE_LIMIT` (`100`) | Clamp client page size to `1..=100` (or pass `0` for default `20`) |
+| `30` | `NetworkMismatch` | `Fatal` | Recorded network tag differs from the executing ledger's `network_id` | Re-point client to the matching Stellar network passphrase / RPC |
+
+- **Non-error boundaries:** `limit == 0` falls back to `DEFAULT_PAGE_LIMIT` (`20`);
+  `offset >= get_stats().total` (including `u32::MAX`) returns `Ok([])` via
+  saturating arithmetic rather than `InvalidCursor` (code `52`); the read is
+  unauthenticated (never `NotAuthorized`, code `3`) and pause-exempt (never
+  `Paused`, code `7`).
+- **Mid-scan index shifts:** Because `get_pending_reverify` uses offset
+  pagination over the flat index, a concurrent `remove` or `rename` shifts later
+  positions without returning `InvalidCursor`. Check
+  `get_health_probes().index_gen` before and after multi-page walks and restart
+  from `offset = 0` if `index_gen` changed.
+- **No dedicated events:** `PENDING_REVERIFY_KEY` set/clear emits no event on
+  chain; use `get_pending_reverify` as the authoritative Wave poll API (see
+  [EVENT_INDEXING.md](EVENT_INDEXING.md#pending-re-verification-signals-and-poll-api)
+  and [docs/subgraph/README.md](subgraph/README.md)).
 
 ```bash
 stellar contract invoke --id $ID --network testnet \
@@ -1602,6 +1718,69 @@ with no intervening `revoke_verification` still fails `AlreadyVerified`, even
 after the record has already been through one full cycle. Covered by
 `test_issue_95_verify_revoke_verify_cycle` and
 `test_issue_95_double_verify_without_revoke_fails_mid_cycle` in `src/lib.rs`.
+
+---
+
+### `set_verify_limit(limit: u32) -> Result<(), ContractError>`
+
+Configure the per-ledger verify/revoke rate limit for non-admin callers (Issue #292).
+
+This caps the number of verify/revoke operations a single Verifier or Revoker can
+perform per ledger, preventing event-stream bloat and instruction-budget exhaustion
+during Wave verification bursts.
+
+| | |
+|---|---|
+| **Auth** | Admin only |
+| **Mutates** | Yes (instance storage) |
+| **Errors** | `NotInitialized`, `NotAuthorized` |
+| **Since** | Contract includes rate limiting from initial release |
+
+**Rate limit semantics:**
+- Counter is keyed per actor address **and** per ledger sequence
+- **Resets automatically on new ledger**: When ledger sequence advances, the first
+  call in the new ledger sees a stale sequence and resets the counter to 0
+- `verify`, `revoke_verification`, and `batch_verify` each spend 1 unit per username
+- Setting `limit = 0` **disables rate limiting entirely**
+- Default when unset: `DEFAULT_VERIFIES_PER_LEDGER` = 20 units per ledger (~4/sec at 5s ledgers)
+
+**Admin bypass:** The admin is **always exempt** from rate limits. Incident response
+must not be throttled. Rate checks only apply to `Role::Verifier` and `Role::Revoker`
+holders.
+
+**Cross-ledger behavior:** There is no carry-over between ledgers. A verifier that
+hits the limit at the end of ledger N can immediately verify again when ledger N+1
+closes, as the counter resets to 0 on ledger rollover.
+
+```bash
+# Set rate limit to 50 verify/revoke operations per ledger
+stellar contract invoke --id $ID --source admin --network testnet --send=yes \
+  -- set_verify_limit --limit 50
+
+# Disable rate limiting entirely (use with caution)
+stellar contract invoke --id $ID --source admin --network testnet --send=yes \
+  -- set_verify_limit --limit 0
+```
+
+---
+
+### `get_verify_limit() -> u32`
+
+Returns the currently configured per-ledger verify/revoke rate limit.
+
+| | |
+|---|---|
+| **Auth** | None (read-only) |
+| **Mutates** | No |
+| **Returns** | `u32` — the active limit, or `DEFAULT_VERIFIES_PER_LEDGER` (20) if never set |
+
+Returns the stored limit when the admin has explicitly set one (including 0, which
+means disabled), otherwise returns `DEFAULT_VERIFIES_PER_LEDGER` (20).
+
+```bash
+stellar contract invoke --id $ID --network testnet \
+  -- get_verify_limit
+```
 
 ---
 
@@ -2407,27 +2586,33 @@ struct AdminTransferProposal {
 
 ---
 
-## Pending Re-verification Functions (Issue #208)
+## Pending Re-verification Functions (Issues #208, #587)
 
 The ABI has **one** pending-reverify read:
-[`get_pending_reverify(offset, limit)`](#get_pending_reverifyoffset-u32-limit-u32---resultvecstring-contracterror).
-There is no `get_pending_reverify(github_username) -> bool` contract endpoint
-and no `get_pending_reverify_page` entry point; older docs that named those
-were describing an off-chain projection, not the ABI. Check a single name by
-scanning the paginated username list; the response contains usernames only,
-never Stellar addresses or other sensitive data.
+[`get_pending_reverify(offset: u32, limit: u32)`](#get_pending_reverifyoffset-u32-limit-u32---resultvecstring-contracterror),
+which delegates to `crate::storage::get_pending_reverify_page` (internal-only,
+not exported on the contract ABI). There is no `get_pending_reverify(github_username) -> bool`
+contract endpoint and no exported `get_pending_reverify_page` entry point; older
+docs that named those were describing an off-chain projection, not the ABI.
+Check a single name by scanning the paginated username list or use `get_address` /
+`get_record_proof`; the response contains usernames only, never Stellar addresses
+or other sensitive data.
 
 | | |
 |---|---|
+| **Exported entrypoint** | `get_pending_reverify(offset: u32, limit: u32) -> Result<Vec<String>, ContractError>` |
 | **Auth** | None (public read, no admin credentials) |
 | **Mutates** | No |
-| **Errors** | `NotInitialized`, `InvalidBatchSize` (`limit > 100`) |
 | **Works while paused** | Yes |
+| **Errors** | `NotInitialized` (code `2`), `InvalidBatchSize` (code `14`), `NetworkMismatch` (code `30`) |
+| **Events** | None emitted on flag set/clear (poll `get_pending_reverify`) |
 
-**Dashboard sync note:** Poll this endpoint to discover which contributors need
-a fresh off-chain GitHub identity check after an address change. Because the
+**Dashboard sync note:** Poll `get_pending_reverify` to discover which contributors
+need a fresh off-chain GitHub identity check after an address change. Because the
 list is public, dashboards must follow the redaction policy in
-[SECURITY.md § Public pending re-verification listings](SECURITY.md#public-pending-re-verification-listings-issue-860)
+[SECURITY.md § Public pending re-verification listings](SECURITY.md#public-pending-re-verification-listings-issue-860).
+See also [Error codes & integrator notes](#error-codes--integrator-notes-for-get_pending_reverify),
+[EVENT_INDEXING.md § Pending Re-verification Signals and Poll API](EVENT_INDEXING.md#pending-re-verification-signals-and-poll-api),
 and [DASHBOARD_SYNC.md § Pending Re-verification](DASHBOARD_SYNC.md#pending-re-verification-issue-208).
 
 ---
@@ -2436,11 +2621,15 @@ and [DASHBOARD_SYNC.md § Pending Re-verification](DASHBOARD_SYNC.md#pending-re-
 
 ### `set_attestation_required(caller: Address, required: bool) -> Result<(), ContractError>`
 
-Configures whether a published attestation is mandatory before `upgrade`.
+Configures whether a published attestation is mandatory before `upgrade` and
+multisig `execute_upgrade`.
 
-When `required = true`, `upgrade` fails with `AttestationRequired` (code 20)
-if no valid attestation is published. When `required = false` (default),
-unattested upgrades are allowed and provenance notes them as such.
+When `required = true`, the upgrade paths fail with `AttestationRequired`
+(code 29) if no attestation record is present. `upgrade` additionally checks
+that the attestation hash matches and has not expired; multisig
+`execute_upgrade` currently checks only that a record is present. When
+`required = false` (default), unattested upgrades are allowed and provenance
+notes them as such.
 
 | | |
 |---|---|
@@ -2450,9 +2639,13 @@ unattested upgrades are allowed and provenance notes them as such.
 
 **Since:** added in Issue #198. Existing deployments default to `false`.
 
+The policy may be changed while paused. Clearing a pending attestation does
+not change the policy; disable it explicitly with `required = false`.
+
 ### `get_attestation_required() -> bool`
 
-Returns whether WASM attestation is required before upgrade. Defaults to `false`.
+Returns whether WASM attestation is required before `upgrade` and multisig
+`execute_upgrade`. Defaults to `false`.
 
 | | |
 |---|---|
@@ -2962,6 +3155,35 @@ challenge is active. Emits `ChallengeStartedEvent`.
 | **Auth** | Admin |
 | **Errors** | `NotInitialized`, `Paused`, `NotAuthorized`, `NotRegistered`, `ChallengeAlreadyActive` |
 
+**Challenge lifecycle and replay protection:**
+
+- Each challenge is stored per-username, not by a separate ID
+- **Challenges are single-use**: Once `complete_challenge` or `cancel_challenge`
+  consumes a challenge, that challenge is permanently removed and cannot be
+  replayed
+- Attempting to `complete_challenge` on an already-completed challenge returns
+  `NoChallengeActive`, not a fresh removal
+- Attempting to `cancel_challenge` on an already-cancelled challenge returns
+  `NoChallengeActive`, not an idempotent success
+- If a username is **re-registered** after a challenge completes (removes the
+  record), a new `start_challenge` on that re-registered username creates a
+  **fresh, independent challenge** with its own lifecycle and timestamps
+
+**Challenge removal clears the challenge atomically:**
+- `complete_challenge` removes both the registration record and the challenge
+- `cancel_challenge` removes only the challenge; the registration remains
+- Self-remove (`remove` called by the registrant) during an active challenge
+  clears **both** the record and the challenge
+- In all cases, once a challenge is consumed, it cannot be reused. The
+  protection is structural: the challenge record is deleted, so subsequent
+  `complete_challenge` or `cancel_challenge` calls fail with `NoChallengeActive`
+  before attempting any state mutation
+
+Covered by `tests/challenge.rs`: `test_consumed_challenge_cannot_be_reused_via_complete`,
+`test_consumed_challenge_cannot_be_reused_via_cancel`,
+`test_new_challenge_on_re_registered_username_is_independent`, and
+`test_self_remove_during_challenge_clears_challenge`.
+
 #### `cancel_challenge(caller: Address, github_username: String) -> Result<(), ContractError>`
 
 Cancels a pending challenge, restoring normal registration behaviour.
@@ -2971,6 +3193,11 @@ Emits `ChallengeCancelledEvent`.
 |---|---|
 | **Auth** | Admin |
 | **Errors** | `NotInitialized`, `Paused`, `NotAuthorized`, `NoChallengeActive` |
+
+**Idempotency:** `cancel_challenge` is **not** idempotent. The first call succeeds
+and removes the challenge; a second call on the same username returns
+`NoChallengeActive`. This prevents silent double-cancel logic bugs and ensures
+operators know when they're canceling a challenge that no longer exists.
 
 #### `complete_challenge(caller: Address, github_username: String) -> Result<(), ContractError>`
 
@@ -2984,6 +3211,11 @@ The deadline is inclusive: completion returns `ChallengeNotResolvable` while
 | **Auth** | Admin |
 | **Errors** | `NotInitialized`, `Paused`, `NotAuthorized`, `NoChallengeActive`, `ChallengeNotResolvable`, `NotRegistered` |
 
+**Idempotency:** `complete_challenge` is **not** idempotent. The first successful
+call removes both the registration and the challenge; a second call returns
+`NoChallengeActive`. Operators relying on idempotent retry logic should check
+`get_challenge` before retrying a failed completion.
+
 #### `get_challenge(github_username: String) -> Option<ChallengeRecord>`
 
 Returns the active challenge record, or `None`.
@@ -2992,6 +3224,14 @@ Returns the active challenge record, or `None`.
 |---|---|
 | **Auth** | None |
 | **Mutates** | No |
+
+Returns `None` for usernames that:
+- Never had a challenge
+- Had a challenge that was completed (`complete_challenge` consumed it)
+- Had a challenge that was cancelled (`cancel_challenge` consumed it)
+- Had a challenge that was cleared by self-remove (`remove` called by registrant)
+- Were re-registered after challenge completion (old challenge is gone; new challenge
+  only appears after `start_challenge` is called again)
 
 ---
 
@@ -3171,7 +3411,12 @@ even while paused — see
 
 Read-only; no auth; works while paused.
 
-**batch_remove itself:** now returns `DualControlRequired` (code 30) if
+Reverify flags do not alter the requested batch size or authorization checks.
+A successful removal clears the removed registration's pending reverify flag;
+flags on other registrations remain unchanged. Rejected authorization or pause
+checks leave records and flags intact.
+
+**batch_remove itself:** now returns `DualControlRequired` (code 54) if
 `usernames.len()` exceeds the configured threshold, instead of executing —
 below the threshold, or with the default threshold of `0`, `batch_remove`'s
 behavior is completely unchanged.
@@ -3197,11 +3442,19 @@ subject to this delay.
 ### `get_pending_role(target: Address) -> Option<PendingRoleGrant>`
 
 `PendingRoleGrant { role: Role, activate_at: u64 }` — the queued grant, if any.
+`activate_at` is the earliest activation timestamp, not an expiry deadline.
+The pending record has no `expires_at` field and does not automatically
+activate or expire when ledger time reaches that timestamp. Persistent-storage
+TTL/archival is separate from role authorization (see [STORAGE_KEYS.md](STORAGE_KEYS.md)).
 
 ### `activate_role(target: Address) -> Result<(), ContractError>`
 
-Admin-only. Applies a queued grant once `activate_at` has passed and emits the
-normal `RoleGrantedEvent`.
+Admin-only. Applies a queued grant when ledger time is **at or after**
+`activate_at` and emits the normal `RoleGrantedEvent`. Before that boundary
+it returns `RoleGrantNotReady` without consuming the grant. Activation is
+blocked while paused. An existing active role's `expires_at` remains an
+independent, inclusive expiry boundary even when a replacement is queued.
+A pending grant alone cannot renew an expired role.
 
 - `NoPendingRoleGrant` (34) — nothing queued for `target`.
 - `RoleGrantNotReady` (35) — timelock has not elapsed.
@@ -3209,7 +3462,10 @@ normal `RoleGrantedEvent`.
 ### `cancel_role_grant(target: Address) -> Result<(), ContractError>`
 
 Admin-only. Drops a queued grant and emits `RoleGrantCancelledEvent`.
-`remove_role` also drops any queued grant for the same address.
+Cancellation works before, at, or after `activate_at` while the grant is
+still pending, including while paused. `remove_role` also drops any queued
+grant for the same address (subject to its pause guard). Repeated activation
+or cancellation of a consumed grant returns `NoPendingRoleGrant` (34).
 
 ### Events
 

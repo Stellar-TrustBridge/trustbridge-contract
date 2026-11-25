@@ -65,15 +65,47 @@ The contract uses **two independent storage partitions** in Soroban, each with d
 When introducing a new storage key, **new contributors** should:
 
 1. **Choose a partition**: Instance (singleton, no TTL) or persistent (per-entry, TTL-managed)?
+   - *Instance storage note*: All instance keys share a single 64 KiB entry. Never place unbounded collections in instance storage.
 2. **Pick a context type**: None (instance), or `String` (username), `Address` (account), `u32` (index), etc.?
 3. **Reserve a symbol**: Pick a short unique name (`symbol_short!("new_key")`).
 4. **Check collision-free**:
    - Run `make storage-keys-check` to verify your constant is documented.
    - If persistent, ensure your discriminator doesn't duplicate an existing one.
    - If reusing a context type, review the namespace diagram above — your discriminator must differ from all others using that type.
-5. **Document** in the tables below and this diagram.
+5. **Measure footprint & check growth budget**:
+   - Measure serialized XDR byte size (`value.to_xdr(env).len()`) under worst-case inputs.
+   - For instance keys, confirm the key does not blow the 64 KiB instance ceiling or crowd out registry scaling.
+   - For growing keys, add/update the budget row in `docs/STORAGE_FOOTPRINT.md` and run `make storage-footprint-check`.
+   - See the full checklist in [STORAGE_FOOTPRINT.md](STORAGE_FOOTPRINT.md#contributor-checklist-for-adding-instance-and-persistent-keys).
+6. **Document** in the tables below and this diagram.
+7. **Run CI gate checks**:
+   - `make storage-check` (or `make storage-keys-check`, `make storage-footprint-check`, `make storage-rent-check`, `make storage-rent-estimator`).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md#storage-key-best-practices) for the full workflow.
+
+### CI collision narrative for new `Symbol` keys (Issue #773)
+
+When you add a `Symbol` constant in `src/storage.rs`, two CI gates must stay green:
+
+1. `make storage-keys-check` runs `scripts/check_storage_keys.sh`: every
+   `const NAME: Symbol = symbol_short!("...")` declaration must appear in the
+   **Complete Key Inventory** below, by constant name and symbol string. A
+   missing row fails with the constant name; a duplicate symbol string fails
+   with the colliding literal. Dynamic `Symbol::new` keys are rejected in
+   production source.
+2. `cargo test --test storage_keys_collision` checks the same inventory at
+   compile time and proves that primary symbol literals are unique. On failure
+   it names the duplicate literal or undocumented constant, e.g.
+   `duplicate Symbol literal "reg": two primary keys would collide` or
+   `Symbol constant NEW_WAVE_KEY not documented in docs/STORAGE_KEYS.md`.
+
+For a new key: add the constant, add its inventory row plus a table row/diagram
+note above, run `make storage-keys-check && cargo test --test storage_keys_collision`,
+and confirm the diff contains no other key changes. If CI reports a collision,
+do **not** refresh the test or linter — choose a fresh discriminator. The
+[ARCHITECTURE module map](ARCHITECTURE.md#contract-modules) shows which module owns
+each key family; test-local `Symbol::new` keys stay out of production
+inventory as described above.
 
 ### Temporary keys in tests
 
@@ -185,6 +217,49 @@ These keys use **tuples** as storage keys, where the first element is a `Symbol`
 
 ---
 
+## `PENDING_REVERIFY_KEY` lifecycle (Issue #852)
+
+`"pend_rev"` is a **persistent** key keyed by the canonical (lower-case)
+username. Its value is always `true`; "cleared" means the key is **removed**,
+never stored as `false` (Issue #588). This keeps `has()` consistent with
+`get_pending_reverify()` and prevents a stale entry being inherited.
+
+```
+ register/register_sponsored with a different address on a verified record
+ execute_rotation on a verified record ──────────────┐
+ rename of a verified or already-flagged record ─────┤
+                                                     ▼
+                                     set_pending_reverify(name, true)
+                                                     │
+              verify / batch_verify success ─────────┤
+              remove / batch_remove ─────────────────┤
+                                                     ▼
+                                     clear_pending_reverify(name) → key absent
+```
+
+- **Set**: `register` / `register_sponsored` when an existing *verified* record
+  changes `stellar_address`; `execute_rotation` for a verified record; and
+  `rename`, which moves an outstanding flag to the new name (the old name's
+  entry is removed with the old record).
+- **Cleared**: successful `verify` / `batch_verify` (via `mark_verified`), and
+  record removal (`remove` / `batch_remove`). A failed or unauthorized verify
+  leaves the flag untouched — no partial privileged state.
+- **Read**: `get_pending_reverify(username) -> bool` and
+  `get_pending_reverify_page(offset, limit)` (Issue #587). The page scan is
+  bounded by `limit` and returns canonical names.
+- **Idempotence**: repeating a `true` set or a clear has the same observable
+  state; `set_pending_reverify(name, false)` is equivalent to a clear.
+- **Failure behavior**: only malformed/oversized page limits produce a stable
+  `InvalidBatchSize` error; an empty or unknown username simply reads `false`.
+  No new env vars or reason codes are introduced by this key.
+
+Tests: `src/storage.rs::pending_reverify_tests` covers the set → verify →
+clear path, unauthorized verify (flag preserved), canonical-key lookup, and
+hostile pagination bounds. Run with
+`cargo test --lib pending_reverify_tests` (or `cargo test --lib`).
+
+---
+
 ## Collision Analysis
 
 No overlapping key encodings were identified. The following properties prevent collisions:
@@ -269,4 +344,6 @@ When adding a new storage key:
    Run `make storage-keys-check` (CI fails otherwise).
 2. If the key uses a new discriminator symbol, verify it does not match any existing persistent discriminator.
 3. If the key uses a new context type, verify it cannot serialize to the same bytes as an existing context type for any valid input.
-4. Update this document and link it from [ARCHITECTURE.md](ARCHITECTURE.md) and [ABI.md](ABI.md).
+4. Follow the contributor checklist in [STORAGE_FOOTPRINT.md](STORAGE_FOOTPRINT.md#contributor-checklist-for-adding-instance-and-persistent-keys): measure serialized XDR footprint and verify instance/persistent budgets (`make storage-footprint-check`).
+5. Run the full storage verification gate: `make storage-check`.
+6. Update this document and link it from [ARCHITECTURE.md](ARCHITECTURE.md) and [ABI.md](ABI.md).

@@ -468,8 +468,9 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
 The externally callable ABI functions are `stage_wasm`, `get_staged`,
 and `clear_staged`. In particular, `commit_staged_wasm` is **not** an
 exported function; `clear_staged_wasm` is only an internal Rust storage
-helper. See [ABI staged WASM entrypoints](ABI.md#staged-wasm-entrypoints-issue-594)
-and [staged-slot security](SECURITY.md#staged-wasm-slot-issue-300).
+helper. See [ABI staged WASM entrypoints](ABI.md#staged-wasm-entrypoints-issue-594),
+[staged-slot security](SECURITY.md#staged-wasm-slot-issue-300), and
+[malicious-hash threat model](SECURITY.md#staged-wasm-malicious-hash-threat-model-issue-804).
 
 The hash below is the 32-byte hex WASM hash returned by
 `stellar contract install`. `CONTRACT_ID`, `NETWORK`, and `ADMIN`
@@ -516,18 +517,22 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   -- set_cooldown --cooldown-seconds 86400      # 0 disables the timelock
 ```
 
-- **Auth:** admin only. A non-zero cooldown makes `upgrade` fail
+- **Auth:** admin only. A non-zero cooldown makes both single-admin `upgrade` and multisig `execute_upgrade` fail
   `CooldownActive` until the interval since the last upgrade elapses.
 
 #### `set_attestation_required` — require pre-declared hashes
 
 ```bash
 stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$NETWORK" --send=yes \
-  -- set_attestation_required --required true
+  -- set_attestation_required --caller "$ADMIN" --required true
 ```
 
-- **Auth:** admin only. When `true`, `upgrade` without a live matching
-  attestation fails `AttestationRequired` (code 20). Default `false`.
+- **Auth:** admin only. When `true`, an upgrade without an attestation record
+  fails `AttestationRequired` (code 29). The regular `upgrade` path also checks
+  the hash and expiry. Default `false`; available while paused. Clearing an
+  attestation does not disable the flag. Multisig execution checks for a record
+  but does not validate its hash or expiry; verify the proposal and attestation
+  separately before approving or executing.
 - **Alerting:** check this flag alongside `get_health().attestation_present`.
   `required=true` with `attestation_present=false` means upgrades are blocked
   until a fresh `attest_upgrade`; see
@@ -663,6 +668,7 @@ Gotchas:
 - Execute fails with `UpgradeProposalDelayActive` while the delay is running and
   `UpgradeProposalInsufficientApprovals` until the threshold is met — both are
   transient, so retrying after more approvals / time is expected.
+- Execute also enforces the upgrade timelock (`set_cooldown`): if a previous upgrade occurred and the cooldown window has not elapsed, `execute_upgrade` fails with `CooldownActive` (code 8). The pending proposal is preserved without corruption or partial state write. Operators can query `get_health` to verify that `cooldown_remaining_secs` decreases monotonically across ledger timestamps towards zero before retrying execution.
 - `set_upgrade_threshold` **fails closed** with `ThresholdExceedsSignerCap`
   (Issue #795) if `--threshold` is greater than `MAX_UPGRADE_SIGNERS` (the
   hard cap on distinct approvers per proposal — currently 20). An impossible
