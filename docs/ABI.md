@@ -131,6 +131,24 @@ renamed, or changes arity. Refresh with
 intentional public ABI change (Issue #631). See
 [the ABI testdata README](../tests/testdata/abi/README.md).
 
+### Module-split exports (Issue #771)
+
+After moving entrypoints between `src/` modules, refresh the public snapshot in
+this order:
+
+1. Confirm every public contract function is re-exported from `src/lib.rs`.
+   Module-internal helpers — including anything `pub(crate)` or referenced as
+   `module::helper` — are **not** ABI surfaces and must not appear in
+   `docs/abi.json` or the golden.
+2. Regenerate `docs/abi.json` from this file (`make abi`), then refresh the
+   golden with `python3 scripts/generate_abi_json.py --update-entrypoints-golden`.
+3. Run `cargo test --test abi_entrypoints_golden && make abi-check` and review
+   the golden diff: only intended `(name, arity)` changes may appear.
+4. Commit `docs/ABI.md`, `docs/abi.json`, the golden, and any `src/lib.rs`
+   export change together. `tests/abi_entrypoints_golden.rs` fails on a
+   missing, renamed, or arity-changed entrypoint and on an extra helper entry;
+   error codes stay in `abi/contract_error_codes.golden`.
+
 `tests/testdata/bindings/get_address_simulate.v1.json` is a versioned golden of
 the `ScVal` XDR that `simulateTransaction` returns for `get_address` (hit and
 miss). `tests/bindings_golden.rs` fails when the contract encoding drifts, and CI
