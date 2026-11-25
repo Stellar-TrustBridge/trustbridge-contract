@@ -104,6 +104,9 @@ Unlike `get_health` it never errors, so an uninitialized deployment reports
 stellar contract invoke --id $CONTRACT_ID --network testnet -- get_health_probes
 ```
 
+Copy-paste post-deploy/upgrade steps and failure triage:
+[DEPLOYMENT.md § Post-deploy health probe](DEPLOYMENT.md#post-deploy-health-probe-issue-863).
+
 | Field | Healthy value | Unhealthy → action |
 |-------|---------------|--------------------|
 | `paused` | `false` | `true` → check `get_pause_reason`, then `unpause` per the runbook |

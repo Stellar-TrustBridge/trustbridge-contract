@@ -1239,6 +1239,8 @@ Pre-Wave operator probes: pause flag, admin presence, index generation
 
 Preferred for liveness/uptime alerting because it never errors. See
 [CONTRACT_HEALTH.md → Choosing a probe & alert SLOs](CONTRACT_HEALTH.md#choosing-a-probe--alert-slos-issue-756).
+Copy-paste post-deploy/upgrade operator sequence:
+[DEPLOYMENT.md § Post-deploy health probe](DEPLOYMENT.md#post-deploy-health-probe-issue-863).
 
 ---
 
