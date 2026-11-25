@@ -493,3 +493,22 @@ logging:
 No operator action is required unless you need the gap filled. In that case, archive
 the current `events-<network>.jsonl`, remove the cursor, and re-run from a
 `START_LEDGER` that predates the gap.
+
+### IndexGenerationBumped payloads (Issue #850)
+
+`index_generation_bumped_event` is a consumer-side signal derived from the
+index generation exposed by `get_health_probes`: `previous_generation`,
+`new_generation`, and a stable `reason` (`remove_from_index`). Every cursor
+issued before the bump carries `previous_generation` and must be rejected;
+`new_generation` is the only generation a replay consumer may accept.
+
+`tests/testdata/index_generation_bumped_fixture.json` and
+`tests/event_replay.rs` pin the happy path (apply once, ignore exact replay),
+plus stale-generation and malformed-reason failures. The schema is documented
+as `IndexGenerationBumpedPayload` in `src/events.rs`. No new `#[contractevent]`
+or ABI entrypoint is introduced, so subgraph parity tables stay unchanged.
+
+Wave operator risk: dropping this signal makes dashboards resume with stale
+cursors after a removal and silently skip or duplicate registry rows. Treat a
+generation change as a full cursor reset.
+

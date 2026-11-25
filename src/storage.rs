@@ -2995,6 +2995,72 @@ mod pending_reverify_tests {
         });
     }
 
+    /// limit == 0 selects DEFAULT_PAGE_LIMIT (20), not an unbounded scan.
+    /// Registering DEFAULT_PAGE_LIMIT + 5 flagged users proves the default
+    /// page is exactly 20 and that the next page continues at offset 20.
+    #[test]
+    fn test_pending_reverify_page_zero_limit_uses_default_page_limit() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        let total = DEFAULT_PAGE_LIMIT + 5;
+        for i in 0..total {
+            let username = alloc::format!("user{i:03}");
+            register_flagged(&env, &contract_id, &username, &Address::generate(&env));
+        }
+
+        env.as_contract(&contract_id, || {
+            let first = get_pending_reverify_page(&env, 0, 0).unwrap();
+            assert_eq!(first.len(), DEFAULT_PAGE_LIMIT);
+            assert_eq!(first.get(0).unwrap(), name(&env, "user000"));
+            assert_eq!(first.get(DEFAULT_PAGE_LIMIT - 1).unwrap(), name(&env, "user019"));
+
+            let second = get_pending_reverify_page(&env, DEFAULT_PAGE_LIMIT, 0).unwrap();
+            assert_eq!(second.len(), 5);
+            assert_eq!(second.get(0).unwrap(), name(&env, "user020"));
+        });
+    }
+
+    /// limit == MAX_PAGE_LIMIT is accepted; the page may be shorter than the
+    /// cap when fewer users are flagged. Keep the fixture below the host's
+    /// 100-ledger-entry footprint limit.
+    #[test]
+    fn test_pending_reverify_page_max_limit_is_accepted() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        for i in 0..25 {
+            let username = alloc::format!("max{i:03}");
+            register_flagged(&env, &contract_id, &username, &Address::generate(&env));
+        }
+        env.as_contract(&contract_id, || {
+            let page = get_pending_reverify_page(&env, 0, MAX_PAGE_LIMIT).unwrap();
+            assert_eq!(page.len(), 25);
+            assert_eq!(page.get(0).unwrap(), name(&env, "max000"));
+            assert_eq!(page.get(24).unwrap(), name(&env, "max024"));
+            assert!(get_pending_reverify_page(&env, MAX_PAGE_LIMIT, MAX_PAGE_LIMIT).unwrap().is_empty());
+        });
+    }
+
+    /// Over-limit fails deterministically before scanning, both on an empty
+    /// and a populated registry; no partial page or state can escape.
+    #[test]
+    fn test_pending_reverify_page_over_limit_fails_before_scanning() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        assert_eq!(
+            env.as_contract(&contract_id, || get_pending_reverify_page(&env, 0, MAX_PAGE_LIMIT + 1)),
+            Err(ContractError::InvalidBatchSize)
+        );
+
+        register_flagged(&env, &contract_id, "alice", &Address::generate(&env));
+        assert_eq!(
+            env.as_contract(&contract_id, || get_pending_reverify_page(&env, 0, u32::MAX)),
+            Err(ContractError::InvalidBatchSize)
+        );
+        env.as_contract(&contract_id, || {
+            assert!(get_pending_reverify(&env, &name(&env, "alice")));
+        });
+    }
+
     /// Hostile page boundaries stay bounded: zero uses the default cap, an
     /// offset beyond the index returns empty, and an oversized limit fails
     /// before scanning (Issue #757).

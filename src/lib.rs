@@ -3498,6 +3498,10 @@ impl TrustBridgeContract {
     ///   `limit > MAX_PAGE_LIMIT` (`100`).
     /// - [`ContractError::NetworkMismatch`] (code `30`, `Fatal`) if the
     ///   stored network tag differs from the executing ledger's network ID.
+    ///
+    /// Operator note (Issue #853): flagged users stay in the registry index and
+    /// in every paginated export walk; this endpoint only projects the flag,
+    /// so Wave parity checks remain valid while users are pending reverify.
     pub fn get_pending_reverify(
         env: Env,
         offset: u32,
