@@ -953,6 +953,7 @@ their own `Env`.
 
 1. **Pick the partition**:
    - **Instance**: Use for singleton state (admin address, pause flag, network ID, etc.). No TTL, no per-entry context.
+     *Important*: All instance keys share a single 64 KiB entry. Never place unbounded collections (such as user lists) in instance storage.
    - **Persistent**: Use for per-entry data (registrations, roles, pending operations). TTL-managed; requires a context type (username, address, etc.).
 
 2. **Pick a unique symbol**:
@@ -972,16 +973,23 @@ their own `Env`.
    - Persistent keys reusing an existing discriminator: **Never**. Each persistent namespace must have a unique discriminator.
    - If in doubt, see `docs/STORAGE_KEYS.md` § Key Namespace Diagram.
 
-5. **Document before committing**:
+5. **Measure footprint & verify growth budget**:
+   - Measure serialized XDR byte size (`to_xdr(env).len()`) under worst-case inputs.
+   - Check against the 64 KiB instance storage ceiling or Wave rent budgets.
+   - For keys tracked by CI budgets, add or update the `max_bytes` entry in `docs/STORAGE_FOOTPRINT.md`.
+   - Follow the complete contributor checklist in [STORAGE_FOOTPRINT.md](STORAGE_FOOTPRINT.md#contributor-checklist-for-adding-instance-and-persistent-keys).
+
+6. **Document before committing**:
    - Add a row to the appropriate table in `docs/STORAGE_KEYS.md`.
    - Add a row to the "Complete Key Inventory" section.
    - Run `make storage-keys-check` to confirm both tables are consistent.
-   - If persistent, update the TTL behavior table.
+   - If persistent, update the TTL behavior table in `docs/STORAGE_KEYS.md` and `docs/STORAGE_RENT.md`.
    - Link the issue or feature in the "Purpose" column if applicable.
 
-6. **Update tests**:
+7. **Update tests & run CI storage gates**:
    - Add a test to `tests/storage_keys_collision.rs` (see below) to verify the key is stored/read correctly.
    - If the key participates in a workflow, add an integration test to `tests/integration.rs`.
+   - Run `make storage-check` (runs `storage-keys-check`, `storage-footprint-check`, `storage-rent-check`, `storage-rent-estimator`).
 
 ### Collision detection automation
 

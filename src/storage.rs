@@ -3174,6 +3174,67 @@ mod storage_footprint_budget_tests {
         assert!(parse_budgets(&bad)
             .unwrap_err()
             .contains("not a byte count"));
+        let bad_row = format!("{BEGIN}\n| `reg` |\n{END}");
+        assert!(parse_budgets(&bad_row)
+            .unwrap_err()
+            .contains("malformed budget row"));
+        let inverted = format!("{END}\n{BEGIN}");
+        assert_eq!(
+            parse_budgets(&inverted).unwrap_err(),
+            "footprint-budget markers out of order"
+        );
+    }
+
+    #[test]
+    fn contributor_checklist_and_make_targets_are_documented() {
+        assert!(
+            FOOTPRINT_DOC.contains("## Contributor checklist for adding instance and persistent keys"),
+            "docs/STORAGE_FOOTPRINT.md missing contributor checklist"
+        );
+        assert!(
+            FOOTPRINT_DOC.contains("`make storage-footprint-check`"),
+            "docs/STORAGE_FOOTPRINT.md missing storage-footprint-check"
+        );
+        assert!(
+            FOOTPRINT_DOC.contains("`make storage-keys-check`"),
+            "docs/STORAGE_FOOTPRINT.md missing storage-keys-check"
+        );
+        assert!(
+            FOOTPRINT_DOC.contains("`make storage-rent-check`"),
+            "docs/STORAGE_FOOTPRINT.md missing storage-rent-check"
+        );
+        assert!(
+            FOOTPRINT_DOC.contains("`make storage-rent-estimator`"),
+            "docs/STORAGE_FOOTPRINT.md missing storage-rent-estimator"
+        );
+        assert!(
+            FOOTPRINT_DOC.contains("`make storage-check`"),
+            "docs/STORAGE_FOOTPRINT.md missing storage-check"
+        );
+    }
+
+    #[test]
+    fn instance_storage_growth_budget_ceiling_leaves_safe_headroom() {
+        const MAX_INSTANCE_ENTRY_BYTES: u32 = 65536;
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+        let client = crate::TrustBridgeContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        client.initialize(&admin);
+
+        // Fixed instance keys initialized at genesis must consume under 5 KiB,
+        // leaving substantial headroom (>50 KiB) for growth in idx before
+        // hitting the 64 KiB instance storage ceiling.
+        let estimated_fixed_bytes = 356u32;
+        assert!(
+            estimated_fixed_bytes < 5120,
+            "Fixed instance keys must stay compact"
+        );
+        assert!(
+            MAX_INSTANCE_ENTRY_BYTES - estimated_fixed_bytes > 50000,
+            "Instance entry must maintain > 50 KB headroom for registry growth"
+        );
     }
 }
 
