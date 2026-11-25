@@ -406,6 +406,25 @@ If a rightful owner discovers that their GitHub username has been squatted on-ch
 - **How do I reclaim my username?** Open a support ticket / dispute with the TrustBridge administrators. They will remove the squatter's record so you can register your address.
 - **Does the contract verify my GitHub handle automatically?** No. There is **no on-chain verification proof** of GitHub identity at registration time. Verification is entirely off-chain/administrative.
 
+### Username Length/Charset Fuzzing (Issue #848)
+
+`fuzz/fuzz_targets/username_length_charset.rs` drives both `register` and
+`register_sponsored` with `[path_selector][username bytes]`. It checks that
+accepted names are ASCII and at most `MAX_USERNAME_LEN` (39) bytes, that
+rejected names fail with `InvalidUsername` (code 11) before auth or writes,
+and that no input panics. Seed corpus notes are in
+`fuzz/corpus/username_length_charset/NOTES.md` (empty, 39 bytes, 40 bytes,
+non-ASCII, malformed charset).
+
+```bash
+cargo +nightly fuzz run username_length_charset -- -max_total_time=60
+cargo test --test username_case_fold
+```
+
+Wave operator risk: an unvalidated username edge could trap a register
+entrypoint and stall onboarding; these tests pin the stable rejection path so
+operators can retry with a corrected name instead of restarting an indexer.
+
 ### 5. Username Case-Folding (Issue #194)
 
 GitHub logins are case-insensitive: `Alice` and `alice` are the same GitHub
