@@ -65,13 +65,21 @@ The contract uses **two independent storage partitions** in Soroban, each with d
 When introducing a new storage key, **new contributors** should:
 
 1. **Choose a partition**: Instance (singleton, no TTL) or persistent (per-entry, TTL-managed)?
+   - *Instance storage note*: All instance keys share a single 64 KiB entry. Never place unbounded collections in instance storage.
 2. **Pick a context type**: None (instance), or `String` (username), `Address` (account), `u32` (index), etc.?
 3. **Reserve a symbol**: Pick a short unique name (`symbol_short!("new_key")`).
 4. **Check collision-free**:
    - Run `make storage-keys-check` to verify your constant is documented.
    - If persistent, ensure your discriminator doesn't duplicate an existing one.
    - If reusing a context type, review the namespace diagram above — your discriminator must differ from all others using that type.
-5. **Document** in the tables below and this diagram.
+5. **Measure footprint & check growth budget**:
+   - Measure serialized XDR byte size (`value.to_xdr(env).len()`) under worst-case inputs.
+   - For instance keys, confirm the key does not blow the 64 KiB instance ceiling or crowd out registry scaling.
+   - For growing keys, add/update the budget row in `docs/STORAGE_FOOTPRINT.md` and run `make storage-footprint-check`.
+   - See the full checklist in [STORAGE_FOOTPRINT.md](STORAGE_FOOTPRINT.md#contributor-checklist-for-adding-instance-and-persistent-keys).
+6. **Document** in the tables below and this diagram.
+7. **Run CI gate checks**:
+   - `make storage-check` (or `make storage-keys-check`, `make storage-footprint-check`, `make storage-rent-check`, `make storage-rent-estimator`).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md#storage-key-best-practices) for the full workflow.
 
@@ -336,4 +344,6 @@ When adding a new storage key:
    Run `make storage-keys-check` (CI fails otherwise).
 2. If the key uses a new discriminator symbol, verify it does not match any existing persistent discriminator.
 3. If the key uses a new context type, verify it cannot serialize to the same bytes as an existing context type for any valid input.
-4. Update this document and link it from [ARCHITECTURE.md](ARCHITECTURE.md) and [ABI.md](ABI.md).
+4. Follow the contributor checklist in [STORAGE_FOOTPRINT.md](STORAGE_FOOTPRINT.md#contributor-checklist-for-adding-instance-and-persistent-keys): measure serialized XDR footprint and verify instance/persistent budgets (`make storage-footprint-check`).
+5. Run the full storage verification gate: `make storage-check`.
+6. Update this document and link it from [ARCHITECTURE.md](ARCHITECTURE.md) and [ABI.md](ABI.md).

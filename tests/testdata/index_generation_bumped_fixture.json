@@ -1,0 +1,30 @@
+{
+  "_comment": [
+    "Issue #850: index generation bump payloads that invalidate Wave cursors.",
+    "Replay of an identical delivery must be ignored; a stale generation or a",
+    "payload missing new_generation must be rejected, not silently applied."
+  ],
+  "network_id": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472",
+  "contract_id": "CDTRUSTBRIDGEEXAMPLECONTRACTID000000000000000000000000AAAA",
+  "deliveries": [
+    {
+      "event_type": "index_generation_bumped_event",
+      "previous_generation": 0,
+      "new_generation": 1,
+      "reason": "remove_from_index",
+      "ledger_sequence": 1004000,
+      "tx_hash": "f1f2f3f4f5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      "event_index": 0
+    },
+    {
+      "_note": "exact replay on reconnect",
+      "event_type": "index_generation_bumped_event",
+      "previous_generation": 0,
+      "new_generation": 1,
+      "reason": "remove_from_index",
+      "ledger_sequence": 1004000,
+      "tx_hash": "f1f2f3f4f5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+      "event_index": 0
+    }
+  ]
+}

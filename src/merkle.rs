@@ -78,6 +78,33 @@
 //! membership — a verifier needs the leaf's plaintext fields (username,
 //! address, verified flag) and a sibling-hash path, exactly like any
 //! standard Merkle proof.
+//!
+//! ## Mid-export flag changes and Wave audit restart semantics
+//!
+//! `leaf_hash` binds `(username, stellar_address, verified)` and deliberately
+//! excludes `PENDING_REVERIFY_KEY` (`pend_rev`) and `ContributorRecord::is_bot`:
+//!
+//! - **Pure reverify-flag or `is_bot` writes:** Changing only `pend_rev` or
+//!   `is_bot` does not alter any leaf hash or page `merkle_root`.
+//! - **In-place verification / address-change flips between pages:** Operations
+//!   that flip `pending_reverify` along with `record.verified` or
+//!   `record.stellar_address` (`register` / `register_sponsored` address change,
+//!   `execute_address_rotation`, `verify`, `batch_verify`,
+//!   `verify_with_oracle_proof`, `revoke_verification`) update the record in
+//!   place **without** bumping `INDEX_GEN_KEY`. Outstanding cursors remain
+//!   valid and each `ExportPage::merkle_root` accurately commits to the records
+//!   returned on that page at its read ledger.
+//! - **Wave audit restart requirement:** Multi-page cursor walks are not
+//!   snapshot-isolated across ledgers. If a flag flips on a record after its
+//!   page was read (or between pages), stitching the pages produces a
+//!   mixed-epoch export whose combined root can differ from a single-shot
+//!   snapshot, and pre-flip proofs fail against post-flip roots (and vice
+//!   versa). Operators running whole-registry Wave audits must pause writes for
+//!   the export window or detect mid-export drift (via `get_last_event_ledger()`,
+//!   `get_stats()`, or `export_attestation().ledger`) and **restart from
+//!   `cursor = None`**. Index-shifting mutations (`remove`, `batch_remove`,
+//!   `complete_challenge`, `rename`) bump `INDEX_GEN_KEY` and enforce restart
+//!   directly with `ContractError::InvalidCursor`.
 
 use soroban_sdk::{Bytes, BytesN, Env, String, Vec};
 
@@ -641,6 +668,64 @@ mod tests {
         assert_eq!(
             leaf_a, manual,
             "leaf_hash must produce SHA256(LEAF_DOMAIN || username || 0x00 || strkey || verified_byte)"
+        );
+    }
+
+    #[test]
+    fn test_is_bot_flag_flip_does_not_alter_leaf_or_root() {
+        let env = Env::default();
+        let addr = Address::generate(&env);
+        let u = String::from_str(&env, "botuser");
+
+        let mut human_rec = rec(&env, &addr, true);
+        human_rec.is_bot = false;
+        let mut bot_rec = rec(&env, &addr, true);
+        bot_rec.is_bot = true;
+
+        let mut page_human: Vec<(String, ContributorRecord)> = Vec::new(&env);
+        page_human.push_back((u.clone(), human_rec));
+        let mut page_bot: Vec<(String, ContributorRecord)> = Vec::new(&env);
+        page_bot.push_back((u, bot_rec));
+
+        assert_eq!(
+            root_of_records(&env, &page_human),
+            root_of_records(&env, &page_bot),
+            "is_bot is outside the v1 leaf encoding and must not alter page roots"
+        );
+    }
+
+    #[test]
+    fn test_pre_flip_leaf_and_mixed_epoch_stitched_root_fail_snapshot_parity() {
+        let env = Env::default();
+        let addr_alice = Address::generate(&env);
+        let addr_bob = Address::generate(&env);
+        let alice = String::from_str(&env, "alice");
+        let bob = String::from_str(&env, "bob");
+
+        let mut pre_flip_records: Vec<(String, ContributorRecord)> = Vec::new(&env);
+        pre_flip_records.push_back((alice.clone(), rec(&env, &addr_alice, true)));
+        pre_flip_records.push_back((bob.clone(), rec(&env, &addr_bob, false)));
+        let pre_root = root_of_records(&env, &pre_flip_records);
+
+        // Simulate alice flipping verified -> false (reverify pending) after page 1,
+        // while bob on page 2 also flips verified -> true before page 2 is read.
+        let mut post_flip_records: Vec<(String, ContributorRecord)> = Vec::new(&env);
+        post_flip_records.push_back((alice.clone(), rec(&env, &addr_alice, false)));
+        post_flip_records.push_back((bob.clone(), rec(&env, &addr_bob, true)));
+        let post_root = root_of_records(&env, &post_flip_records);
+
+        // Mixed-epoch stitch: alice from pre-flip page 1 + bob from post-flip page 2.
+        let mut mixed_records: Vec<(String, ContributorRecord)> = Vec::new(&env);
+        mixed_records.push_back((alice.clone(), rec(&env, &addr_alice, true)));
+        mixed_records.push_back((bob.clone(), rec(&env, &addr_bob, true)));
+        let mixed_root = root_of_records(&env, &mixed_records);
+
+        assert_ne!(mixed_root, pre_root);
+        assert_ne!(mixed_root, post_root);
+        assert_ne!(
+            leaf_hash(&env, &alice, &addr_alice, true),
+            leaf_hash(&env, &alice, &addr_alice, false),
+            "stale pre-flip leaf must not match post-flip leaf"
         );
     }
 }

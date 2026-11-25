@@ -252,6 +252,206 @@ fn test_integration_bot_status_read() {
     });
 }
 
+// ── Verify rate limit reset on ledger rollover (Issue #292) ────────────────
+
+#[test]
+fn test_verify_rate_limit_resets_on_new_ledger() {
+    let (env, admin, user1, _user2, contract_id) = setup_test_env();
+    let verifier = Address::generate(&env);
+
+    // Set up: Create a verifier role and register users
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+        // Set a low rate limit for testing
+        TrustBridgeContract::set_verify_limit(env.clone(), 2).unwrap();
+        
+        // Register test users
+        for i in 1..=5 {
+            let user = Address::generate(&env);
+            let name = format!("user{}", i);
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, &name),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+        }
+    });
+
+    // Verifier can verify up to the limit (2) in current ledger
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(env.clone(), verifier.clone(), s(&env, "user1")).unwrap();
+        TrustBridgeContract::verify(env.clone(), verifier.clone(), s(&env, "user2")).unwrap();
+        
+        // Third verify in same ledger should hit rate limit
+        let result = TrustBridgeContract::verify(env.clone(), verifier.clone(), s(&env, "user3"));
+        assert_eq!(result, Err(ContractError::VerifyRateLimited));
+    });
+
+    // Move to next ledger
+    env.ledger().set_sequence_number(env.ledger().sequence() + 1);
+
+    // Rate limit should reset - verifier can verify again
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(env.clone(), verifier.clone(), s(&env, "user3")).unwrap();
+        TrustBridgeContract::verify(env.clone(), verifier.clone(), s(&env, "user4")).unwrap();
+        
+        // Should hit limit again after 2 verifies in new ledger
+        let result = TrustBridgeContract::verify(env.clone(), verifier.clone(), s(&env, "user5"));
+        assert_eq!(result, Err(ContractError::VerifyRateLimited));
+    });
+}
+
+#[test]
+fn test_revoke_verification_rate_limit_resets_on_new_ledger() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+    let revoker = Address::generate(&env);
+
+    // Set up: Create revoker role and register + verify users
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_role(env.clone(), revoker.clone(), Role::Revoker).unwrap();
+        // Set a low rate limit for testing
+        TrustBridgeContract::set_verify_limit(env.clone(), 2).unwrap();
+        
+        // Register and verify test users
+        for i in 1..=5 {
+            let user = Address::generate(&env);
+            let name = format!("user{}", i);
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, &name),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+            TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, &name)).unwrap();
+        }
+    });
+
+    // Revoker can revoke up to the limit (2) in current ledger
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::revoke_verification(env.clone(), revoker.clone(), s(&env, "user1"), 1).unwrap();
+        TrustBridgeContract::revoke_verification(env.clone(), revoker.clone(), s(&env, "user2"), 1).unwrap();
+        
+        // Third revoke in same ledger should hit rate limit
+        let result = TrustBridgeContract::revoke_verification(env.clone(), revoker.clone(), s(&env, "user3"), 1);
+        assert_eq!(result, Err(ContractError::VerifyRateLimited));
+    });
+
+    // Move to next ledger
+    env.ledger().set_sequence_number(env.ledger().sequence() + 1);
+
+    // Rate limit should reset - revoker can revoke again
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::revoke_verification(env.clone(), revoker.clone(), s(&env, "user3"), 1).unwrap();
+        TrustBridgeContract::revoke_verification(env.clone(), revoker.clone(), s(&env, "user4"), 1).unwrap();
+        
+        // Should hit limit again after 2 revokes in new ledger
+        let result = TrustBridgeContract::revoke_verification(env.clone(), revoker.clone(), s(&env, "user5"), 1);
+        assert_eq!(result, Err(ContractError::VerifyRateLimited));
+    });
+}
+
+#[test]
+fn test_admin_bypass_verify_rate_limit() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+
+    // Set a low rate limit
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_verify_limit(env.clone(), 1).unwrap();
+        
+        // Register many test users
+        for i in 1..=10 {
+            let user = Address::generate(&env);
+            let name = format!("user{}", i);
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, &name),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+        }
+    });
+
+    // Admin should bypass rate limit and verify all users in same ledger
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        for i in 1..=10 {
+            let name = format!("user{}", i);
+            TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, &name)).unwrap();
+        }
+        
+        // All 10 users should be verified despite limit of 1
+        assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 10);
+    });
+}
+
+#[test]
+fn test_batch_verify_rate_limit_resets_on_new_ledger() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+    let verifier = Address::generate(&env);
+
+    // Set up: Create verifier role
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_role(env.clone(), verifier.clone(), Role::Verifier).unwrap();
+        // Set limit to 3 (batch of 2 will fit, batch of 2 again will exceed)
+        TrustBridgeContract::set_verify_limit(env.clone(), 3).unwrap();
+        
+        // Register test users
+        for i in 1..=6 {
+            let user = Address::generate(&env);
+            let name = format!("user{}", i);
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, &name),
+                user.clone(),
+                Vec::new(&env),
+            )
+            .unwrap();
+        }
+    });
+
+    // Verifier can batch verify 2 users (under limit of 3)
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let mut batch = Vec::new(&env);
+        batch.push_back(s(&env, "user1"));
+        batch.push_back(s(&env, "user2"));
+        TrustBridgeContract::batch_verify(env.clone(), verifier.clone(), batch).unwrap();
+        
+        // Second batch of 2 would put us at 4 total, exceeding limit of 3
+        let mut batch2 = Vec::new(&env);
+        batch2.push_back(s(&env, "user3"));
+        batch2.push_back(s(&env, "user4"));
+        let result = TrustBridgeContract::batch_verify(env.clone(), verifier.clone(), batch2);
+        assert_eq!(result, Err(ContractError::VerifyRateLimited));
+    });
+
+    // Move to next ledger
+    env.ledger().set_sequence_number(env.ledger().sequence() + 1);
+
+    // Rate limit should reset - verifier can batch verify again
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        let mut batch = Vec::new(&env);
+        batch.push_back(s(&env, "user3"));
+        batch.push_back(s(&env, "user4"));
+        TrustBridgeContract::batch_verify(env.clone(), verifier.clone(), batch).unwrap();
+        
+        assert_eq!(TrustBridgeContract::get_verified_count(env.clone()), 4);
+    });
+}
+
 // ── Public page privacy redaction (Issue #627) ──────────────────────────────
 
 #[test]
@@ -1687,11 +1887,17 @@ fn test_attest_upgrade_overwrites_previous_attestation() {
 /// After `clear_attestation` the getter returns `None`.
 #[test]
 fn test_clear_attestation_removes_it() {
-    let (env, _admin, _user1, _user2, contract_id) = setup_test_env();
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
     env.ledger().set_timestamp(1_000);
 
     env.mock_all_auths();
     env.as_contract(&contract_id, || {
+        trustbridge_contract::TrustBridgeContract::set_attestation_required(
+            env.clone(),
+            admin.clone(),
+            true,
+        )
+        .unwrap();
         trustbridge_contract::TrustBridgeContract::attest_upgrade(
             env.clone(),
             make_hash(&env, 0xCC),
@@ -1710,6 +1916,97 @@ fn test_clear_attestation_removes_it() {
             trustbridge_contract::TrustBridgeContract::get_attestation(env.clone()).is_none(),
             "attestation must be absent after clear_attestation"
         );
+        assert!(
+            trustbridge_contract::TrustBridgeContract::get_attestation_required(env.clone()),
+            "clearing an attestation must not disable the required-attestation policy"
+        );
+    });
+}
+
+/// The required-attestation flag is opt-in and admin enable/disable changes
+/// round-trip through the public getter.
+#[test]
+fn test_get_attestation_required_defaults_false_and_admin_round_trip() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.as_contract(&contract_id, || {
+        assert!(
+            !TrustBridgeContract::get_attestation_required(env.clone()),
+            "a newly initialized contract must default to optional attestation"
+        );
+    });
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        assert!(TrustBridgeContract::get_attestation_required(env.clone()));
+    });
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), false).unwrap();
+    });
+    env.as_contract(&contract_id, || {
+        assert!(!TrustBridgeContract::get_attestation_required(env.clone()));
+    });
+}
+
+/// The admin can update and read the policy during normal and emergency
+/// pauses without changing either pause state.
+#[test]
+fn test_attestation_required_policy_is_available_while_paused() {
+    let (env, admin, _user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::pause(env.clone(), 1).unwrap();
+    });
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::emergency_pause(env.clone(), admin.clone()).unwrap();
+    });
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::set_attestation_required(env.clone(), admin.clone(), true).unwrap();
+        assert!(TrustBridgeContract::get_attestation_required(env.clone()));
+        assert!(TrustBridgeContract::is_paused(env.clone()));
+        assert!(TrustBridgeContract::is_emergency_paused(env.clone()));
+    });
+}
+
+/// Explicit non-admin callers are rejected and cannot change the stored flag.
+#[test]
+fn test_non_admin_cannot_set_attestation_required() {
+    let (env, _admin, user1, _user2, contract_id) = setup_test_env();
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::set_attestation_required(env.clone(), user1.clone(), true),
+            Err(ContractError::NotAuthorized)
+        );
+        assert!(!TrustBridgeContract::get_attestation_required(env.clone()));
+    });
+}
+
+/// The setter returns the initialization guard before changing configuration.
+#[test]
+fn test_set_attestation_required_requires_initialization() {
+    let env = Env::default();
+    let caller = Address::generate(&env);
+    let contract_id = env.register(TrustBridgeContract, ());
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::set_attestation_required(env.clone(), caller.clone(), true),
+            Err(ContractError::NotInitialized)
+        );
+        assert!(!TrustBridgeContract::get_attestation_required(env.clone()));
     });
 }
 
