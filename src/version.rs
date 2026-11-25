@@ -5,6 +5,24 @@
 //! version is written to instance storage by `initialize` and exposed through
 //! the `version` and `is_compatible` contract functions, which the generated
 //! TypeScript bindings package uses to guard against ABI drift.
+//!
+//! # Migration step registry (Issue #858)
+//!
+//! A new storage-layout migration must be registered in
+//! `docs/ARCHITECTURE.md` with this template (one row per step):
+//!
+//! ```text
+//! | Step | From → To | Idempotency key | Operator action | Automated test |
+//! |---|---|---|---|---|
+//! | <step-id> | <x.y.z> → <a.b.c> | <storage key / guard> | <runbook or none> | src/version.rs::<test> |
+//! ```
+//!
+//! `From → To` is strictly forward; equal/lower targets are rejected by
+//! `needs_migration` / `CompatibilityInfo::for_upgrade`. The idempotency key
+//! names the exact storage condition checked before writes. `Operator action`
+//! points to `docs/ADMIN_RUNBOOK.md` or is `none`. Each row links to a test
+//! covering the happy path and at least one failure path; see
+//! `docs/CONTRIBUTING.md` and `docs/ARCHITECTURE.md`.
 
 /// Contract version information.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]

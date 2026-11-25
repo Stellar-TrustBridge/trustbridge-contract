@@ -271,6 +271,38 @@ fn test_network_mismatch_unpause() {
     );
 }
 
+/// `set_paused(true, ..)` on a mismatched network must return `NetworkMismatch`.
+#[test]
+fn test_network_mismatch_set_paused() {
+    let (_env_a, env_b, _admin, _user, contract_id) = setup_cross_network();
+
+    env_b.mock_all_auths();
+    let result = env_b.as_contract(&contract_id, || {
+        TrustBridgeContract::set_paused(env_b.clone(), true, 1)
+    });
+    assert_eq!(
+        result,
+        Err(ContractError::NetworkMismatch),
+        "set_paused must fail with NetworkMismatch on wrong network"
+    );
+}
+
+/// `set_paused(false, ..)` on a mismatched network must return `NetworkMismatch`.
+#[test]
+fn test_network_mismatch_set_paused_unpause_path() {
+    let (_env_a, env_b, _admin, _user, contract_id) = setup_cross_network();
+
+    env_b.mock_all_auths();
+    let result = env_b.as_contract(&contract_id, || {
+        TrustBridgeContract::set_paused(env_b.clone(), false, 4)
+    });
+    assert_eq!(
+        result,
+        Err(ContractError::NetworkMismatch),
+        "set_paused(false) must fail with NetworkMismatch on wrong network"
+    );
+}
+
 /// `set_role` on a mismatched network must return `NetworkMismatch`.
 #[test]
 fn test_network_mismatch_set_role() {
@@ -370,6 +402,22 @@ fn test_network_mismatch_emergency_pause() {
         result,
         Err(ContractError::NetworkMismatch),
         "emergency_pause must fail with NetworkMismatch on wrong network"
+    );
+}
+
+/// `clear_emergency_pause` on a mismatched network must return `NetworkMismatch`.
+#[test]
+fn test_network_mismatch_clear_emergency_pause() {
+    let (_env_a, env_b, _admin, _user, contract_id) = setup_cross_network();
+
+    env_b.mock_all_auths();
+    let result = env_b.as_contract(&contract_id, || {
+        TrustBridgeContract::clear_emergency_pause(env_b.clone())
+    });
+    assert_eq!(
+        result,
+        Err(ContractError::NetworkMismatch),
+        "clear_emergency_pause must fail with NetworkMismatch on wrong network"
     );
 }
 

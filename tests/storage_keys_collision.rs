@@ -121,6 +121,83 @@ fn test_instance_keys_are_unique() {
 
 // ── Persistent key discriminator uniqueness ──────────────────────────────────
 
+/// Symbol constants declared in source but missing from the CI inventory doc.
+/// Mirrors the loop in `test_persistent_key_discriminators_are_unique` so the
+/// failure path can be exercised with a synthetic new key (Issue #773).
+fn undocumented_symbol_constants<'a>(source: &'a str, doc: &str) -> std::vec::Vec<&'a str> {
+    let mut missing = std::vec::Vec::new();
+    for line in source.lines() {
+        if !line.contains("const") {
+            continue;
+        }
+        let Some(name) = line
+            .split("const ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .map(|n| n.trim_end_matches(':'))
+            .filter(|n| source.contains(&format!("const {n}: Symbol")))
+        else {
+            continue;
+        };
+        if !doc.contains(&format!("`{name}`")) {
+            missing.push(name);
+        }
+    }
+    missing
+}
+
+/// Failure path: a new `Symbol` constant reusing an existing literal would
+/// make two logical keys read/write each other's data. CI must reject it.
+#[test]
+fn test_new_symbol_colliding_with_existing_literal_is_detected() {
+    let sample = r#"
+pub const REG_KEY: Symbol = symbol_short!("reg");
+pub const NEW_REG_KEY: Symbol = symbol_short!("reg");
+"#;
+    let symbols = declared_symbol_literals(sample);
+    assert_eq!(symbols, vec!["reg", "reg"]);
+
+    let mut seen = std::collections::HashSet::new();
+    let collision = symbols.iter().find(|sym| !seen.insert(**sym));
+    assert_eq!(collision, Some(&"reg"), "CI must reject a duplicate symbol");
+}
+
+/// Failure path: adding a new Symbol constant without documenting it in
+/// STORAGE_KEYS.md must fail the inventory check with the constant name.
+#[test]
+fn test_new_undocumented_symbol_is_detected() {
+    let sample = "pub const NEW_WAVE_KEY: Symbol = symbol_short!(\"wave_new\");\n";
+    let missing = undocumented_symbol_constants(sample, STORAGE_KEYS_DOC);
+    assert_eq!(
+        missing,
+        vec!["NEW_WAVE_KEY"],
+        "CI must name the undocumented Symbol constant"
+    );
+    assert!(undocumented_symbol_constants(STORAGE_SRC, STORAGE_KEYS_DOC).is_empty());
+}
+
+/// CI narrative is pinned in docs: contributors must be able to find the
+/// checks and their meaning from the test source and the module map.
+#[test]
+fn test_ci_narrative_is_documented_for_new_symbol_keys() {
+    let architecture = include_str!("../docs/ARCHITECTURE.md");
+    let contributing = include_str!("../docs/CONTRIBUTING.md");
+    for doc in [STORAGE_KEYS_DOC, architecture, contributing] {
+        assert!(
+            doc.contains("storage-keys-check"),
+            "CI inventory command must be documented"
+        );
+    }
+    assert!(
+        STORAGE_KEYS_DOC.contains("ARCHITECTURE.md"),
+        "CI narrative must link the module map"
+    );
+    assert!(
+        architecture.contains("storage_keys_collision.rs"),
+        "module map must point at the collision test"
+    );
+}
+
 /// Verify that persistent key discriminators are unique at compile time.
 ///
 /// Persistent keys use `(Symbol, Context)` tuples. The discriminator (Symbol)
@@ -134,23 +211,11 @@ fn test_persistent_key_discriminators_are_unique() {
     // Mirrors `scripts/check_storage_keys.sh`: every Symbol constant in
     // src/storage.rs must be documented in docs/STORAGE_KEYS.md by name
     // (backticked), and the prior test covers literal uniqueness.
-    for line in STORAGE_SRC.lines() {
-        if !line.contains("const") {
-            continue;
-        }
-        let Some(name) = line
-            .split("const ")
-            .nth(1)
-            .and_then(|rest| rest.split_whitespace().next())
-            .filter(|n| STORAGE_SRC.contains(&format!("const {n}: Symbol")))
-        else {
-            continue;
-        };
-        assert!(
-            STORAGE_KEYS_DOC.contains(&format!("`{name}`")),
-            "Symbol constant {name} not documented in docs/STORAGE_KEYS.md"
-        );
-    }
+    let missing = undocumented_symbol_constants(STORAGE_SRC, STORAGE_KEYS_DOC);
+    assert!(
+        missing.is_empty(),
+        "Symbol constants not documented in docs/STORAGE_KEYS.md: {missing:?}"
+    );
 }
 
 // ── Happy path: registration storage and retrieval ────────────────────────────

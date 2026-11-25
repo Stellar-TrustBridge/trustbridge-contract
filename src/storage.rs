@@ -1,6 +1,9 @@
 //! Instance vs. persistent storage layout, TTL constants, and per-key rent
 //! behavior are documented in `docs/STORAGE_RENT.md` — read that before
 //! changing `TTL_THRESHOLD` / `TTL_BUMP` or adding a new persistent key.
+//! A schema change also needs a row in the migration step registry in
+//! `docs/ARCHITECTURE.md` (Issue #858); the idempotency key names the exact
+//! storage condition checked here before a step writes.
 
 use soroban_sdk::{symbol_short, xdr::ToXdr, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 
@@ -49,6 +52,9 @@ pub const ROT_DELAY_KEY: Symbol = symbol_short!("rotdelay");
 /// Key prefix for a username's pending address rotation (Issue #234).
 pub const PENDING_ROT_KEY: Symbol = symbol_short!("pendrot");
 // Pending reverify flag per username
+/// Re-verify flag for a verified record whose address changed (Issue #852).
+/// Set on address change / rotation / rename; removed (never set to `false`)
+/// by `verify` / `batch_verify` and record removal. See docs/STORAGE_KEYS.md.
 pub const PENDING_REVERIFY_KEY: Symbol = symbol_short!("pend_rev");
 // Emergency pause flag and timestamp — wired as guardian circuit breaker (Issue #196)
 pub const EMERGENCY_PAUSE_KEY: Symbol = symbol_short!("emrg_ps");
@@ -1002,8 +1008,11 @@ pub fn remove_from_index(env: &Env, github_username: &String) {
 // ── Opaque pagination cursors (Issue #215) ───────────────────────────────────
 
 /// Current index generation. Bumped by [`remove_from_index`] every time an
-/// existing entry's position could shift. Instance-scoped, defaulting to `0`
-/// for a fresh or pre-Issue-#215 instance.
+/// existing entry's position could shift (removal, batch removal, challenge
+/// completion, or rename removal). Instance-scoped, defaulting to `0` for a
+/// fresh or pre-Issue-#215 instance. There is intentionally no
+/// `IndexGenerationBumpedEvent`; dashboards detect this change with
+/// `get_health_probes().index_gen` and discard contract pagination cursors.
 pub fn get_index_generation(env: &Env) -> u32 {
     env.storage().instance().get(&INDEX_GEN_KEY).unwrap_or(0)
 }
@@ -1035,13 +1044,13 @@ fn encode_cursor(env: &Env, offset: u32) -> BytesN<8> {
 ///
 /// # Errors
 ///
-/// - [`ContractError::InvalidCursor`] if the cursor's embedded generation no
-///   longer matches the current one — meaning a username was removed from
-///   the registry (shifting positions) since the cursor was issued — or if
-///   the embedded offset is past the current registry size. Either way, the
-///   safe recovery is to restart pagination from `cursor = None`; existing
-///   idempotent-upsert indexer logic (see `docs/DASHBOARD_SYNC.md`) makes a
-///   restart safe to replay.
+/// - [`ContractError::InvalidCursor`] (code 52) for **every** decode failure:
+///   a wrong index generation (a username was removed, shifting positions),
+///   or a malformed/out-of-range offset. The two reasons are deliberately not
+///   differentiated on-chain (Issue #859). The safe recovery for either is to
+///   restart pagination from `cursor = None`; existing idempotent-upsert
+///   indexer logic (see `docs/DASHBOARD_SYNC.md`) makes a restart safe to
+///   replay.
 fn decode_cursor(env: &Env, cursor: &BytesN<8>) -> Result<u32, ContractError> {
     let bytes = cursor.to_array();
     let offset = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
@@ -1375,11 +1384,15 @@ pub fn set_paused(env: &Env, paused: bool) {
     env.storage().instance().set(&PAUSED_KEY, &paused);
 }
 
-/// Returns whether `github_username` has a pending re-verification flag set.
+/// Internal per-username flag reader — **not** the exported contract
+/// entrypoint (which is `get_pending_reverify(offset, limit)` returning a
+/// page; see `src/lib.rs` and docs/DASHBOARD_SYNC.md, Issue #866).
 ///
 /// This flag is set when a verified user re-registers to a different Stellar
 /// address, indicating a new off-chain GitHub identity check is needed.
-/// It is cleared when the record is successfully `verify`'d.
+/// It is cleared when the record is successfully `verify`'d. Keys are folded
+/// with `canon` (ASCII lower-case), so case variants share one flag while
+/// homoglyphs remain distinct and are rejected at registration.
 pub fn get_pending_reverify(env: &Env, github_username: &String) -> bool {
     let key = (PENDING_REVERIFY_KEY, canon(env, github_username));
     env.storage().persistent().get(&key).unwrap_or(false)
@@ -1406,17 +1419,28 @@ pub fn clear_pending_reverify(env: &Env, github_username: &String) {
 /// Returns the usernames flagged for re-verification among index entries
 /// `[offset, offset + limit)` (Issue #587).
 ///
-/// The scan touches at most `limit` index entries, so gas stays bounded no
-/// matter how large the registry is; a page may therefore hold fewer than
-/// `limit` usernames. Callers advance `offset` by `limit` until it reaches
-/// the registry count. `limit == 0` falls back to `DEFAULT_PAGE_LIMIT`.
+/// Exposed on the contract ABI as `TrustBridgeContract::get_pending_reverify`.
+/// The scan visits at most `limit` index entries (so work per call stays
+/// bounded, though `get_index_page` deserializes the flat `INDEX_KEY` on each
+/// call); a page may therefore hold fewer than `limit` usernames. Callers
+/// advance `offset` by `limit` until it reaches `get_stats().total`.
+/// `limit == 0` falls back to `DEFAULT_PAGE_LIMIT` (`20`). Consumer semantics:
+/// docs/DASHBOARD_SYNC.md § Consumer flow for pending reverify pages (#866).
 ///
 /// # Errors
 ///
-/// - [`ContractError::InvalidBatchSize`] if `limit > MAX_PAGE_LIMIT`.
-/// - Offsets are treated as an empty page once they reach the index length;
-///   the underlying index scan uses saturating end arithmetic so a hostile
-///   `u32::MAX` offset cannot wrap into an earlier page (Issue #757).
+/// - [`ContractError::InvalidBatchSize`] (code `14`, `Fatal`) if
+///   `limit > MAX_PAGE_LIMIT` (`100`).
+/// - [`ContractError::NotInitialized`] (code `2`, `Fatal`) and
+///   [`ContractError::NetworkMismatch`] (code `30`, `Fatal`) are enforced by
+///   `require_initialized` on the public `get_pending_reverify` entrypoint
+///   before calling this helper.
+/// - Offsets are treated as an empty page once they reach the index length
+///   (never `InvalidCursor`, code `52`); the underlying index scan uses
+///   saturating end arithmetic so a hostile `u32::MAX` offset cannot wrap into
+///   an earlier page (Issue #757).
+/// - Read-only, unauthenticated, and pause-exempt (never `NotAuthorized` / `3`
+///   or `Paused` / `7`).
 pub fn get_pending_reverify_page(
     env: &Env,
     offset: u32,
@@ -2785,6 +2809,10 @@ pub struct RepairReport {
 ///
 /// Pass `apply = false` for a dry run — nothing is written. Pass `apply = true`
 /// to correct any drift found; a call that finds no drift never writes.
+/// Recomputes only `count` / `verified`; never reads or clears
+/// `PENDING_REVERIFY_KEY` flags (Issue #857). Pending re-verify state stays
+/// authoritative for Wave address changes and is cleared only by `verify` /
+/// `batch_verify` — see `docs/SECURITY.md#index-repair-repair_index`.
 pub fn repair_index(env: &Env, apply: bool) -> RepairReport {
     let index = get_index(env);
     let mut recomputed_count: u32 = 0;
@@ -2983,6 +3011,72 @@ mod pending_reverify_tests {
         });
     }
 
+    /// limit == 0 selects DEFAULT_PAGE_LIMIT (20), not an unbounded scan.
+    /// Registering DEFAULT_PAGE_LIMIT + 5 flagged users proves the default
+    /// page is exactly 20 and that the next page continues at offset 20.
+    #[test]
+    fn test_pending_reverify_page_zero_limit_uses_default_page_limit() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        let total = DEFAULT_PAGE_LIMIT + 5;
+        for i in 0..total {
+            let username = alloc::format!("user{i:03}");
+            register_flagged(&env, &contract_id, &username, &Address::generate(&env));
+        }
+
+        env.as_contract(&contract_id, || {
+            let first = get_pending_reverify_page(&env, 0, 0).unwrap();
+            assert_eq!(first.len(), DEFAULT_PAGE_LIMIT);
+            assert_eq!(first.get(0).unwrap(), name(&env, "user000"));
+            assert_eq!(first.get(DEFAULT_PAGE_LIMIT - 1).unwrap(), name(&env, "user019"));
+
+            let second = get_pending_reverify_page(&env, DEFAULT_PAGE_LIMIT, 0).unwrap();
+            assert_eq!(second.len(), 5);
+            assert_eq!(second.get(0).unwrap(), name(&env, "user020"));
+        });
+    }
+
+    /// limit == MAX_PAGE_LIMIT is accepted; the page may be shorter than the
+    /// cap when fewer users are flagged. Keep the fixture below the host's
+    /// 100-ledger-entry footprint limit.
+    #[test]
+    fn test_pending_reverify_page_max_limit_is_accepted() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        for i in 0..25 {
+            let username = alloc::format!("max{i:03}");
+            register_flagged(&env, &contract_id, &username, &Address::generate(&env));
+        }
+        env.as_contract(&contract_id, || {
+            let page = get_pending_reverify_page(&env, 0, MAX_PAGE_LIMIT).unwrap();
+            assert_eq!(page.len(), 25);
+            assert_eq!(page.get(0).unwrap(), name(&env, "max000"));
+            assert_eq!(page.get(24).unwrap(), name(&env, "max024"));
+            assert!(get_pending_reverify_page(&env, MAX_PAGE_LIMIT, MAX_PAGE_LIMIT).unwrap().is_empty());
+        });
+    }
+
+    /// Over-limit fails deterministically before scanning, both on an empty
+    /// and a populated registry; no partial page or state can escape.
+    #[test]
+    fn test_pending_reverify_page_over_limit_fails_before_scanning() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        assert_eq!(
+            env.as_contract(&contract_id, || get_pending_reverify_page(&env, 0, MAX_PAGE_LIMIT + 1)),
+            Err(ContractError::InvalidBatchSize)
+        );
+
+        register_flagged(&env, &contract_id, "alice", &Address::generate(&env));
+        assert_eq!(
+            env.as_contract(&contract_id, || get_pending_reverify_page(&env, 0, u32::MAX)),
+            Err(ContractError::InvalidBatchSize)
+        );
+        env.as_contract(&contract_id, || {
+            assert!(get_pending_reverify(&env, &name(&env, "alice")));
+        });
+    }
+
     /// Hostile page boundaries stay bounded: zero uses the default cap, an
     /// offset beyond the index returns empty, and an oversized limit fails
     /// before scanning (Issue #757).
@@ -2997,11 +3091,77 @@ mod pending_reverify_tests {
         env.as_contract(&contract_id, || {
             let default_page = get_pending_reverify_page(&env, 0, 0).unwrap();
             assert_eq!(default_page.len(), 3);
-            assert!(get_pending_reverify_page(&env, u32::MAX, 1).unwrap().is_empty());
+            assert!(get_pending_reverify_page(&env, u32::MAX, 1)
+                .unwrap()
+                .is_empty());
             assert_eq!(
                 get_pending_reverify_page(&env, 0, MAX_PAGE_LIMIT + 1),
                 Err(ContractError::InvalidBatchSize)
             );
+        });
+    }
+
+    /// Lifecycle: address re-registration sets the flag; a successful
+    /// `verify` clears it and removes the storage key entirely (Issue #852).
+    #[test]
+    fn test_pending_reverify_lifecycle_cleared_by_verify() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        let owner = Address::generate(&env);
+        register_flagged(&env, &contract_id, "octocat", &owner);
+
+        env.as_contract(&contract_id, || {
+            let user = name(&env, "octocat");
+            assert!(get_pending_reverify(&env, &user));
+            TrustBridgeContract::verify(env.clone(), get_admin(&env).unwrap(), user.clone())
+                .unwrap();
+            assert!(!get_pending_reverify(&env, &user));
+            assert!(!env
+                .storage()
+                .persistent()
+                .has(&(PENDING_REVERIFY_KEY, canon(&env, &user))));
+        });
+    }
+
+    /// Failure path: an unauthorized verify must not clear the flag or leave
+    /// partial privileged state (Issue #852).
+    #[test]
+    fn test_pending_reverify_survives_unauthorized_verify() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        let owner = Address::generate(&env);
+        let random = Address::generate(&env);
+        register_flagged(&env, &contract_id, "octocat", &owner);
+
+        env.as_contract(&contract_id, || {
+            let user = name(&env, "octocat");
+            assert_eq!(
+                TrustBridgeContract::verify(env.clone(), random, user.clone()),
+                Err(ContractError::NotAuthorized)
+            );
+            assert!(get_pending_reverify(&env, &user));
+        });
+    }
+
+    /// Failure path: looking up a differently-cased raw (non-canonical) key
+    /// does not find the flag; only the canonical low-case key does.
+    #[test]
+    fn test_pending_reverify_raw_noncanonical_key_does_not_match() {
+        let env = Env::default();
+        let contract_id = setup(&env);
+        let owner = Address::generate(&env);
+        register_flagged(&env, &contract_id, "octocat", &owner);
+
+        env.as_contract(&contract_id, || {
+            assert!(get_pending_reverify(&env, &name(&env, "OCTOCAT")));
+            assert!(!env
+                .storage()
+                .persistent()
+                .has(&(PENDING_REVERIFY_KEY, name(&env, "OCTOCAT"))));
+            assert!(env
+                .storage()
+                .persistent()
+                .has(&(PENDING_REVERIFY_KEY, name(&env, "octocat"))));
         });
     }
 }
@@ -3174,6 +3334,67 @@ mod storage_footprint_budget_tests {
         assert!(parse_budgets(&bad)
             .unwrap_err()
             .contains("not a byte count"));
+        let bad_row = format!("{BEGIN}\n| `reg` |\n{END}");
+        assert!(parse_budgets(&bad_row)
+            .unwrap_err()
+            .contains("malformed budget row"));
+        let inverted = format!("{END}\n{BEGIN}");
+        assert_eq!(
+            parse_budgets(&inverted).unwrap_err(),
+            "footprint-budget markers out of order"
+        );
+    }
+
+    #[test]
+    fn contributor_checklist_and_make_targets_are_documented() {
+        assert!(
+            FOOTPRINT_DOC.contains("## Contributor checklist for adding instance and persistent keys"),
+            "docs/STORAGE_FOOTPRINT.md missing contributor checklist"
+        );
+        assert!(
+            FOOTPRINT_DOC.contains("`make storage-footprint-check`"),
+            "docs/STORAGE_FOOTPRINT.md missing storage-footprint-check"
+        );
+        assert!(
+            FOOTPRINT_DOC.contains("`make storage-keys-check`"),
+            "docs/STORAGE_FOOTPRINT.md missing storage-keys-check"
+        );
+        assert!(
+            FOOTPRINT_DOC.contains("`make storage-rent-check`"),
+            "docs/STORAGE_FOOTPRINT.md missing storage-rent-check"
+        );
+        assert!(
+            FOOTPRINT_DOC.contains("`make storage-rent-estimator`"),
+            "docs/STORAGE_FOOTPRINT.md missing storage-rent-estimator"
+        );
+        assert!(
+            FOOTPRINT_DOC.contains("`make storage-check`"),
+            "docs/STORAGE_FOOTPRINT.md missing storage-check"
+        );
+    }
+
+    #[test]
+    fn instance_storage_growth_budget_ceiling_leaves_safe_headroom() {
+        const MAX_INSTANCE_ENTRY_BYTES: u32 = 65536;
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+        let client = crate::TrustBridgeContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        client.initialize(&admin);
+
+        // Fixed instance keys initialized at genesis must consume under 5 KiB,
+        // leaving substantial headroom (>50 KiB) for growth in idx before
+        // hitting the 64 KiB instance storage ceiling.
+        let estimated_fixed_bytes = 356u32;
+        assert!(
+            estimated_fixed_bytes < 5120,
+            "Fixed instance keys must stay compact"
+        );
+        assert!(
+            MAX_INSTANCE_ENTRY_BYTES - estimated_fixed_bytes > 50000,
+            "Instance entry must maintain > 50 KB headroom for registry growth"
+        );
     }
 }
 

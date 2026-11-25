@@ -477,3 +477,140 @@ fn test_set_role_with_expiry_rejects_zero_address() {
     assert_eq!(f.client.get_role(&zero), None);
     assert_eq!(f.client.get_role_expiry(&zero), None);
 }
+
+// ── Pending grant boundaries (Issue #855) ──
+
+#[test]
+fn test_pending_grant_activation_boundary() {
+    let f = setup();
+    let target = Address::generate(&f.env);
+    f.client.set_role_delay(&DELAY);
+    f.client.set_role(&target, &Role::Verifier);
+    let pending = f.client.get_pending_role(&target).unwrap();
+    assert_eq!(pending.activate_at, NOW + DELAY);
+
+    advance_to(&f.env, pending.activate_at - 1);
+    assert_eq!(
+        f.client.try_activate_role(&target),
+        Err(Ok(ContractError::RoleGrantNotReady))
+    );
+    assert_eq!(f.client.get_pending_role(&target), Some(pending.clone()));
+    assert_eq!(f.client.get_role(&target), None);
+
+    advance_to(&f.env, pending.activate_at);
+    assert_eq!(f.client.get_pending_role(&target), Some(pending));
+    assert_eq!(f.client.get_role(&target), None);
+    f.client.activate_role(&target);
+    assert_eq!(f.client.get_pending_role(&target), None);
+    assert_eq!(f.client.get_role(&target), Some(Role::Verifier));
+    assert_eq!(f.client.get_role_expiry(&target), None);
+    f.client.verify(&target, &f.octocat);
+    assert_eq!(
+        f.client.try_activate_role(&target),
+        Err(Ok(ContractError::NoPendingRoleGrant))
+    );
+}
+
+#[test]
+fn test_pending_grant_remains_queued_after_timelock_until_explicit_action() {
+    let f = setup();
+    let activate = Address::generate(&f.env);
+    let cancel = Address::generate(&f.env);
+    f.client.set_role_delay(&DELAY);
+    for target in [&activate, &cancel] {
+        f.client.set_role(target, &Role::Verifier);
+    }
+
+    advance_to(&f.env, NOW + DELAY + 1);
+    for target in [&activate, &cancel] {
+        assert_eq!(
+            f.client.get_pending_role(target).unwrap().activate_at,
+            NOW + DELAY
+        );
+        assert_eq!(f.client.get_role(target), None);
+        assert_eq!(
+            f.client.try_verify(target, &f.octocat),
+            Err(Ok(ContractError::NotAuthorized))
+        );
+    }
+
+    f.client.cancel_role_grant(&cancel);
+    assert_eq!(f.client.get_pending_role(&cancel), None);
+    assert_eq!(
+        f.client.try_activate_role(&cancel),
+        Err(Ok(ContractError::NoPendingRoleGrant))
+    );
+    assert_eq!(f.client.get_role(&cancel), None);
+
+    f.client.activate_role(&activate);
+    assert_eq!(f.client.get_pending_role(&activate), None);
+    assert_eq!(f.client.get_role(&activate), Some(Role::Verifier));
+}
+
+#[test]
+fn test_pending_grant_does_not_extend_expiring_active_role() {
+    let f = setup();
+    let target = Address::generate(&f.env);
+    let expires_at = NOW + DELAY;
+    f.client
+        .set_role_with_expiry(&target, &Role::Verifier, &Some(expires_at));
+    f.client.set_role_delay(&DELAY);
+    f.client.set_role(&target, &Role::Verifier);
+
+    advance_to(&f.env, expires_at - 1);
+    assert_eq!(f.client.get_role(&target), Some(Role::Verifier));
+    assert_eq!(f.client.get_role_expiry(&target), Some(expires_at));
+
+    advance_to(&f.env, expires_at);
+    assert_eq!(f.client.get_role(&target), None);
+    assert!(!f.client.has_role(&target, &Role::Verifier));
+    assert_eq!(
+        f.client.try_verify(&target, &f.octocat),
+        Err(Ok(ContractError::RoleExpired))
+    );
+    assert_eq!(
+        f.client.get_pending_role(&target).unwrap().activate_at,
+        expires_at
+    );
+
+    f.client.cancel_role_grant(&target);
+    assert_eq!(f.client.get_pending_role(&target), None);
+    assert_eq!(f.client.get_role_expiry(&target), Some(expires_at));
+    advance_to(&f.env, expires_at + 1);
+    assert_eq!(
+        f.client.try_activate_role(&target),
+        Err(Ok(ContractError::NoPendingRoleGrant))
+    );
+    assert_eq!(f.client.get_role(&target), None);
+    assert!(!f.client.get_address(&f.octocat).unwrap().verified);
+}
+
+#[test]
+fn test_pending_grant_boundary_preserves_pause_and_admin_auth() {
+    let f = setup();
+    let target = Address::generate(&f.env);
+    f.client.set_role_delay(&DELAY);
+    f.client.set_role(&target, &Role::Verifier);
+    let pending = f.client.get_pending_role(&target).unwrap();
+
+    advance_to(&f.env, pending.activate_at);
+    f.client.pause(&1);
+    assert_eq!(
+        f.client.try_activate_role(&target),
+        Err(Ok(ContractError::Paused))
+    );
+    assert_eq!(f.client.get_pending_role(&target), Some(pending.clone()));
+    assert_eq!(f.client.get_role(&target), None);
+    f.client.unpause(&1);
+
+    f.env.set_auths(&[]);
+    assert!(f.client.try_activate_role(&target).is_err());
+    assert!(f.client.try_cancel_role_grant(&target).is_err());
+    assert_eq!(f.client.get_pending_role(&target), Some(pending));
+    assert_eq!(f.client.get_role(&target), None);
+
+    f.env.mock_all_auths();
+    f.client.activate_role(&target);
+    assert_eq!(f.client.get_pending_role(&target), None);
+    assert_eq!(f.client.get_role(&target), Some(Role::Verifier));
+}

@@ -23,7 +23,13 @@
 //! `attestation_required` is configured.  `require_staged_wasm_consistent`
 //! therefore also enforces the attestation gate (fail-closed) so that any
 //! caller routing through the staged slot cannot bypass the peer-path check.
-//! The gate is a no-op when `attestation_required` is unset.
+//! The gate is a no-op when `attestation_required` is unset. The multisig
+//! `propose_multisig_upgrade` path applies the same guard before writing a
+//! proposal, so neither proposing nor executing can bypass the policy
+//! (Issue #851). When enabling it on a live Wave, follow the operator checklist in
+//! [`docs/ADMIN_RUNBOOK.md`](../docs/ADMIN_RUNBOOK.md#set_attestation_required--require-pre-declared-hashes):
+//! stage/attest the hash first, monitor upgrade failures, and know the
+//! disable criteria before flipping the flag.
 //!
 //! ## Storage
 //!
