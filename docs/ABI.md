@@ -1208,7 +1208,8 @@ A well-formed signature that does not verify traps the invocation.
 ### `get_pending_reverify(offset: u32, limit: u32) -> Result<Vec<String>, ContractError>`
 
 Lists canonical GitHub usernames flagged for re-verification after an address
-change (`PENDING_REVERIFY_KEY`, Issue #587).
+change (`PENDING_REVERIFY_KEY`, Issue #587). Dashboard consumer flow and event
+hooks: [DASHBOARD_SYNC.md § Consumer flow for pending reverify pages](DASHBOARD_SYNC.md#consumer-flow-for-pending-reverify-pages-issue-866).
 
 | | |
 |---|---|
@@ -2414,35 +2415,17 @@ struct AdminTransferProposal {
 
 ## Pending Re-verification Functions (Issue #208)
 
-### `get_pending_reverify(github_username: String) -> Result<bool, ContractError>`
+There is a single exported read, documented canonically at
+[`get_pending_reverify(offset, limit)`](#get_pending_reverifyoffset-u32-limit-u32---resultvecstring-contracterror).
+There is **no** `get_pending_reverify(github_username) -> bool` entrypoint and
+no `get_pending_reverify_page` entrypoint (Issue #866 corrected this drift).
+The per-username `get_pending_reverify(env, &String) -> bool` in `src/storage.rs`
+is a crate-internal helper, not ABI.
 
-Returns whether `github_username` has a pending re-verification flag.
-
-The flag is set automatically when a verified user re-registers to a different
-Stellar address, invalidating their prior verification. It is cleared once
-the record is `verify`'d again. Returns `false` for unknown usernames and
-removed users. Works while the contract is paused.
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Mutates** | No |
-| **Errors** | `NotInitialized` |
-
-### `get_pending_reverify_page(offset: u32, limit: u32) -> Result<Vec<String>, ContractError>`
-
-Returns a page of usernames that have a pending re-verification flag set.
-`limit` is capped at `MAX_PAGE_LIMIT` (100). Works while the contract is paused.
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Mutates** | No |
-| **Errors** | `NotInitialized` |
-
-**Dashboard sync note:** Poll this endpoint to discover which contributors need
-a fresh off-chain GitHub identity check after an address change. See
-[DASHBOARD_SYNC.md § Pending Re-verification](DASHBOARD_SYNC.md#pending-re-verification-issue-208).
+**Dashboard sync note:** Poll the paginated endpoint to discover which
+contributors need a fresh off-chain GitHub identity check after an address
+change. Consumer flow, sparse-page loop, event hooks, and failure codes:
+[DASHBOARD_SYNC.md § Consumer flow for pending reverify pages](DASHBOARD_SYNC.md#consumer-flow-for-pending-reverify-pages-issue-866).
 
 ---
 
