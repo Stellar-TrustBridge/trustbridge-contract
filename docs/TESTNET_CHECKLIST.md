@@ -31,31 +31,115 @@ Before sharing a testnet deployment, confirm the full registry lifecycle. Run ev
    ```bash
    make invoke-init
    ```
-6. **Register** a sample GitHub username with a test Stellar address.
+6. **Prime oracle allowlist** (Issue #4) for Wave verification demos.
+   
+   **Why this matters**: Unprimed oracle allowlists block `verify_with_oracle_proof`
+   calls during Wave demos, causing `OracleProofNotAllowlisted` (error code 59)
+   failures even when the proof signature is valid.
+   
+   **Symptoms if skipped**:
+   - `verify_with_oracle_proof` returns `OracleProofNotAllowlisted` for all proofs
+   - `get_oracle_allowlist` returns an empty vector
+   - Wave GitHub action verification step fails with "oracle not allowlisted"
+   - Dashboard verification UI shows "Oracle service unavailable"
+   
+   **Priming steps**:
+   
+   a. **Generate or obtain the oracle Ed25519 public key** (32 bytes, hex-encoded).
+      If you're running a local test oracle, generate a keypair:
+      ```bash
+      # Example: use stellar-cli or any Ed25519 tool
+      # This is a placeholder — replace with your actual oracle pubkey
+      export ORACLE_PUBKEY="b33a1d32b1dc1d65220284a99b5304c2e1ba7da589c579dec4f693f766085aa6"
+      ```
+   
+   b. **Set the oracle allowlist** via the contract's `set_oracle_allowlist` function.
+      Only the admin can call this:
+      ```bash
+      stellar contract invoke \
+        --id $CONTRACT_ID \
+        --source-account admin \
+        --network testnet \
+        --send=yes \
+        -- set_oracle_allowlist \
+        --admin $ADMIN \
+        --pubkeys "[$ORACLE_PUBKEY]"
+      ```
+      
+      The `pubkeys` argument is a JSON array of 32-byte hex strings. For multiple
+      oracles, pass: `["<key1>", "<key2>"]`.
+   
+   c. **Verify the allowlist** was set correctly:
+      ```bash
+      stellar contract invoke \
+        --id $CONTRACT_ID \
+        --source-account deployer \
+        --network testnet \
+        -- get_oracle_allowlist
+      ```
+      Expected output: `["b33a1d32b1dc1d65220284a99b5304c2e1ba7da589c579dec4f693f766085aa6"]`
+      (or whichever pubkeys you configured).
+   
+   d. **Test oracle proof verification** (optional but recommended):
+      ```bash
+      # This requires a valid OracleProof struct signed by an allowlisted key.
+      # See src/oracle_proof.rs for the message format and signature construction.
+      stellar contract invoke \
+        --id $CONTRACT_ID \
+        --source-account deployer \
+        --network testnet \
+        -- verify_with_oracle_proof \
+        --github-username testuser \
+        --stellar-address G... \
+        --proof <OracleProof JSON>
+      ```
+      If the proof is valid and the oracle key is allowlisted, this succeeds.
+      Otherwise, check the error code:
+      - `OracleProofNotAllowlisted` (59): pubkey not in allowlist → repeat step 6b
+      - `OracleProofExpired` (60): proof `expires_at` has passed → regenerate proof
+      - `OracleProofBadSignature` (61): signature invalid → check message encoding
+      - `AddressMismatch` (62): proof message not bound to this username/address
+   
+   **Testnet vs production oracle keys**: Use separate Ed25519 keypairs for testnet
+   and mainnet oracles. Never reuse a testnet oracle key on mainnet — if the testnet
+   key is compromised (logs, debug output, leaked .env), it cannot compromise mainnet
+   verifications.
+   
+   **Rotating oracle keys**: Call `set_oracle_allowlist` again with the new pubkey(s).
+   The call **replaces** the entire allowlist (it does not append), so include any
+   keys you want to keep. Revoked keys are removed by omitting them from the new list.
+   
+   **Related docs**:
+   - `src/oracle_proof.rs` — OracleProof struct, message format, verification logic
+   - `docs/ABI.md § OracleProof` — API signature and error codes
+   - `docs/SECURITY.md § Oracle proof verification` — threat model and key management
+   - `docs/ADMIN_RUNBOOK.md § Oracle allowlist rotation` — operator recipes
+   
+7. **Register** a sample GitHub username with a test Stellar address.
    ```bash
    make invoke-register GITHUB_USER=testuser STELLAR_ADDR=G... SOURCE=deployer
    ```
-7. **Look up** the registered username to confirm the record is correct.
+8. **Look up** the registered username to confirm the record is correct.
    ```bash
    make invoke-lookup GITHUB_USER=testuser SOURCE=deployer
    ```
-8. **Verify** the sample contributor as admin.
+9. **Verify** the sample contributor as admin.
    ```bash
    make invoke-verify GITHUB_USER=testuser SOURCE=admin CONTRACT_ID=$CONTRACT_ID
    ```
-9. **Check stats** to confirm the verified count incremented.
+10. **Check stats** to confirm the verified count incremented.
    ```bash
    make invoke-stats SOURCE=deployer CONTRACT_ID=$CONTRACT_ID
    ```
-10. **Revoke** verification to confirm the admin can unwrap a verified record.
+11. **Revoke** verification to confirm the admin can unwrap a verified record.
    ```bash
    make invoke-revoke-verification GITHUB_USER=testuser SOURCE=admin CONTRACT_ID=$CONTRACT_ID
    ```
-11. **Remove** the sample registration (admin or registrant).
+12. **Remove** the sample registration (admin or registrant).
     ```bash
     make invoke-remove CALLER=$ADMIN GITHUB_USER=testuser SOURCE=admin CONTRACT_ID=$CONTRACT_ID
     ```
-12. **Confirm** lookup returns empty for the removed username.
+13. **Confirm** lookup returns empty for the removed username.
     ```bash
     make invoke-lookup GITHUB_USER=testuser SOURCE=deployer CONTRACT_ID=$CONTRACT_ID
     ```

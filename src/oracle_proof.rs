@@ -28,6 +28,9 @@ use crate::error::ContractError;
 /// Instance storage key for the oracle pubkey allowlist.
 const ORACLE_ALLOWLIST_KEY: Symbol = symbol_short!("oraclepk");
 
+/// Maximum post-expiry clock skew accepted against ledger time, in seconds.
+const PROOF_CLOCK_SKEW_SECS: u64 = 30;
+
 /// A signed attestation from an off-chain oracle, covering `message`.
 ///
 /// Canonical `message` construction (e.g. binding a specific
@@ -44,8 +47,8 @@ pub struct OracleProof {
     pub message: Bytes,
     /// Ed25519 signature over `message`, produced by `oracle_pubkey`.
     pub signature: BytesN<64>,
-    /// Unix timestamp after which this proof is rejected. `0` disables the
-    /// expiry check — production callers should always set a real value.
+    /// Signed Unix expiry timestamp; ledger time may exceed it by at most
+    /// 30 seconds. `0` disables expiry and is not recommended in production.
     pub expires_at: u64,
 }
 
@@ -60,9 +63,7 @@ pub fn set_oracle_allowlist(env: &Env, admin: &Address, pubkeys: Vec<BytesN<32>>
     admin.require_auth();
     let previous_count = get_oracle_allowlist(env).len();
     let new_count = pubkeys.len();
-    env.storage()
-        .instance()
-        .set(&ORACLE_ALLOWLIST_KEY, &pubkeys);
+    env.storage().instance().set(&ORACLE_ALLOWLIST_KEY, &pubkeys);
     crate::events::OracleAllowlistRotatedEvent {
         admin: admin.clone(),
         previous_count,
@@ -91,7 +92,7 @@ pub fn get_oracle_allowlist(env: &Env) -> Vec<BytesN<32>> {
 /// - [`ContractError::OracleProofNotAllowlisted`] if `oracle_pubkey` is not
 ///   on the allowlist, or the allowlist is empty.
 /// - [`ContractError::OracleProofExpired`] if `expires_at != 0` and the
-///   current ledger timestamp is past it.
+///   ledger timestamp exceeds it by more than `PROOF_CLOCK_SKEW_SECS`.
 /// - [`ContractError::OracleProofBadSignature`] if the signature is
 ///   well-formed but does not verify over `message` under `oracle_pubkey`.
 ///
@@ -110,7 +111,9 @@ pub fn verify_with_proof(env: &Env, proof: &OracleProof) -> Result<(), ContractE
         return Err(ContractError::OracleProofNotAllowlisted);
     }
 
-    if proof.expires_at != 0 && env.ledger().timestamp() > proof.expires_at {
+    if proof.expires_at != 0
+        && env.ledger().timestamp().saturating_sub(proof.expires_at) > PROOF_CLOCK_SKEW_SECS
+    {
         return Err(ContractError::OracleProofExpired);
     }
 
@@ -207,8 +210,8 @@ fn is_zero_signature(sig: &BytesN<64>) -> bool {
 fn is_valid_signature_shape(sig: &BytesN<64>) -> bool {
     let bytes = sig.to_array();
     const L: [u8; 32] = [
-        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde,
-        0xf9, 0xde, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+        0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde,
+        0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
     ];
     let mut i = 32;
     while i > 0 {
@@ -377,6 +380,64 @@ mod tests {
     }
 
     #[test]
+    fn proof_clock_skew_boundaries() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+            let proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
+                message: Bytes::from_array(&env, &MESSAGE),
+                signature: BytesN::from_array(&env, &VALID_SIG),
+                expires_at: 1_700_000_000,
+            };
+            for now in [1_699_999_999, 1_700_000_000, 1_700_000_029, 1_700_000_030] {
+                env.ledger().set_timestamp(now);
+                assert_eq!(verify_with_proof(&env, &proof), Ok(()));
+            }
+            for now in [1_700_000_031, 1_700_000_500] {
+                env.ledger().set_timestamp(now);
+                assert_eq!(
+                    verify_with_proof(&env, &proof),
+                    Err(ContractError::OracleProofExpired)
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn proof_clock_skew_handles_timestamp_extremes() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+        env.as_contract(&contract_id, || {
+            let mut allowlist = Vec::new(&env);
+            allowlist.push_back(BytesN::from_array(&env, &ORACLE_PUBKEY));
+            set_oracle_allowlist(&env, &admin, allowlist);
+            let mut proof = OracleProof {
+                oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
+                message: Bytes::from_array(&env, &MESSAGE),
+                signature: BytesN::from_array(&env, &VALID_SIG),
+                expires_at: u64::MAX - 1,
+            };
+            env.ledger().set_timestamp(u64::MAX);
+            assert_eq!(verify_with_proof(&env, &proof), Ok(()));
+            proof.expires_at = 1;
+            assert_eq!(
+                verify_with_proof(&env, &proof),
+                Err(ContractError::OracleProofExpired)
+            );
+            proof.expires_at = 0;
+            assert_eq!(verify_with_proof(&env, &proof), Ok(()));
+        });
+    }
+
+    #[test]
     fn bad_layout_is_rejected_with_layout_code() {
         let env = Env::default();
         env.mock_all_auths();
@@ -472,8 +533,8 @@ mod tests {
             let mut high_s = VALID_SIG;
             // S == the Ed25519 group order is noncanonical (canonical is S < L).
             high_s[32..].copy_from_slice(&[
-                0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2,
-                0xde, 0xf9, 0xde, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+                0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde,
+                0xf9, 0xde, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
             ]);
             let proof = OracleProof {
                 oracle_pubkey: BytesN::from_array(&env, &ORACLE_PUBKEY),
@@ -481,7 +542,10 @@ mod tests {
                 signature: BytesN::from_array(&env, &high_s),
                 expires_at: 0,
             };
-            assert_eq!(verify_with_proof(&env, &proof), Err(ContractError::OracleProofBadSignature));
+            assert_eq!(
+                verify_with_proof(&env, &proof),
+                Err(ContractError::OracleProofBadSignature)
+            );
         });
     }
 
@@ -516,6 +580,7 @@ mod tests {
         use soroban_sdk::testutils::Events as _;
 
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = setup(&env);
         let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
 
@@ -527,7 +592,7 @@ mod tests {
 
         let events = env.events().all();
         assert!(
-            !events.is_empty(),
+            !events.filter_by_contract(&contract_id).events().is_empty(),
             "set_oracle_allowlist must emit OracleAllowlistRotatedEvent"
         );
     }
@@ -536,10 +601,11 @@ mod tests {
     #[should_panic]
     fn allowlist_rotation_without_admin_auth_panics() {
         let env = Env::default();
-        let contract_id = env.register(crate::TrustBridgeContract, ());
-        let admin = Address::generate(&env);
+        env.mock_all_auths();
+        let contract_id = setup(&env);
+        let admin = env.as_contract(&contract_id, || crate::storage::get_admin(&env).unwrap());
+        env.set_auths(&[]);
         env.as_contract(&contract_id, || {
-            crate::TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
             let allowlist = Vec::new(&env);
             set_oracle_allowlist(&env, &admin, allowlist);
         });

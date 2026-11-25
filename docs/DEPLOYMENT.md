@@ -236,6 +236,87 @@ expected to fail fast until the contract is unpaused.
 This mode is an operator procedure, not a new ABI surface, so it does not
 change the public contract interface.
 
+## Failed WASM Apply Rollback / Forward-Fix
+
+If a WASM upgrade is applied but post-upgrade health checks fail, treat the
+contract as potentially unsafe for writes until the operator confirms a
+rollback or forward-fix path. Do **not** silently retry with a different hash.
+
+### Immediate containment
+
+1. **Pause writes**. Call `set_paused(true, reason_code)` (or `pause`) from the
+   admin so mutating paths fail closed with `Paused` while reads remain
+   available for triage.
+2. **Capture provenance and attestation state** before changing anything else:
+   ```bash
+   stellar contract invoke --id $CONTRACT_ID --network $NETWORK -- get_provenance
+   stellar contract invoke --id $CONTRACT_ID --network $NETWORK -- get_attestation
+   stellar contract invoke --id $CONTRACT_ID --network $NETWORK -- get_health
+   stellar contract invoke --id $CONTRACT_ID --network $NETWORK -- get_version
+   ```
+   Record the current WASM hash, expected previous hash, attestation state,
+   ledger/time, and failing health symptoms.
+3. **Confirm the failure mode**. Distinguish a bad WASM apply (new code active,
+   health checks failing) from an operator/RPC failure (upgrade not actually
+   applied). Use `get_provenance`, `get_version`, and contract health probes.
+
+### Rollback
+
+Soroban contract code can be replaced by another admin-authorized upgrade, but
+state is preserved. A rollback is a forward upgrade to a known-good WASM hash.
+
+1. Select the last known-good WASM hash from release records / `wasm-hash.pin`
+   / prior provenance.
+2. Rehearse the candidate hash on testnet/futurenet against a snapshot-shaped
+   state where possible.
+3. If attestation is required, publish a fresh attestation for the known-good
+   hash with `attest_upgrade`.
+4. Execute `upgrade` to the known-good hash while the contract remains paused.
+5. Re-run post-upgrade checks: `get_provenance`, `get_health`,
+   `get_health_probes`, `get_attestation_required`, `get_version`, and a sample
+   register/verify round-trip on non-production or a controlled test account.
+6. Only after checks pass, unpause with `set_paused(false, reason_code)`.
+
+### Forward-fix
+
+Use forward-fix when rollback is unsafe (for example, new state/schema changes
+are incompatible with the previous binary) or the known-good hash has its own
+risk.
+
+1. Keep the contract paused.
+2. Build and review a fixed WASM from the pinned toolchain; record its hash.
+3. Stage/attest the fixed hash as required by policy.
+4. Apply upgrade to the fixed hash.
+5. Run the same post-upgrade verification queries before unpausing.
+6. If the fix cannot be produced quickly, keep paused and escalate.
+
+### Communication template
+
+```text
+[TrustBridge Contract Incident]
+Network: <testnet|mainnet>
+Contract: <CONTRACT_ID>
+Status: <paused|unpaused>
+Impact: <writes blocked / verification unavailable / etc.>
+Detected: <UTC timestamp / ledger>
+Applied WASM hash: <hash>
+Previous known-good hash: <hash>
+Health check failure: <command + observed result>
+Current action: <pause/rollback/forward-fix>
+Next update ETA: <UTC timestamp>
+Operator contact: <name/channel>
+```
+
+### Operator checklist
+
+- [ ] Writes paused (`Paused` / `is_paused` confirmed)
+- [ ] Provenance, attestation, version, and health captured
+- [ ] Known-good or fixed WASM hash identified and reviewed
+- [ ] Upgrade rehearsed where feasible
+- [ ] Post-upgrade verification queries passed
+- [ ] Stakeholders notified with communication template
+- [ ] Incident notes include hashes, commands, and outcome
+
 ---
 
 ## Bulk Verify CLI

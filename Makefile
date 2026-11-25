@@ -41,7 +41,7 @@ FUTURENET_FRIENDBOT_URL ?= https://friendbot-futurenet.stellar.org
 FUTURENET_IDENTITY ?= $(SOURCE)
 FUTURENET_DRY_RUN ?= false
 
-.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser soak-cursor soak-register-verify storage-keys-check storage-footprint-check storage-rent-check storage-rent-estimator storage-rent-estimator-golden bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-batch-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
+.PHONY: help build build-legacy test test-homoglyph test-rehearsal fuzz fuzz-parser soak-cursor soak-register-verify storage-check storage-keys-check storage-footprint-check storage-rent-check storage-rent-estimator storage-rent-estimator-golden bindings-golden bench bench-export bench-username bench-double-verify bench-register-budget bench-batch-register-budget bench-budget-ci bench-update-samples fmt lint docs docs-check abi check ci clean \
         wasm-hash-pin wasm-hash-update wasm-hash-pin-test \
         deploy-testnet deploy-mainnet bindings bindings-build invoke-version require-contract-id \
         invoke-register invoke-lookup invoke-init invoke-stats install-target invoke-extend-ttl \
@@ -116,6 +116,8 @@ storage-rent-estimator: ## Check the storage rent estimator golden output + inva
 
 storage-rent-estimator-golden: ## Regenerate scripts/testdata/storage-rent-estimator.golden.txt (review the diff; see docs/CONTRIBUTING.md)
 	UPDATE_GOLDEN=1 bash scripts/test_storage_rent_estimator.sh
+
+storage-check: storage-keys-check storage-footprint-check storage-rent-check storage-rent-estimator ## Run all storage key, footprint budget, and rent checks (Issue #762)
 
 bindings-golden: ## Verify the get_address simulate golden fixture (UPDATE_GOLDEN=1 to regenerate)
 	cargo test --test bindings_golden -- --nocapture

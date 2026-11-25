@@ -39,10 +39,26 @@ use soroban_sdk::contracterror;
 /// which would have made an off-chain consumer decode `InvalidPauseReason` as
 /// `ChallengeAlreadyActive`.
 ///
+/// # Pending re-verification pagination (`get_pending_reverify`) error codes
+///
+/// Wave clients polling `get_pending_reverify(offset, limit)` (backed by
+/// `storage::get_pending_reverify_page`) can encounter exactly three
+/// [`ContractError`] codes, all classified as [`ErrorCategory::Fatal`]:
+///
+/// - **`2` (`NotInitialized`)** — contract has not been initialized.
+/// - **`14` (`InvalidBatchSize`)** — `limit > MAX_PAGE_LIMIT` (`100`). Note:
+///   `limit == 0` falls back to `DEFAULT_PAGE_LIMIT` (`20`) and does not error.
+/// - **`30` (`NetworkMismatch`)** — ledger `network_id` differs from the
+///   recorded network tag (checked by `require_initialized`).
+///
+/// `get_pending_reverify` requires no auth (never `NotAuthorized` / `3`), works
+/// while paused (never `Paused` / `7`), and uses offset pagination rather than
+/// opaque cursors (`offset >= total` returns `Ok([])`, never `InvalidCursor` / `52`).
+///
 /// | Code | Variant | Raised by |
 /// |------|---------|-----------|
 /// | 1 | `AlreadyInitialized` | `initialize` |
-/// | 2 | `NotInitialized` | any function called before `initialize` |
+/// | 2 | `NotInitialized` | any gated function called before `initialize` (including `get_pending_reverify`) |
 /// | 3 | `NotAuthorized` | `remove`, `verify`, `revoke_verification`, role functions |
 /// | 4 | `NotRegistered` | `remove`, `verify`, `revoke_verification` |
 /// | 5 | `AlreadyVerified` | `verify` |
@@ -54,7 +70,7 @@ use soroban_sdk::contracterror;
 /// | 11 | `InvalidUsername` | `register` |
 /// | 12 | `AttestationExpired` | `attest_upgrade`, `upgrade` |
 /// | 13 | `UnattestedWasm` | `upgrade` |
-/// | 14 | `InvalidBatchSize` | `batch_verify`, `batch_remove` |
+/// | 14 | `InvalidBatchSize` | `batch_verify`, `batch_remove`, `extend_registry_ttl`, `get_pending_reverify` (`limit > MAX_PAGE_LIMIT`) |
 /// | 15 | `InvalidReasonCode` | `revoke_verification` |
 /// | 16 | `ZeroAddress` | `register` |
 /// | 17 | `ChallengeAlreadyActive` | `open_challenge` |
@@ -70,7 +86,7 @@ use soroban_sdk::contracterror;
 /// | 27 | `AdminTransferDelayActive` | `accept_admin` |
 /// | 28 | `NoPendingAdminTransfer` | `accept_admin`, `cancel_admin_transfer` |
 /// | 29 | `AttestationRequired` | `upgrade` |
-/// | 30 | `NetworkMismatch` | `initialize`, `require_initialized` (Issue #231 / #401) |
+/// | 30 | `NetworkMismatch` | `initialize`, `require_initialized` (incl. `get_pending_reverify`; Issue #231 / #401) |
 /// | 31 | `VerifierAllowlistFull` | `add_verifier` |
 /// | 32 | `VerifierNotAllowlisted` | `remove_verifier` |
 /// | 33 | `VerifierExpiryInPast` | `add_verifier` |
@@ -135,8 +151,9 @@ pub enum ContractError {
     /// `upgrade` was called with a WASM hash that does not match the live
     /// attestation.
     UnattestedWasm = 13,
-    /// A batch call (e.g. `extend_registry_ttl`) was given zero or more items
-    /// than `batch::BatchConfig::max_batch_size` allows.
+    /// A batch call (e.g. `extend_registry_ttl`, `batch_verify`, `batch_remove`)
+    /// was given zero or more items than allowed, or `get_pending_reverify` was
+    /// called with `limit > MAX_PAGE_LIMIT` (`100`).
     InvalidBatchSize = 14,
     /// `revoke_verification` was called with an unrecognized reason code.
     InvalidReasonCode = 15,

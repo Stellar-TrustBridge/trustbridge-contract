@@ -491,6 +491,16 @@ any contract can call another contract's public functions directly via
 the registry's existing read functions (`get_address`, `has_record`,
 `get_stats`, `get_role`, …) already satisfy it.
 
+**Cross-contract register is denied by design.** `register` requires
+`stellar_address.require_auth()`, which the host evaluates in the **calling
+contract's** context. A relaying contract cannot supply an external address's
+signature, so it can't ever pass that auth check — the call fails closed before
+writing anything. `register` has no replay-protecting nonce **because**
+cross-contract register is already structurally impossible. Adding unused
+complexity for a path that cannot exist would waste instruction budget and
+mislead integrators. See `docs/SECURITY.md § Cross-Contract Register is Denied`
+for the full rationale and `tests/cross_contract_register_deny.rs` for proof.
+
 The one design decision this forces is which functions are *appropriate* to
 expose that way. A cross-contract call runs in the caller's authorization
 context, so a sibling contract can never supply the registry admin's
@@ -499,6 +509,18 @@ signature — anything gated on `admin.require_auth()` (`get_all_registered`,
 cross-contract by construction, not by an added check. That boundary, plus
 the full list of what *is* safe to call, is documented in
 [ABI.md § Cross-Contract Read Interface](ABI.md#cross-contract-read-interface).
+
+For registration, the architecture remains deliberately asymmetric: `register`
+requires `stellar_address.require_auth()` and is not a cross-contract write
+surface. Soroban invokes a sibling contract in its own authorization context,
+so it cannot forge or replay the target address's signature. `register` therefore
+closes on crafted username/address/fallback payloads and leaves no partial
+record, count, or index state. Malformed inputs use `InvalidUsername` (11),
+oversized fallback lists use `FallbackListFull` (46), paused/frozen registries
+use `Paused` (7), and zero/burn targets use `ZeroAddress` (16). The deterministic
+spoof matrix and guards are pinned by
+`tests/cross_contract_register_deny.rs`; the security threat model is in
+[SECURITY.md § Cross-Contract `register` Is Denied](SECURITY.md#cross-contract-register-is-denied-no-nonce).
 
 Because the safe surface is entirely existing, already-deployed functions,
 adopting it requires no storage migration and no new contract version for
