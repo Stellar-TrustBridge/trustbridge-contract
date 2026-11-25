@@ -1352,6 +1352,11 @@ impl TrustBridgeContract {
     /// Defaults to `false` on instances that have never explicitly set the flag.
     /// Dashboards and operator tooling can read this to show the current gate
     /// configuration without needing admin credentials.
+    ///
+    /// Pair with [`Self::get_health`]'s `attestation_present`, which reports only
+    /// whether an unexpired attestation exists. `required=true` with
+    /// `attestation_present=false` is the fail-closed divergence documented in
+    /// `docs/CONTRACT_HEALTH.md` (Issue #848).
     #[must_use]
     pub fn get_attestation_required(env: Env) -> bool {
         crate::storage::is_attestation_required(&env)
@@ -3493,7 +3498,9 @@ impl TrustBridgeContract {
     /// advancing `offset` by `limit` until it reaches `get_stats().total`.
     /// `limit == 0` uses `DEFAULT_PAGE_LIMIT` (`20`). An empty registry or an
     /// `offset >= total` returns an empty page (never `InvalidCursor`).
-    /// Read-only, no auth required, and available while paused.
+    /// Read-only, no auth required, and available while paused. The usernames
+    /// are public by design (no Stellar addresses are returned); dashboards
+    /// must follow the redaction policy in `docs/SECURITY.md` (Issue #860).
     ///
     /// # Errors
     ///
@@ -4420,6 +4427,8 @@ impl TrustBridgeContract {
     ///
     /// For uptime/alerting prefer [`get_health_probes`](Self::get_health_probes),
     /// which never errors; see `docs/CONTRACT_HEALTH.md` (probe SLOs, Issue #756).
+    /// Alert on `attestation_present` together with `get_attestation_required`:
+    /// the former tracks only expiry, not policy (Issue #848).
     ///
     /// # Errors
     ///

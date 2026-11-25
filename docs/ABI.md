@@ -1466,7 +1466,12 @@ the page for integrity verification (Issue #216).
 
 **Opaque cursors:** Never construct or parse `cursor` yourself. Always use
 `None` to start, then pass back `next_cursor` from each page. Cursors become
-invalid after registry mutations (removal) and fail with `InvalidCursor`.
+invalid after registry mutations (removal) and fail with `InvalidCursor` (code
+52). There is deliberately **one** reason code for decode failures: a
+malformed/out-of-range offset and a wrong-generation cursor both return
+`InvalidCursor`; clients must not expect distinct codes (Issue #859). Recovery
+is always to restart from `cursor = None` and replay with idempotent upserts;
+see [DASHBOARD_SYNC.md § Invalid cursor reason codes](DASHBOARD_SYNC.md#invalid-cursor-reason-codes-issue-859).
 
 ```bash
 # Page 1 (cursor = None to start)
@@ -2583,25 +2588,30 @@ struct AdminTransferProposal {
 
 ## Pending Re-verification Functions (Issues #208, #587)
 
-The exported contract entrypoint for listing contributors awaiting
-re-verification is [`get_pending_reverify(offset: u32, limit: u32)`](#get_pending_reverifyoffset-u32-limit-u32---resultvecstring-contracterror),
+The ABI has **one** pending-reverify read:
+[`get_pending_reverify(offset: u32, limit: u32)`](#get_pending_reverifyoffset-u32-limit-u32---resultvecstring-contracterror),
 which delegates to `crate::storage::get_pending_reverify_page` (internal-only,
-not exported on the contract ABI). For checking a single username's current
-verification state, use `get_address` or `get_record_proof` (`storage::get_pending_reverify`
-is internal-only).
+not exported on the contract ABI). There is no `get_pending_reverify(github_username) -> bool`
+contract endpoint and no exported `get_pending_reverify_page` entry point; older
+docs that named those were describing an off-chain projection, not the ABI.
+Check a single name by scanning the paginated username list or use `get_address` /
+`get_record_proof`; the response contains usernames only, never Stellar addresses
+or other sensitive data.
 
 | | |
 |---|---|
 | **Exported entrypoint** | `get_pending_reverify(offset: u32, limit: u32) -> Result<Vec<String>, ContractError>` |
-| **Auth** | None |
+| **Auth** | None (public read, no admin credentials) |
 | **Mutates** | No |
 | **Works while paused** | Yes |
 | **Errors** | `NotInitialized` (code `2`), `InvalidBatchSize` (code `14`), `NetworkMismatch` (code `30`) |
 | **Events** | None emitted on flag set/clear (poll `get_pending_reverify`) |
 
 **Dashboard sync note:** Poll `get_pending_reverify` to discover which contributors
-need a fresh off-chain GitHub identity check after an address change. See
-[Error codes & integrator notes](#error-codes--integrator-notes-for-get_pending_reverify),
+need a fresh off-chain GitHub identity check after an address change. Because the
+list is public, dashboards must follow the redaction policy in
+[SECURITY.md § Public pending re-verification listings](SECURITY.md#public-pending-re-verification-listings-issue-860).
+See also [Error codes & integrator notes](#error-codes--integrator-notes-for-get_pending_reverify),
 [EVENT_INDEXING.md § Pending Re-verification Signals and Poll API](EVENT_INDEXING.md#pending-re-verification-signals-and-poll-api),
 and [DASHBOARD_SYNC.md § Pending Re-verification](DASHBOARD_SYNC.md#pending-re-verification-issue-208).
 
@@ -2641,6 +2651,13 @@ Returns whether WASM attestation is required before `upgrade` and multisig
 |---|---|
 | **Auth** | None |
 | **Mutates** | No |
+
+Pair this read with `get_health().attestation_present`: that field only reports
+whether an attestation is currently live, not whether it is required. The
+`required=true` / `attestation_present=false` divergence is fail-closed on
+upgrade (`AttestationRequired`, code 20; `AttestationExpired`, code 12 for a
+stale hash) and its alert mapping is in
+[CONTRACT_HEALTH.md § Attestation divergence alert mapping](CONTRACT_HEALTH.md#attestation-divergence-alert-mapping-issue-848).
 
 ---
 

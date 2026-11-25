@@ -533,6 +533,11 @@ stellar contract invoke --id "$CONTRACT_ID" --source-account admin --network "$N
   attestation does not disable the flag. Multisig execution checks for a record
   but does not validate its hash or expiry; verify the proposal and attestation
   separately before approving or executing.
+- **Alerting:** check this flag alongside `get_health().attestation_present`.
+  `required=true` with `attestation_present=false` means upgrades are blocked
+  until a fresh `attest_upgrade`; see
+  [CONTRACT_HEALTH.md § Attestation divergence alert mapping](CONTRACT_HEALTH.md#attestation-divergence-alert-mapping-issue-848).
+  Do not clear the flag to silence the page.
 
 #### `attest_upgrade` — declare the next hash in advance
 
