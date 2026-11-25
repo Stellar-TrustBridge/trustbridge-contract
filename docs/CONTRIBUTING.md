@@ -629,6 +629,58 @@ Then, in the same PR:
 CI fails the fixture comparison until the regenerated JSON is committed, so
 an un-bumped golden blocks the pipeline by design.
 
+#### Bindings golden diff tips for module splits (Issue #XYZ)
+
+**TL;DR:** If you move a contract entrypoint (e.g., `verify`) from one Rust
+module to another **without changing its signature**, the bindings golden and
+`docs/abi.json` may show a diff even though the ABI is unchanged. This is an
+**order-only change**, not a real break.
+
+**What happens:**
+- Soroban contract spec generation (`soroban-sdk` macros) orders entrypoints by
+  the order they appear in source code, not alphabetically
+- Moving `verify` from `src/lib.rs` line 500 to a new `src/contract/verify.rs`
+  file shifts its position in the generated contract spec relative to other functions
+- TypeScript bindings generated from that spec may list functions in a different
+  order, changing auto-generated client stub method order
+- The `docs/abi.json` file (which preserves contract spec order) may show
+  reordered function blocks, even though signatures are unchanged
+
+**What to check when you see a bindings golden diff:**
+1. **Signature unchanged?** Compare the function signature in `docs/ABI.md` before
+   and after. If only the order changed (function name, arg names/types, return type
+   all identical), it's **not a breaking change**.
+2. **Bindings still decode correctly?** Run `make diff-test` (TypeScript differential
+   tests in `ts-differential-tests/`). If those pass, the encoding is compatible.
+3. **Golden diff is order-only?** Inspect the bindings golden diff:
+   ```bash
+   git diff tests/testdata/bindings/get_address_simulate.v1.json
+   git diff docs/abi.json
+   ```
+   If field names, types, and nesting are identical and only array indices or
+   function sequence changed, the diff is **cosmetic**.
+
+**When it's a real ABI break (requires version bump):**
+- Function signature changed (added/removed/retyped a parameter or return field)
+- Event topic order changed (breaking indexer event filtering)
+- Error code discriminant changed (breaking error classification logic)
+- Struct field added/removed/retyped (breaking deserialization)
+
+**When it's order-only (no version bump needed):**
+- Module split moved functions to different files in the same `impl` block
+- Refactor reordered methods within a file without signature changes
+- New functions were inserted between existing ones (additive)
+
+**For reviewers:** If a PR moves functions across modules and the bindings golden
+shows a diff, ask: "Did any signature change, or only the order?" If only order,
+approve the golden refresh without bumping `FIXTURE_VERSION`. Check `git diff
+tests/testdata/abi/*.json` to see which functions moved.
+
+**For integrators:** If you consume `trustbridge-action` TypeScript bindings and
+see a contract upgrade that reorders functions, your existing decode logic is
+unaffected — the client stub just lists methods in a different sequence. No
+integrator action required unless function signatures changed.
+
 Cross-ABI goldens that follow the same "regenerate + commit" rule:
 `abi/contract_error_codes.golden` (error-code stability, Issue #402) and
 `abi/export_page.layout.golden` (export page layout). The
