@@ -10,7 +10,7 @@
 
 use soroban_sdk::{testutils::Address as _, Address, Env, String, Vec};
 
-use trustbridge_contract::TrustBridgeContract;
+use trustbridge_contract::{ContractError, TrustBridgeContract};
 
 fn setup() -> (Env, Address, Address) {
     let env = Env::default();
@@ -140,4 +140,67 @@ fn test_remove_by_case_variant_removes_the_canonical_record() {
         let stats = TrustBridgeContract::get_stats(env.clone());
         assert_eq!(stats.total, 0);
     });
+}
+
+
+// ── Issue #848: username length/charset register-path boundaries ────────────
+
+#[test]
+fn test_register_accepts_max_length_ascii_username() {
+    let (env, _admin, contract_id) = setup();
+    let alice = Address::generate(&env);
+    let username = "a".repeat(trustbridge_contract::utils::MAX_USERNAME_LEN as usize);
+
+    env.mock_all_auths();
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::register(
+            env.clone(),
+            s(&env, &username),
+            alice.clone(),
+            Vec::new(&env),
+        )
+        .unwrap();
+        assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 1);
+    });
+}
+
+#[test]
+fn test_register_rejects_overlong_username_before_auth_or_write() {
+    let (env, _admin, contract_id) = setup();
+    let alice = Address::generate(&env);
+    let username = "a".repeat(trustbridge_contract::utils::MAX_USERNAME_LEN as usize + 1);
+
+    env.as_contract(&contract_id, || {
+        assert_eq!(
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, &username),
+                alice.clone(),
+                Vec::new(&env),
+            ),
+            Err(ContractError::InvalidUsername)
+        );
+        assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 0);
+    });
+}
+
+#[test]
+fn test_register_rejects_non_ascii_and_malformed_charset_usernames() {
+    for bad in ["", "café", "-alice", "alice-", "ali--ce", "ali.ce", "alice bob"] {
+        let (env, _admin, contract_id) = setup();
+        let alice = Address::generate(&env);
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::register(
+                    env.clone(),
+                    s(&env, bad),
+                    alice.clone(),
+                    Vec::new(&env),
+                ),
+                Err(ContractError::InvalidUsername),
+                "expected InvalidUsername for {bad:?}"
+            );
+            assert_eq!(TrustBridgeContract::get_stats(env.clone()).total, 0);
+        });
+    }
 }

@@ -27,6 +27,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "username_length_charset"
+path = "fuzz_targets/username_length_charset.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "username_validate"
 path = "fuzz_targets/username_validate.rs"
 test = false
