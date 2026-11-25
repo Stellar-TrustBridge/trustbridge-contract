@@ -153,8 +153,9 @@ pub fn is_valid_github_username(s: &String) -> bool {
 ///
 /// GitHub usernames are case-insensitive, so this is what an off-chain
 /// verification workflow should use when matching a registration against a
-/// GitHub identity. Note that storage keys are still case-*sensitive*: this
-/// compares two values, it does not normalise them.
+/// GitHub identity. Storage keys are folded with [`canonicalize_username`]
+/// (ASCII lower-case), which this comparison mirrors; neither folds Unicode
+/// homoglyphs, so a confusable never matches its ASCII lookalike.
 pub fn eq_ignore_ascii_case(a: &String, b: &String) -> bool {
     if a.len() != b.len() {
         return false;

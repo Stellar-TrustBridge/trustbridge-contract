@@ -846,6 +846,158 @@ fn test_read_only_functions_do_not_validate_homoglyph_usernames() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// § Pending reverify queries (Issue #862)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Happy path: `pend_rev` is keyed by the canonical ASCII fold, so an
+/// address change made with mixed casing is listed exactly once under the
+/// canonical name, and a case-variant `verify` clears that same flag.
+#[test]
+fn test_pending_reverify_query_lists_canonical_ascii_username() {
+    use soroban_sdk::{testutils::Address as _, Address, Vec};
+    use trustbridge_contract::TrustBridgeContract;
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(TrustBridgeContract, ());
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+    });
+
+    let register = |name: &str| {
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, name),
+                Address::generate(&env),
+                Vec::new(&env),
+            )
+            .unwrap();
+        });
+    };
+    let verify = |name: &str| {
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, name))
+        })
+    };
+
+    register("Alice");
+    assert_eq!(verify("alice"), Ok(()));
+    register("ALICE"); // verified + new address → pend_rev set under "alice"
+
+    let page = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_pending_reverify(env.clone(), 0, 100).unwrap()
+    });
+    assert_eq!(page, Vec::from_array(&env, [s(&env, "alice")]));
+
+    assert_eq!(
+        verify("Alice"),
+        Ok(()),
+        "case fold must clear the same flag"
+    );
+    let after = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_pending_reverify(env.clone(), 0, 100).unwrap()
+    });
+    assert!(after.is_empty());
+}
+
+/// Failure path 1: homoglyph / ZWJ / bidi handles are rejected before any
+/// `pend_rev` key exists, so they cannot enter the pending-reverify page.
+#[test]
+fn test_pending_reverify_query_never_lists_homoglyph_usernames() {
+    use soroban_sdk::{testutils::Address as _, Address, Vec};
+    use trustbridge_contract::{ContractError, TrustBridgeContract};
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(TrustBridgeContract, ());
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::initialize(env.clone(), admin).unwrap();
+    });
+
+    env.as_contract(&contract_id, || {
+        for bad in ["\u{0430}lice", "al\u{200D}ice", "\u{202E}alice"] {
+            assert_eq!(
+                TrustBridgeContract::register(
+                    env.clone(),
+                    s(&env, bad),
+                    Address::generate(&env),
+                    Vec::new(&env),
+                ),
+                Err(ContractError::InvalidUsername),
+                "{bad:?} must not acquire a pend_rev flag"
+            );
+        }
+        assert!(
+            TrustBridgeContract::get_pending_reverify(env.clone(), 0, 100)
+                .unwrap()
+                .is_empty(),
+            "no homoglyph may be listed for re-verification"
+        );
+    });
+}
+
+/// Failure path 2: a homoglyph cannot clear another account's reverify flag
+/// through `verify`, and ASCII case-insensitive matching never equates a
+/// confusable with its ASCII lookalike.
+#[test]
+fn test_homoglyph_cannot_clear_or_match_pending_reverify_flag() {
+    use soroban_sdk::{testutils::Address as _, Address, Vec};
+    use trustbridge_contract::{ContractError, TrustBridgeContract};
+
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(TrustBridgeContract, ());
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+    });
+
+    let register = |name: &str| {
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                s(&env, name),
+                Address::generate(&env),
+                Vec::new(&env),
+            )
+            .unwrap();
+        });
+    };
+    register("alice");
+    env.as_contract(&contract_id, || {
+        TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, "alice")).unwrap();
+    });
+    register("alice"); // new address → flag set
+
+    for lookalike in ["\u{0430}lice", "al\u{03bf}ce", "al\u{200D}ice"] {
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::verify(env.clone(), admin.clone(), s(&env, lookalike)),
+                Err(ContractError::NotRegistered),
+                "{lookalike:?} must not clear the ASCII account's flag"
+            );
+        });
+        assert!(
+            !TrustBridgeContract::usernames_match(
+                env.clone(),
+                s(&env, "alice"),
+                s(&env, lookalike)
+            ),
+            "case-fold matching must not equate homoglyphs"
+        );
+        assert!(!is_valid_github_username(&s(&env, lookalike)));
+    }
+
+    let page = env.as_contract(&contract_id, || {
+        TrustBridgeContract::get_pending_reverify(env.clone(), 0, 100).unwrap()
+    });
+    assert_eq!(page, Vec::from_array(&env, [s(&env, "alice")]));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // § Coverage Summary
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -863,6 +1015,7 @@ fn test_read_only_functions_do_not_validate_homoglyph_usernames() {
 /// - Superscripts / subscripts / modifiers
 /// - Integration test at register() entry point
 /// - Positive control (valid ASCII still works)
+/// - Pending reverify queries: canonical ASCII fold + homoglyph rejection (Issue #862)
 #[test]
 fn test_homoglyph_corpus_coverage_complete() {
     // This is a documentation test — if it compiles and runs, all corpus

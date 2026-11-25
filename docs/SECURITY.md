@@ -504,9 +504,12 @@ Deliberate non-goals:
 - **Underscores are accepted** even though GitHub disallows them, so any
   registration made before validation existed stays readable and removable.
   Tightening this later would strand those records.
-- **Case is not normalized on-chain.** `Alice` and `alice` are distinct keys.
-  Off-chain workflows should match with `eq_ignore_ascii_case` from
-  `src/utils.rs` when comparing a registration against a GitHub identity.
+- **Unicode homoglyph normalization is not attempted on-chain.** Storage keys
+  are folded with `canonicalize_username` (ASCII lower-case only), so `Alice`
+  and `alice` share a key; a Cyrillic `а` remains a different byte sequence and
+  is rejected at registration. Off-chain workflows should use
+  `eq_ignore_ascii_case` from `src/utils.rs` for case-insensitive matching —
+  it never equates a homoglyph with its ASCII lookalike.
 - **No on-chain proof the username exists on GitHub.** Validation checks shape,
   not ownership. Ownership remains the admin verification step.
 
@@ -609,8 +612,25 @@ is blocked before it reaches storage, regardless of how it renders. The corpus
 tests validate this property against 78+ known confusable characters and ensure
 no bypass path exists at the `register()` entry point.
 
-Run the full corpus: `cargo test homoglyph` or `cargo test unicode`
-(CI: the `homoglyph_corpus` job runs `cargo test --test homoglyph_corpus` on every pull request).
+### Pending reverify username queries (Issue #862)
+
+Wave address-change protections rely on the reverify queue being keyed by the
+same canonical form as every other username-keyed lookup. `PENDING_REVERIFY_KEY`
+is stored under `(pend_rev, canonicalize_username(username))` (ASCII
+lower-case), and the only public query is
+`get_pending_reverify(offset, limit) -> Vec<String>` (no auth, works while
+paused). Consequences pinned by `tests/homoglyph_corpus.rs`:
+
+- An address change submitted with mixed casing (`Alice` → `ALICE`) appears
+  exactly once as canonical `alice`; a case-variant `verify` clears that flag.
+- Homoglyph, zero-width joiner, and bidi-override handles are rejected with
+  `InvalidUsername` (code 7) before any `pend_rev` key exists, so they cannot
+  enter the pending-reverify page or shadow a real account.
+- A homoglyph `verify` attempt cannot clear someone else's flag: it returns
+  `NotRegistered` (code 4), and `usernames_match` never equates a confusable
+  with its ASCII lookalike.
+
+Reproduce: `cargo test --test homoglyph_corpus` (or `make test-homoglyph`).
 
 ### Performance
 
