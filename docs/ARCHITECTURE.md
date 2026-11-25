@@ -491,6 +491,16 @@ any contract can call another contract's public functions directly via
 the registry's existing read functions (`get_address`, `has_record`,
 `get_stats`, `get_role`, …) already satisfy it.
 
+**Cross-contract register is denied by design.** `register` requires
+`stellar_address.require_auth()`, which the host evaluates in the **calling
+contract's** context. A relaying contract cannot supply an external address's
+signature, so it can't ever pass that auth check — the call fails closed before
+writing anything. `register` has no replay-protecting nonce **because**
+cross-contract register is already structurally impossible. Adding unused
+complexity for a path that cannot exist would waste instruction budget and
+mislead integrators. See `docs/SECURITY.md § Cross-Contract Register is Denied`
+for the full rationale and `tests/cross_contract_register_deny.rs` for proof.
+
 The one design decision this forces is which functions are *appropriate* to
 expose that way. A cross-contract call runs in the caller's authorization
 context, so a sibling contract can never supply the registry admin's
@@ -499,6 +509,18 @@ signature — anything gated on `admin.require_auth()` (`get_all_registered`,
 cross-contract by construction, not by an added check. That boundary, plus
 the full list of what *is* safe to call, is documented in
 [ABI.md § Cross-Contract Read Interface](ABI.md#cross-contract-read-interface).
+
+For registration, the architecture remains deliberately asymmetric: `register`
+requires `stellar_address.require_auth()` and is not a cross-contract write
+surface. Soroban invokes a sibling contract in its own authorization context,
+so it cannot forge or replay the target address's signature. `register` therefore
+closes on crafted username/address/fallback payloads and leaves no partial
+record, count, or index state. Malformed inputs use `InvalidUsername` (11),
+oversized fallback lists use `FallbackListFull` (46), paused/frozen registries
+use `Paused` (7), and zero/burn targets use `ZeroAddress` (16). The deterministic
+spoof matrix and guards are pinned by
+`tests/cross_contract_register_deny.rs`; the security threat model is in
+[SECURITY.md § Cross-Contract `register` Is Denied](SECURITY.md#cross-contract-register-is-denied-no-nonce).
 
 Because the safe surface is entirely existing, already-deployed functions,
 adopting it requires no storage migration and no new contract version for
@@ -531,6 +553,30 @@ of the deployed version:
 See `src/version.rs::tests::migrate_rejects_equal_target_tuple_comparison` and
 `migrate_rejects_lower_target_across_all_tuple_positions` for the automated
 proof covering all three tuple positions.
+
+## Migration Step Registry (Issue #858)
+
+`src/version.rs` owns `Version`, `MigrationState`, and `CompatibilityInfo`;
+`src/storage.rs` owns the keys a step touches. Every migration step must be
+registered here before a Wave upgrade. This is a documentation template, not a
+new entry point — `migrate` and `CompatibilityInfo::for_upgrade` remain the
+existing surfaces.
+
+| Step | From → To | Idempotency key | Operator action | Automated test |
+|---|---|---|---|---|
+| `<step-id>` | `<x.y.z>` → `<a.b.c>` | `<storage key / guard>` | `<runbook command or "none">` | `src/version.rs::<test_name>` |
+
+Fill one row per step; do not add a separate subsystem or duplicate the
+semver rules above. `From → To` is strictly forward (equal/lower rejected),
+the idempotency key names the exact storage condition checked before writes,
+and `Operator action` links to the relevant `docs/ADMIN_RUNBOOK.md` section or
+states `none`. Every row must point to a test that exercises the happy path and
+at least one failure path; `src/version.rs` unit tests are the default place.
+Contributor checklist:
+[CONTRIBUTING.md § Registering a migration step](CONTRIBUTING.md#registering-a-migration-step-issue-858).
+
+Proof: `cargo test --lib version::tests`. A missing row is an undocumented
+migration and blocks Wave upgrade review.
 
 ## Migration Window Reads
 
@@ -576,7 +622,9 @@ Storage keys are carefully designed to prevent collisions:
 
 Persistent keys use `(Symbol, Context)` tuples where the Symbol discriminator is encoded first in XDR serialization, preventing collisions even when different namespaces use the same context type.
 
-**New contributors must read [STORAGE_KEYS.md](STORAGE_KEYS.md) § Key Namespace Diagram before adding a new storage key.** The diagram shows how discriminators partition the keyspace and documents the collision-prevention strategy.
+The verified-account re-verification flag (`"pend_rev"`, `PENDING_REVERIFY_KEY`) is set by `storage.rs` on a verified address change, moved by `rename`, and removed — not set to `false` — by `verify` / `batch_verify` and record removal. Operators reading Wave reverify queues should consult [STORAGE_KEYS.md § PENDING_REVERIFY_KEY lifecycle](STORAGE_KEYS.md#pending_reverify_key-lifecycle-issue-852) before assuming a queue entry is sticky.
+
+**New contributors must read [STORAGE_KEYS.md](STORAGE_KEYS.md) § Key Namespace Diagram before adding a new storage key.** The diagram shows how discriminators partition the keyspace and documents the collision-prevention strategy. The same document's § CI collision narrative for new `Symbol` keys (Issue #773) explains what `make storage-keys-check` and `cargo test --test storage_keys_collision` print on success and on a collision.
 
 Automated tests (`tests/storage_keys_collision.rs`) and a linter script (`scripts/check_storage_keys.sh`) verify:
 1. All Symbol constants are unique.

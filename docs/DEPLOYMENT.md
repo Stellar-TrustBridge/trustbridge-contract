@@ -98,6 +98,17 @@ stellar contract invoke \
 # Expected: { "total": 0, "verified": 0 }
 ```
 
+Run the read-only post-deploy probe immediately after initialize (no admin key,
+`--send=no`; it never returns a contract error):
+
+```bash
+stellar contract invoke --id $CONTRACT_ID --network testnet --send=no -- get_health_probes
+# Happy path (fresh deploy): { "paused": false, "admin_set": true, "index_gen": 0 }
+```
+
+For failure triage (uninitialized, paused, unexpected `index_gen`), see
+[Post-deploy health probe (Issue #863)](#post-deploy-health-probe-issue-863).
+
 ---
 
 ## Testnet Checklist
@@ -203,6 +214,10 @@ stellar contract invoke \
 stellar contract get_wasm_hash \
   --id $CONTRACT_ID \
   --network mainnet
+
+# Repeat after every deploy or WASM upgrade (read-only, no admin key)
+stellar contract invoke --id $CONTRACT_ID --network mainnet --send=no -- get_health_probes
+# Happy path: paused=false, admin_set=true, index_gen unchanged from the recorded baseline
 ```
 
 Checklist before mainnet:
@@ -239,6 +254,87 @@ expected to fail fast until the contract is unpaused.
 
 This mode is an operator procedure, not a new ABI surface, so it does not
 change the public contract interface.
+
+## Failed WASM Apply Rollback / Forward-Fix
+
+If a WASM upgrade is applied but post-upgrade health checks fail, treat the
+contract as potentially unsafe for writes until the operator confirms a
+rollback or forward-fix path. Do **not** silently retry with a different hash.
+
+### Immediate containment
+
+1. **Pause writes**. Call `set_paused(true, reason_code)` (or `pause`) from the
+   admin so mutating paths fail closed with `Paused` while reads remain
+   available for triage.
+2. **Capture provenance and attestation state** before changing anything else:
+   ```bash
+   stellar contract invoke --id $CONTRACT_ID --network $NETWORK -- get_provenance
+   stellar contract invoke --id $CONTRACT_ID --network $NETWORK -- get_attestation
+   stellar contract invoke --id $CONTRACT_ID --network $NETWORK -- get_health
+   stellar contract invoke --id $CONTRACT_ID --network $NETWORK -- get_version
+   ```
+   Record the current WASM hash, expected previous hash, attestation state,
+   ledger/time, and failing health symptoms.
+3. **Confirm the failure mode**. Distinguish a bad WASM apply (new code active,
+   health checks failing) from an operator/RPC failure (upgrade not actually
+   applied). Use `get_provenance`, `get_version`, and contract health probes.
+
+### Rollback
+
+Soroban contract code can be replaced by another admin-authorized upgrade, but
+state is preserved. A rollback is a forward upgrade to a known-good WASM hash.
+
+1. Select the last known-good WASM hash from release records / `wasm-hash.pin`
+   / prior provenance.
+2. Rehearse the candidate hash on testnet/futurenet against a snapshot-shaped
+   state where possible.
+3. If attestation is required, publish a fresh attestation for the known-good
+   hash with `attest_upgrade`.
+4. Execute `upgrade` to the known-good hash while the contract remains paused.
+5. Re-run post-upgrade checks: `get_provenance`, `get_health`,
+   `get_health_probes`, `get_attestation_required`, `get_version`, and a sample
+   register/verify round-trip on non-production or a controlled test account.
+6. Only after checks pass, unpause with `set_paused(false, reason_code)`.
+
+### Forward-fix
+
+Use forward-fix when rollback is unsafe (for example, new state/schema changes
+are incompatible with the previous binary) or the known-good hash has its own
+risk.
+
+1. Keep the contract paused.
+2. Build and review a fixed WASM from the pinned toolchain; record its hash.
+3. Stage/attest the fixed hash as required by policy.
+4. Apply upgrade to the fixed hash.
+5. Run the same post-upgrade verification queries before unpausing.
+6. If the fix cannot be produced quickly, keep paused and escalate.
+
+### Communication template
+
+```text
+[TrustBridge Contract Incident]
+Network: <testnet|mainnet>
+Contract: <CONTRACT_ID>
+Status: <paused|unpaused>
+Impact: <writes blocked / verification unavailable / etc.>
+Detected: <UTC timestamp / ledger>
+Applied WASM hash: <hash>
+Previous known-good hash: <hash>
+Health check failure: <command + observed result>
+Current action: <pause/rollback/forward-fix>
+Next update ETA: <UTC timestamp>
+Operator contact: <name/channel>
+```
+
+### Operator checklist
+
+- [ ] Writes paused (`Paused` / `is_paused` confirmed)
+- [ ] Provenance, attestation, version, and health captured
+- [ ] Known-good or fixed WASM hash identified and reviewed
+- [ ] Upgrade rehearsed where feasible
+- [ ] Post-upgrade verification queries passed
+- [ ] Stakeholders notified with communication template
+- [ ] Incident notes include hashes, commands, and outcome
 
 ---
 
@@ -653,6 +749,34 @@ See [STORAGE_RENT.md](STORAGE_RENT.md) for how simulation fits into the broader 
 5. Wire production monitors to the probe sequence in
    [CONTRACT_HEALTH.md](CONTRACT_HEALTH.md) (initialized?, admin set?, stats
    sane?, optional Horizon lag)
+6. Record the post-deploy/upgrade `get_health_probes` result using the recipe below
+
+### Post-deploy health probe (Issue #863)
+
+Run immediately after every deploy or WASM upgrade. `get_health_probes` is
+read-only, needs no admin key (`--send=no` is the default), works while paused,
+and never returns a contract error. Field semantics and alert thresholds:
+[CONTRACT_HEALTH.md § Pre-Wave probes](CONTRACT_HEALTH.md#pre-wave-probes-issue-668) and
+[CONTRACT_HEALTH.md § Choosing a probe & alert SLOs](CONTRACT_HEALTH.md#choosing-a-probe--alert-slos-issue-756).
+ABI: [ABI.md § get_health_probes](ABI.md#get_health_probes--healthprobes).
+
+```bash
+stellar contract invoke --id $CONTRACT_ID --network $NETWORK --send=no -- get_health_probes
+# Happy: { "paused": false, "admin_set": true, "index_gen": <recorded baseline> }
+```
+
+| Probe result | Verdict | Operator action |
+|---|---|---|
+| `paused: false`, `admin_set: true`, `index_gen` at recorded baseline | Happy | Proceed; keep `index_gen` as the dashboard/export cursor baseline. |
+| `admin_set: false` (`paused: false`, `index_gen: 0`) or `get_health` returns `Error(Contract, #2)` (`NotInitialized`) | Failure — wrong `--id`/`--network`, or `initialize` was never called | Stop Wave traffic. Verify contract ID and network, run `make invoke-init CONTRACT_ID=$CONTRACT_ID ADMIN=$ADMIN`, then re-probe. Re-running initialize on a live contract returns code 1 (`AlreadyInitialized`), which confirms it was already set up. |
+| `paused: true` | Failure — contract frozen for upgrade/incident | Read `stellar contract invoke --id $CONTRACT_ID --network $NETWORK -- get_pause_reason`; resume with `-- unpause --reason-code 4` as admin per the runbook, then re-probe. An unexpected `paused: true` means the upgrade window was left open. |
+
+A later `index_gen` jump with no scheduled removal means dashboards and cursors
+must re-sync (stale cursors fail with code 52, `InvalidCursor`); see
+[CONTRACT_HEALTH.md § Pre-Wave probes](CONTRACT_HEALTH.md#pre-wave-probes-issue-668).
+
+Automated proof: `cargo test --test deployment_probe --test health_probes`
+(uninitialized, paused, and healthy states; read-only probe stays available).
 
 See [SECURITY.md](SECURITY.md) for operational security guidance.
 
@@ -765,19 +889,116 @@ Never compare a testnet contract with the mainnet explorer, or vice versa.
 Explorer availability is a convenience check; CI's pinned hash check and the
 local `make wasm-hash-pin` result remain the authoritative artifact checks.
 
-### Updating the pin (intentional WASM changes)
+### Strict mode checklist (`WASM_HASH_STRICT=1`)
 
-1. Make your contract changes and build: `make build`.
-2. Run `make wasm-hash-update` to rewrite `wasm-hash.pin` with the new hash.
-3. Commit `wasm-hash.pin` alongside the contract change.
-4. Include before/after hashes in the PR description.
-5. CI will verify the committed pin matches the rebuilt artifact.
+Strict mode (`WASM_HASH_STRICT=1`) converts pin warnings into hard build failures. It is the gate that guarantees no unpinned code or unverified bytecode ever reaches a deployment environment.
 
-### Mainnet pre-deploy checklist addition
+#### CI vs Local Mode Matrix
 
-- [ ] `make wasm-hash-pin` passes locally on the release commit.
+| Environment / Context | `WASM_HASH_STRICT` Mode | Default Value | Expected Behavior / Purpose |
+|-----------------------|-------------------------|---------------|-----------------------------|
+| **CI quality gate (`make check` / `make ci`)** | `WASM_HASH_STRICT=1` (Strict) | `1` (via `make ci` / CI script) | **Mandatory gate.** Rejects both `PLACEHOLDER` and hash mismatches. Prevents unpinned code from merging to `main`. |
+| **Local development (iterative editing)** | `WASM_HASH_STRICT=0` (Permissive) | `0` (Makefile default) | Allows local builds and fast iteration when `wasm-hash.pin` is set to `PLACEHOLDER`, emitting a non-blocking warning. |
+| **Local pre-push verification** | `WASM_HASH_STRICT=1` (Strict) | `1` | Run `make wasm-hash-pin WASM_HASH_STRICT=1` or `make ci` before opening a PR to mirror CI and avoid build failures. |
+| **Pre-release & Wave sign-off gate** | `WASM_HASH_STRICT=1` (Strict) | `1` | **Mandatory gate.** Operators must verify the release commit compiles to the exact pinned hash prior to deployment. |
+| **Testnet / Mainnet deploy gate** | `WASM_HASH_STRICT=1` (Strict) | `1` | Block deployment if hash does not match `wasm-hash.pin` or if `PLACEHOLDER` is present. |
+
+#### Strict Mode Checklist
+
+Before deploying or merging contract changes, verify every item:
+
+- [ ] **Pinned Toolchain Active**: Verified `rustc --version` matches `rust-toolchain.toml` and `stellar --version` is `26.1.0`.
+- [ ] **Artifact Built**: Executed `make build` with target `wasm32v1-none`.
+- [ ] **Strict Verification Passes**: Ran `make wasm-hash-pin WASM_HASH_STRICT=1` and received `OK: WASM hash matches pin.`
+- [ ] **No PLACEHOLDER in Release**: Confirmed `wasm-hash.pin` contains a 64-character lowercase hexadecimal SHA-256 hash, not `PLACEHOLDER`.
+- [ ] **Automated Hash Pin Tests Pass**: Ran `make wasm-hash-pin-test` (and `cargo test --test wasm_hash_pin`) to ensure verification logic invariants hold.
+- [ ] **Atomic Commit**: `wasm-hash.pin` is committed in the same commit / PR as the contract code change.
+- [ ] **PR Documentation**: Before and after SHA-256 hashes are recorded in the PR description.
+- [ ] **On-Chain Post-Deploy Match**: After deploying, fetched bytecode (`stellar contract fetch`) matches `wasm-hash.pin`.
+
+### Rotating pins after intentional WASM changes
+
+Whenever contract code (`src/`), dependencies (`Cargo.lock`), compiler version (`rust-toolchain.toml`), or Stellar CLI version changes, the compiled WASM binary changes. Follow this exact rotation sequence:
+
+1. **Build the new artifact**:
+   ```bash
+   make build
+   ```
+2. **Rotate the pin file**:
+   ```bash
+   make wasm-hash-update
+   ```
+   This replaces `PLACEHOLDER` or the previous SHA-256 in `wasm-hash.pin` with the new actual hash, then automatically runs `make wasm-hash-pin WASM_HASH_STRICT=1` to verify.
+3. **Run automated pin gate tests**:
+   ```bash
+   make wasm-hash-pin-test
+   ```
+4. **Inspect the git diff**:
+   ```bash
+   git diff wasm-hash.pin
+   ```
+   Ensure only the single 64-character hash line was updated.
+5. **Commit atomically**:
+   ```bash
+   git add wasm-hash.pin
+   git commit -m "chore: bump wasm-hash.pin after <feature>"
+   ```
+6. **Include hash metadata in PR**:
+   Record both the previous and new SHA-256 hashes in the PR description so reviewers can cross-check with the CI build output.
+
+### Common failure logs and troubleshooting
+
+#### 1. Strict mode rejects PLACEHOLDER
+```text
+WARNING: wasm-hash.pin contains PLACEHOLDER — run 'make wasm-hash-update' to pin.
+ERROR: WASM_HASH_STRICT=1 requires a real pinned hash.
+make: *** [Makefile:280: wasm-hash-pin] Error 1
+```
+- **Cause**: `wasm-hash.pin` contains `PLACEHOLDER` instead of a real SHA-256 hash while running under `WASM_HASH_STRICT=1` (standard in CI, `make ci`, or pre-deploy checks).
+- **Remediation**:
+  1. Build the contract: `make build`.
+  2. Rotate the pin: `make wasm-hash-update`.
+  3. Verify: `make wasm-hash-pin WASM_HASH_STRICT=1`.
+  4. Commit `wasm-hash.pin`.
+
+#### 2. WASM hash mismatch (drift or unpinned change)
+```text
+WASM SHA-256: 4a2b8e39f...
+ERROR: WASM hash mismatch! Expected: da94f06adb...  Actual: 4a2b8e39f...
+Run 'make wasm-hash-update' if this change is intentional.
+make: *** [Makefile:284: wasm-hash-pin] Error 1
+```
+- **Cause**: The compiled artifact's SHA-256 differs from the pinned value in `wasm-hash.pin`.
+- **Remediation**:
+  - *If intentional change*: Run `make wasm-hash-update`, test with `make wasm-hash-pin WASM_HASH_STRICT=1`, and commit `wasm-hash.pin`.
+  - *If unintentional drift*: Run `git status` and `git diff` to identify unintended file changes. Verify your compiler matches `rust-toolchain.toml` and Stellar CLI is `26.1.0`.
+
+#### 3. Missing WASM artifact
+```text
+ERROR: No WASM artifact found. Run 'make build' first.
+make: *** [Makefile:274: wasm-hash-pin] Error 1
+```
+- **Cause**: `make wasm-hash-pin` was run before building the contract binary, so `target/wasm32v1-none/release/trustbridge_contract.wasm` does not exist.
+- **Remediation**: Run `make build` (or `stellar contract build`) to produce the release WASM before hashing.
+
+#### 4. Host environment or toolchain divergence
+```text
+CI log:    WASM SHA-256: da94f06adb...
+Local log: WASM SHA-256: c39a1172fb...
+```
+- **Cause**: Local build host uses a different toolchain version than CI.
+- **Remediation**:
+  1. Verify active rustc: `rustc --version` (must match `rust-toolchain.toml`).
+  2. Verify Stellar CLI: `stellar --version` (must be `26.1.0`).
+  3. Verify target: `rustup target list --installed | grep wasm32v1-none`.
+  4. Rebuild from clean state: `make clean && make build`.
+
+### Mainnet and Testnet pre-deploy checklist addition
+
+- [ ] `make wasm-hash-pin WASM_HASH_STRICT=1` passes locally on the exact release commit.
 - [ ] `wasm-hash.pin` committed hash matches the CI artifact hash shown in CI logs.
-- [ ] Hash recorded in deploy runbook before running `make deploy-mainnet`.
+- [ ] `make wasm-hash-pin-test` passes without failures.
+- [ ] Hash recorded in deploy runbook before running `make deploy-testnet` or `make deploy-mainnet`.
 
 ---
 

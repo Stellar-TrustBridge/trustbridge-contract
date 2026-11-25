@@ -1,9 +1,22 @@
-//! Contract events emitted by the registry.
+//! Contract event definitions (`#[contractevent]`).
+//!
+//! Every struct here derives its `topic[0]` symbol from its snake_case name.
 //!
 //! Adding a new `#[contractevent]` requires the five-step operator checklist in
 //! [`docs/subgraph/README.md`](../docs/subgraph/README.md#contributor-checklist-adding-a-contract-event):
 //! event → `EVENT_INDEXING.md` topic row → subgraph handler/waiver → fixture →
 //! dashboard consumer note. A missing handler silently drops Wave events.
+//!
+//! ## Pending re-verification (`PENDING_REVERIFY_KEY`) — no dedicated events
+//!
+//! Setting or clearing `PENDING_REVERIFY_KEY` (`pend_rev`) does **not** emit a
+//! dedicated contract event, and no existing event (`RegisteredEvent`,
+//! `RenamedEvent`, `RotationExecutedEvent`, `VerifiedEvent`, `RemovedEvent`)
+//! carries a `pending_reverify` field. Wave indexers and dashboards must treat
+//! lifecycle events only as hints and poll
+//! `TrustBridgeContract::get_pending_reverify(offset, limit)` as the
+//! authoritative re-verification queue (see `docs/EVENT_INDEXING.md` and
+//! `docs/subgraph/README.md`).
 
 use soroban_sdk::{contractevent, Address, BytesN, String, Symbol};
 
@@ -39,6 +52,10 @@ pub struct BotStatusChangedEvent {
 }
 
 /// Emitted when a registration is removed by the registrant or admin.
+/// Removal also advances the pagination index generation in `storage.rs`; the
+/// bump is observable via `get_health_probes().index_gen`, while this event
+/// remains the consumer-facing tombstone for the removed username. No separate
+/// `IndexGenerationBumpedEvent` is emitted.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemovedEvent {
@@ -470,4 +487,24 @@ pub struct AuditConfigChangedEvent {
     /// Whether unauthorized access attempts are now recorded.
     pub log_unauthorized: bool,
     pub timestamp: u64,
+}
+
+
+/// Consumer-side payload for `index_generation_bumped_event` (Issue #850).
+///
+/// The chain currently exposes index generation through `get_health_probes`
+/// and opaque cursors; indexers still need a replayable signal when a removal
+/// invalidates all outstanding cursors. This schema documents that signal for
+/// replay fixtures: both generations are explicit, and `reason` is the stable
+/// `remove_from_index` cause. Keeping it as a plain payload (rather than a new
+/// `#[contractevent]`) preserves the existing event ABI and subgraph parity
+/// tables while `tests/event_replay.rs` pins the replay semantics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexGenerationBumpedPayload {
+    /// Generation before the bump.
+    pub previous_generation: u32,
+    /// Generation after the bump; cursors carry this value.
+    pub new_generation: u32,
+    /// Stable reason code for the invalidation (for example `remove_from_index`).
+    pub reason: &'static str,
 }

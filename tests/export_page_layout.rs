@@ -167,3 +167,151 @@ mod byte_layout {
         assert_ne!(page_a.merkle_root, page_b.merkle_root);
     }
 }
+
+// ── Pending reverify flags do not gate export attestation (Issue #864) ──────
+//
+// A Wave rotation can leave some usernames flagged for re-verification while
+// auditors still need signed exports. `PENDING_REVERIFY_KEY` is an advisory
+// per-username flag: it is not an `ExportPage` field and must not block
+// `export_attestation` or change its digest except through normal record
+// changes. The failure paths below pin the pre-existing error semantics.
+
+mod pending_reverify_attestation {
+    use soroban_sdk::{
+        testutils::Address as _, xdr::ToXdr, Address, Bytes, BytesN, Env, String, Vec,
+    };
+    use trustbridge_contract::{ContractError, ExportPage, TrustBridgeContract};
+
+    fn setup() -> (Env, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(TrustBridgeContract, ());
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::initialize(env.clone(), admin.clone()).unwrap();
+        });
+        (env, admin, contract_id)
+    }
+
+    fn s(env: &Env, text: &str) -> String {
+        String::from_str(env, text)
+    }
+
+    fn register(env: &Env, contract_id: &Address, name: &str) {
+        env.as_contract(contract_id, || {
+            TrustBridgeContract::register(
+                env.clone(),
+                s(env, name),
+                Address::generate(env),
+                Vec::new(env),
+            )
+            .unwrap();
+        });
+    }
+
+    /// Register → verify → re-register at a new address sets `pend_rev`.
+    fn flag_reverify(env: &Env, contract_id: &Address, admin: &Address, name: &str) {
+        register(env, contract_id, name);
+        env.as_contract(contract_id, || {
+            TrustBridgeContract::verify(env.clone(), admin.clone(), s(env, name)).unwrap();
+        });
+        register(env, contract_id, name);
+    }
+
+    fn sha256_page(env: &Env, page: &ExportPage) -> BytesN<32> {
+        let xdr: Bytes = page.clone().to_xdr(env);
+        env.crypto().sha256(&xdr).into()
+    }
+
+    /// Happy path: two of three records are flagged, yet the attestation is
+    /// identical to a plain export and its digest stays stable.
+    #[test]
+    fn attestation_succeeds_with_partial_pending_reverify_flags() {
+        let (env, admin, contract_id) = setup();
+        for name in ["alice", "bob", "carol"] {
+            register(&env, &contract_id, name);
+        }
+        flag_reverify(&env, &contract_id, &admin, "alice");
+        flag_reverify(&env, &contract_id, &admin, "carol");
+
+        let pending = env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_pending_reverify(env.clone(), 0, 100).unwrap()
+        });
+        assert_eq!(
+            pending,
+            Vec::from_array(&env, [s(&env, "alice"), s(&env, "carol")])
+        );
+
+        // Separate frames: each admin-authenticated read gets its own auth
+        // frame (two `require_auth`s in one frame trip `Auth(ExistingValue)`).
+        let att = env.as_contract(&contract_id, || {
+            TrustBridgeContract::export_attestation(env.clone(), None, 10).unwrap()
+        });
+        let page = env.as_contract(&contract_id, || {
+            TrustBridgeContract::get_registered_paginated(env.clone(), None, 10).unwrap()
+        });
+        let att_again = env.as_contract(&contract_id, || {
+            TrustBridgeContract::export_attestation(env.clone(), None, 10).unwrap()
+        });
+
+        assert_eq!(att.page, page);
+        assert_eq!(att.page.records.len(), 3);
+        assert_eq!(att.digest, sha256_page(&env, &att.page));
+        assert_eq!(
+            att_again.digest, att.digest,
+            "repeated attestation must stay byte-identical with flags present"
+        );
+    }
+
+    /// Failure path 1: flags present do not excuse a stale cursor.
+    #[test]
+    fn attestation_still_rejects_stale_cursor_with_flags_set() {
+        let (env, admin, contract_id) = setup();
+        for name in ["alice", "bob", "carol", "dave"] {
+            register(&env, &contract_id, name);
+        }
+        flag_reverify(&env, &contract_id, &admin, "alice");
+        flag_reverify(&env, &contract_id, &admin, "carol");
+
+        let cursor = env.as_contract(&contract_id, || {
+            TrustBridgeContract::export_attestation(env.clone(), None, 2)
+                .unwrap()
+                .page
+                .next_cursor
+                .unwrap()
+        });
+        env.as_contract(&contract_id, || {
+            TrustBridgeContract::remove(env.clone(), admin.clone(), s(&env, "bob")).unwrap();
+        });
+
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::export_attestation(env.clone(), Some(cursor), 2),
+                Err(ContractError::InvalidCursor)
+            );
+            // The flags survived; only the invalid read failed.
+            assert_eq!(
+                TrustBridgeContract::get_pending_reverify(env.clone(), 0, 100).unwrap(),
+                Vec::from_array(&env, [s(&env, "alice"), s(&env, "carol")])
+            );
+        });
+    }
+
+    /// Failure path 2: initialization/auth ordering is unchanged — flags do
+    /// not create an implicit admin or an implicit initialized registry.
+    #[test]
+    fn uninitialized_attestation_still_errors() {
+        let env = Env::default();
+        let contract_id = env.register(TrustBridgeContract, ());
+        env.as_contract(&contract_id, || {
+            assert_eq!(
+                TrustBridgeContract::export_attestation(env.clone(), None, 10),
+                Err(ContractError::NotInitialized)
+            );
+            assert_eq!(
+                TrustBridgeContract::get_pending_reverify(env.clone(), 0, 10),
+                Err(ContractError::NotInitialized)
+            );
+        });
+    }
+}

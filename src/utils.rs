@@ -153,8 +153,9 @@ pub fn is_valid_github_username(s: &String) -> bool {
 ///
 /// GitHub usernames are case-insensitive, so this is what an off-chain
 /// verification workflow should use when matching a registration against a
-/// GitHub identity. Note that storage keys are still case-*sensitive*: this
-/// compares two values, it does not normalise them.
+/// GitHub identity. Storage keys are folded with [`canonicalize_username`]
+/// (ASCII lower-case), which this comparison mirrors; neither folds Unicode
+/// homoglyphs, so a confusable never matches its ASCII lookalike.
 pub fn eq_ignore_ascii_case(a: &String, b: &String) -> bool {
     if a.len() != b.len() {
         return false;
@@ -186,13 +187,30 @@ pub fn eq_ignore_ascii_case(a: &String, b: &String) -> bool {
 /// login can never create a second, independent record — see
 /// `docs/SECURITY.md#username-case-folding`.
 ///
-/// The fold is byte-wise ASCII-only: only bytes in `b'A'..=b'Z'` are lowered.
-/// Any byte `>= 0x80` (part of a multi-byte UTF-8 sequence) is left
-/// untouched, so this never changes the byte length of its input and never
-/// performs a Unicode-aware case fold — GitHub usernames are ASCII-only
-/// (`is_valid_github_username`), and this function does not attempt to
-/// canonicalize non-ASCII input beyond leaving it as-is. Homoglyph
-/// normalization is explicitly out of scope (tracked separately).
+/// ## ASCII-True and Locale-Independent Algorithm (Issue #766)
+///
+/// The fold is strictly byte-wise ASCII-only:
+///
+/// - For every byte `b`: if `b'A' <= b <= b'Z'`, it is replaced by `b + 0x20` (`b'a'..=b'z'`).
+/// - All other bytes (including ASCII digits, punctuation, and any byte `>= 0x80`)
+///   are left completely untouched.
+///
+/// This guarantees complete independence from host environment locale rules:
+///
+/// - **Turkish / Azeri dotless-i**: In Turkish locales (`tr_TR`), uppercase `I` (U+0049)
+///   lowercases to dotless `ı` (U+0131), and lowercase `i` (U+0069) uppercases to dotted `İ` (U+0130).
+///   `canonicalize_username` strictly maps ASCII `I` (0x49) to ASCII `i` (0x69) and never
+///   to dotless `ı` (0xC4 0xB1). Non-ASCII characters like `İ` and `ı` are left untouched
+///   by the fold and rejected outright by `is_valid_github_username`.
+/// - **German Eszett (`ß`)**: Under Unicode full case folding, `ß` (U+00DF) expands to `ss`.
+///   `canonicalize_username` operates in-place on single bytes and never expands length.
+/// - **Greek Sigma (`Σ`)**: In Unicode, uppercase `Σ` has context-sensitive lowercasing
+///   (`σ` medial vs `ς` final). The ASCII fold has no context dependency.
+/// - **Letter-like symbols**: Kelvin sign (`K` U+212A) or Latin long s (`ſ` U+017F) are
+///   multi-byte non-ASCII and never folded to ASCII `k` or `s`.
+///
+/// The byte length of the folded output is always identical to the input length:
+/// `len(canonicalize_username(s)) == len(s)`.
 ///
 /// A username too long for the fixed stack buffer (longer than
 /// `MAX_USERNAME_LEN` could ever be, since registration already rejects
@@ -687,6 +705,95 @@ mod tests {
     fn test_canonicalize_username_empty_is_unchanged() {
         let env = Env::default();
         assert_eq!(canonicalize_username(&env, &s(&env, "")), s(&env, ""));
+    }
+
+    #[test]
+    fn test_canonicalize_username_is_strictly_ascii_true_and_locale_independent() {
+        let env = Env::default();
+
+        // Standard ASCII 'I' must fold to ASCII 'i' (0x69), never Turkish dotless 'ı' (U+0131).
+        assert_eq!(
+            canonicalize_username(&env, &s(&env, "ALICE")),
+            s(&env, "alice")
+        );
+        assert_eq!(
+            canonicalize_username(&env, &s(&env, "ILKER")),
+            s(&env, "ilker")
+        );
+
+        // Turkish dotted capital I (U+0130, bytes [0xC4, 0xB0]) is non-ASCII and must NOT fold to 'i'.
+        let turkish_dotted_upper = s(&env, "al\u{0130}ce");
+        assert_eq!(
+            canonicalize_username(&env, &turkish_dotted_upper),
+            turkish_dotted_upper
+        );
+
+        // Turkish dotless small i (U+0131, bytes [0xC4, 0xB1]) is non-ASCII and must NOT fold to 'i'.
+        let turkish_dotless_lower = s(&env, "al\u{0131}ce");
+        assert_eq!(
+            canonicalize_username(&env, &turkish_dotless_lower),
+            turkish_dotless_lower
+        );
+
+        // German Eszett (U+00DF, bytes [0xC3, 0xDF]) must NOT expand to "ss".
+        let german_eszett = s(&env, "gro\u{00DF}");
+        let folded_eszett = canonicalize_username(&env, &german_eszett);
+        assert_eq!(folded_eszett, german_eszett);
+        assert_eq!(folded_eszett.len(), german_eszett.len());
+
+        // Kelvin sign (U+212A, bytes [0xE2, 0x84, 0xAA]) must NOT fold to 'k'.
+        let kelvin = s(&env, "\u{212A}ate");
+        assert_eq!(canonicalize_username(&env, &kelvin), kelvin);
+
+        // Greek capital sigma (U+03A3) must NOT fold to 's' or Greek small sigmas.
+        let greek_sigma = s(&env, "\u{03A3}mith");
+        assert_eq!(canonicalize_username(&env, &greek_sigma), greek_sigma);
+
+        // Length preservation invariant across all ASCII characters
+        for c in b'A'..=b'Z' {
+            let str_val = core::str::from_utf8(&[c]).unwrap();
+            let folded = canonicalize_username(&env, &s(&env, str_val));
+            let expected_lower = core::str::from_utf8(&[c + 0x20]).unwrap();
+            assert_eq!(folded, s(&env, expected_lower));
+            assert_eq!(folded.len(), 1);
+        }
+    }
+
+    #[test]
+    fn test_eq_ignore_ascii_case_locale_independence() {
+        let env = Env::default();
+
+        // ASCII matches
+        assert!(eq_ignore_ascii_case(
+            &s(&env, "ALICE"),
+            &s(&env, "alice")
+        ));
+        assert!(eq_ignore_ascii_case(
+            &s(&env, "ILKER"),
+            &s(&env, "ilker")
+        ));
+
+        // Locale-specific confusables must NOT match ASCII
+        assert!(!eq_ignore_ascii_case(
+            &s(&env, "al\u{0130}ce"),
+            &s(&env, "alice")
+        ));
+        assert!(!eq_ignore_ascii_case(
+            &s(&env, "al\u{0131}ce"),
+            &s(&env, "alice")
+        ));
+        assert!(!eq_ignore_ascii_case(
+            &s(&env, "gro\u{00DF}"),
+            &s(&env, "gross")
+        ));
+        assert!(!eq_ignore_ascii_case(
+            &s(&env, "\u{212A}ate"),
+            &s(&env, "kate")
+        ));
+        assert!(!eq_ignore_ascii_case(
+            &s(&env, "\u{03A3}mith"),
+            &s(&env, "smith")
+        ));
     }
 
     // ── Percentage helper ─────────────────────────────────────────────────────
