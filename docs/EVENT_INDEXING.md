@@ -255,6 +255,13 @@ from `TOPIC_TABLE`, or if the Subgraph column disagrees with the README.
 | `audit_config_changed_event` | `audit_config_changed` | `audit` | waived |
 | `oracle_allowlist_rotated_event` | `oracle_allowlist_rotated` | `admin` | waived |
 
+There is no dedicated pending-reverify event (Issue #866). Dashboards use
+`registered_event` (compare the new address with a locally mirrored prior
+address — the event does not carry the old one), `verified_event`,
+`removed_event`, `renamed_event`, and `rotation_executed_event` as hooks, then
+reconcile with `get_pending_reverify(offset, limit)`. See
+[DASHBOARD_SYNC.md § Consumer flow for pending reverify pages](DASHBOARD_SYNC.md#consumer-flow-for-pending-reverify-pages-issue-866).
+
 ### `AttestationClearedEvent` payload
 
 `src/events.rs` defines this event with the following fields; keep decoders

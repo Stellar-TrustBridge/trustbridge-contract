@@ -31,6 +31,13 @@ Before sharing a testnet deployment, confirm the full registry lifecycle. Run ev
    ```bash
    make invoke-init
    ```
+   Then run the post-deploy probe before registering anything:
+   ```bash
+   stellar contract invoke --id $CONTRACT_ID --network testnet --source $SOURCE --send=no -- get_health_probes
+   # Expect { "paused": false, "admin_set": true, "index_gen": 0 }; record index_gen as baseline
+   # Failure: admin_set=false -> wrong ID/network or initialize missing; paused=true -> check get_pause_reason
+   ```
+
 6. **Prime oracle allowlist** (Issue #4) for Wave verification demos.
    
    **Why this matters**: Unprimed oracle allowlists block `verify_with_oracle_proof`

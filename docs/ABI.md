@@ -573,6 +573,12 @@ digest stability across repeated calls, across independent contract
 instances holding identical content, across paginated sub-queries, and
 digest sensitivity to real content changes.
 
+Pending re-verification flags (`PENDING_REVERIFY_KEY`, Issue #864) are
+off-page advisory flags, not `ExportPage` XDR fields. They never block
+`export_attestation` and never enter the digest directly; only the normal
+record-field changes that set/clear a flag can change page bytes. Proven by
+`tests/export_page_layout.rs::pending_reverify_attestation`.
+
 ### RecordProof (Issue #230)
 
 Returned by `get_record_proof`. Lets a light client confirm a single
@@ -1274,7 +1280,8 @@ A well-formed signature that does not verify traps the invocation.
 ### `get_pending_reverify(offset: u32, limit: u32) -> Result<Vec<String>, ContractError>`
 
 Lists canonical GitHub usernames flagged for re-verification after an address
-change (`PENDING_REVERIFY_KEY`, Issue #587).
+change (`PENDING_REVERIFY_KEY`, Issue #587). Dashboard consumer flow and event
+hooks: [DASHBOARD_SYNC.md § Consumer flow for pending reverify pages](DASHBOARD_SYNC.md#consumer-flow-for-pending-reverify-pages-issue-866).
 
 | | |
 |---|---|
@@ -1294,7 +1301,9 @@ page. A name drops out once `verify` / `batch_verify` /
 to the new name. The flag is set on address change for a verified record
 (`register`, `register_sponsored`, `execute_rotation`); a successful verify
 removes the `"pend_rev"` storage key rather than writing `false`. Failed or
-unauthorized verifies leave it set. See
+unauthorized verifies leave it set. Flagged usernames remain fully exportable:
+the flag is advisory for Wave re-verification queues, **not** an export/attestation
+gate (Issue #864). See
 [STORAGE_KEYS.md § PENDING_REVERIFY_KEY lifecycle](STORAGE_KEYS.md#pending_reverify_key-lifecycle-issue-852).
 
 #### Limit boundaries (Issue #847)
@@ -1355,6 +1364,8 @@ Pre-Wave operator probes: pause flag, admin presence, index generation
 
 Preferred for liveness/uptime alerting because it never errors. See
 [CONTRACT_HEALTH.md → Choosing a probe & alert SLOs](CONTRACT_HEALTH.md#choosing-a-probe--alert-slos-issue-756).
+Copy-paste post-deploy/upgrade operator sequence:
+[DEPLOYMENT.md § Post-deploy health probe](DEPLOYMENT.md#post-deploy-health-probe-issue-863).
 
 ---
 
@@ -2614,6 +2625,8 @@ list is public, dashboards must follow the redaction policy in
 See also [Error codes & integrator notes](#error-codes--integrator-notes-for-get_pending_reverify),
 [EVENT_INDEXING.md § Pending Re-verification Signals and Poll API](EVENT_INDEXING.md#pending-re-verification-signals-and-poll-api),
 and [DASHBOARD_SYNC.md § Pending Re-verification](DASHBOARD_SYNC.md#pending-re-verification-issue-208).
+Consumer flow, sparse-page loop, event hooks, and failure codes:
+[DASHBOARD_SYNC.md § Consumer flow for pending reverify pages](DASHBOARD_SYNC.md#consumer-flow-for-pending-reverify-pages-issue-866).
 
 ---
 
@@ -3361,7 +3374,8 @@ not configured, `expires_in == 0`, or revoked).
 
 Admin-only; unaffected by the normal pause flag (same as
 `get_registered_paginated` / `get_all_registered` — admin export tooling
-stays available during maintenance). Wraps the same page
+stays available during maintenance). Pending re-verification flags do not
+gate it either (Issue #864). Wraps the same page
 `get_registered_paginated(cursor, limit)` would return with a SHA-256 digest,
 the contract's schema version, and the ledger sequence — see the
 `ExportAttestation` type above and

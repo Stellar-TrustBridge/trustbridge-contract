@@ -1384,11 +1384,15 @@ pub fn set_paused(env: &Env, paused: bool) {
     env.storage().instance().set(&PAUSED_KEY, &paused);
 }
 
-/// Returns whether `github_username` has a pending re-verification flag set.
+/// Internal per-username flag reader — **not** the exported contract
+/// entrypoint (which is `get_pending_reverify(offset, limit)` returning a
+/// page; see `src/lib.rs` and docs/DASHBOARD_SYNC.md, Issue #866).
 ///
 /// This flag is set when a verified user re-registers to a different Stellar
 /// address, indicating a new off-chain GitHub identity check is needed.
-/// It is cleared when the record is successfully `verify`'d.
+/// It is cleared when the record is successfully `verify`'d. Keys are folded
+/// with `canon` (ASCII lower-case), so case variants share one flag while
+/// homoglyphs remain distinct and are rejected at registration.
 pub fn get_pending_reverify(env: &Env, github_username: &String) -> bool {
     let key = (PENDING_REVERIFY_KEY, canon(env, github_username));
     env.storage().persistent().get(&key).unwrap_or(false)
@@ -1416,10 +1420,12 @@ pub fn clear_pending_reverify(env: &Env, github_username: &String) {
 /// `[offset, offset + limit)` (Issue #587).
 ///
 /// Exposed on the contract ABI as `TrustBridgeContract::get_pending_reverify`.
-/// The scan touches at most `limit` index entries, so gas stays bounded no
-/// matter how large the registry is; a page may therefore hold fewer than
-/// `limit` usernames. Callers advance `offset` by `limit` until it reaches
-/// `get_stats().total`. `limit == 0` falls back to `DEFAULT_PAGE_LIMIT` (`20`).
+/// The scan visits at most `limit` index entries (so work per call stays
+/// bounded, though `get_index_page` deserializes the flat `INDEX_KEY` on each
+/// call); a page may therefore hold fewer than `limit` usernames. Callers
+/// advance `offset` by `limit` until it reaches `get_stats().total`.
+/// `limit == 0` falls back to `DEFAULT_PAGE_LIMIT` (`20`). Consumer semantics:
+/// docs/DASHBOARD_SYNC.md § Consumer flow for pending reverify pages (#866).
 ///
 /// # Errors
 ///

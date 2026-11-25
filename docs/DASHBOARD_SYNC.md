@@ -464,10 +464,29 @@ new Stellar address has not yet been linked to the GitHub account.
 
 ### Reading pending-reverify state
 
+There is exactly **one** exported read endpoint (Issue #866):
 One public read endpoint exposes this flag (no auth required, works while paused):
 
-| Endpoint | Use |
+```text
+get_pending_reverify(offset: u32, limit: u32) -> Result<Vec<String>, ContractError>
+```
+
+There is **no** public single-username `bool` query and no
+`get_pending_reverify_page` entrypoint. Per-username flag access is a
+crate-internal storage helper (`src/storage.rs`), not part of the ABI — see
+[ABI.md § get_pending_reverify](ABI.md#get_pending_reverifyoffset-u32-limit-u32---resultvecstring-contracterror).
+
+| Behavior | Contract semantics |
 |---|---|
+| Auth / pause | None required; read succeeds while paused |
+| Output | Sparse `Vec<String>` of canonical (lower-case ASCII) usernames with the flag set |
+| `limit == 0` | Uses `DEFAULT_PAGE_LIMIT` (20) |
+| `limit > 100` | `Err(InvalidBatchSize)` (code 14) — rejected, not clamped like export pages |
+| Empty page | Usernames never registered, removed, or re-verified simply do not appear |
+| Uninitialized | `Err(NotInitialized)` (code 2) — do not mistake a wrong ID/network for an empty queue |
+| Termination | Advance `offset` by `limit` until `offset >= get_stats().total` |
+
+### Consumer flow for pending reverify pages (Issue #866)
 | `get_pending_reverify(offset, limit)` | Paginated scan — returns `Vec<String>` of usernames with the flag set |
 
 This is the only pending-reverify ABI entry point (`docs/abi.json`); there is no
@@ -482,8 +501,36 @@ The list is public by design, so public dashboards should show counts only and
 keep usernames behind SSO/ACL; see
 [SECURITY.md § Public pending re-verification listings](SECURITY.md#public-pending-re-verification-listings-issue-860).
 
-### Dashboard sync workflow
+```text
+offset = 0
+while offset < get_stats().total:
+    names = get_pending_reverify(offset, 50)   # 20 default when limit == 0
+    queue(names)                               # sparse: often empty before the end
+    offset += 50
+```
 
+Pages contain only canonical usernames; match them to dashboard records with
+the same canonical fold (ASCII lower-case, homoglyphs rejected at registration).
+There is no `next_cursor` / `has_more`: this is offset arithmetic over the flat
+registry index, bounded to `limit` entries per call.
+
+**Event hooks** (there is no dedicated pending-reverify event; use these to
+invalidate a local mirror, then reconcile with the page API):
+
+| Event | Consumer action |
+|---|---|
+| `registered_event` | If the username was previously verified and the address changed, expect a flag. The event carries only the **new** address, so compare against the locally mirrored prior address or `get_public_paginated`. |
+| `verified_event` / `batch_verify` | Clear the local flag; the contract removes the `pend_rev` key. |
+| `removed_event` | Drop the local flag; removal clears it on-chain. |
+| `renamed_event` | Move the local flag from `old_username` to `new_username` (topics include both names and `verification_cleared`). |
+| `rotation_executed_event` | Set the flag for verified usernames whose address rotated. |
+
+Topic symbols and payloads are listed in
+[EVENT_INDEXING.md § Topic classification](EVENT_INDEXING.md#topic-classification).
+
+Automated proof: `cargo test --test dashboard_pending_reverify` (sparse two-page
+walk, pause exemption, clear-on-verify, `InvalidBatchSize`, and
+`NotInitialized`).
 1. **On `RegisteredEvent`** where the old and new `stellar_address` differ, check
    the `get_pending_reverify` pages for that username to confirm the flag was set. Queue the
    contributor for a re-verification workflow.
@@ -592,11 +639,15 @@ the requested page and never touches `INDEX_KEY`. It:
   lower call volume) on the existing flat-index path unchanged.
 
 **Confirmed by audit:** no other public/unauthenticated read path performs
-a flat-index or full-registry scan. `has_record`, `get_address`,
-`get_address_if_verified`, and `get_pending_reverify` all key directly on
-`(REG_KEY, github_username)` and never touch either index. `get_all_registered`
-and `get_registered_paginated` are admin-gated exports, not public reads, and
-are out of scope for this audit.
+a flat-index or full-registry scan. `has_record`, `get_address`, and
+`get_address_if_verified` key directly on `(REG_KEY, github_username)` and
+never touch either index. `get_pending_reverify(offset, limit)` is the
+exception among name-based reads: it scans at most `limit` entries of the flat
+instance index (`INDEX_KEY`) and filters them by the advisory
+`(PENDING_REVERIFY_KEY, canon(username))` flag key; it never scans the chunked
+index used by `get_public_paginated`. `get_all_registered` and
+`get_registered_paginated` are admin-gated exports, not public reads, and are
+out of scope for this audit.
 
 ### What this means for indexers
 

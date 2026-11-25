@@ -98,6 +98,17 @@ stellar contract invoke \
 # Expected: { "total": 0, "verified": 0 }
 ```
 
+Run the read-only post-deploy probe immediately after initialize (no admin key,
+`--send=no`; it never returns a contract error):
+
+```bash
+stellar contract invoke --id $CONTRACT_ID --network testnet --send=no -- get_health_probes
+# Happy path (fresh deploy): { "paused": false, "admin_set": true, "index_gen": 0 }
+```
+
+For failure triage (uninitialized, paused, unexpected `index_gen`), see
+[Post-deploy health probe (Issue #863)](#post-deploy-health-probe-issue-863).
+
 ---
 
 ## Testnet Checklist
@@ -203,6 +214,10 @@ stellar contract invoke \
 stellar contract get_wasm_hash \
   --id $CONTRACT_ID \
   --network mainnet
+
+# Repeat after every deploy or WASM upgrade (read-only, no admin key)
+stellar contract invoke --id $CONTRACT_ID --network mainnet --send=no -- get_health_probes
+# Happy path: paused=false, admin_set=true, index_gen unchanged from the recorded baseline
 ```
 
 Checklist before mainnet:
@@ -730,6 +745,34 @@ See [STORAGE_RENT.md](STORAGE_RENT.md) for how simulation fits into the broader 
 5. Wire production monitors to the probe sequence in
    [CONTRACT_HEALTH.md](CONTRACT_HEALTH.md) (initialized?, admin set?, stats
    sane?, optional Horizon lag)
+6. Record the post-deploy/upgrade `get_health_probes` result using the recipe below
+
+### Post-deploy health probe (Issue #863)
+
+Run immediately after every deploy or WASM upgrade. `get_health_probes` is
+read-only, needs no admin key (`--send=no` is the default), works while paused,
+and never returns a contract error. Field semantics and alert thresholds:
+[CONTRACT_HEALTH.md § Pre-Wave probes](CONTRACT_HEALTH.md#pre-wave-probes-issue-668) and
+[CONTRACT_HEALTH.md § Choosing a probe & alert SLOs](CONTRACT_HEALTH.md#choosing-a-probe--alert-slos-issue-756).
+ABI: [ABI.md § get_health_probes](ABI.md#get_health_probes--healthprobes).
+
+```bash
+stellar contract invoke --id $CONTRACT_ID --network $NETWORK --send=no -- get_health_probes
+# Happy: { "paused": false, "admin_set": true, "index_gen": <recorded baseline> }
+```
+
+| Probe result | Verdict | Operator action |
+|---|---|---|
+| `paused: false`, `admin_set: true`, `index_gen` at recorded baseline | Happy | Proceed; keep `index_gen` as the dashboard/export cursor baseline. |
+| `admin_set: false` (`paused: false`, `index_gen: 0`) or `get_health` returns `Error(Contract, #2)` (`NotInitialized`) | Failure — wrong `--id`/`--network`, or `initialize` was never called | Stop Wave traffic. Verify contract ID and network, run `make invoke-init CONTRACT_ID=$CONTRACT_ID ADMIN=$ADMIN`, then re-probe. Re-running initialize on a live contract returns code 1 (`AlreadyInitialized`), which confirms it was already set up. |
+| `paused: true` | Failure — contract frozen for upgrade/incident | Read `stellar contract invoke --id $CONTRACT_ID --network $NETWORK -- get_pause_reason`; resume with `-- unpause --reason-code 4` as admin per the runbook, then re-probe. An unexpected `paused: true` means the upgrade window was left open. |
+
+A later `index_gen` jump with no scheduled removal means dashboards and cursors
+must re-sync (stale cursors fail with code 52, `InvalidCursor`); see
+[CONTRACT_HEALTH.md § Pre-Wave probes](CONTRACT_HEALTH.md#pre-wave-probes-issue-668).
+
+Automated proof: `cargo test --test deployment_probe --test health_probes`
+(uninitialized, paused, and healthy states; read-only probe stays available).
 
 See [SECURITY.md](SECURITY.md) for operational security guidance.
 
