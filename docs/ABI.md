@@ -391,7 +391,7 @@ Issue #4).
 | 11 | `InvalidUsername` | Username is empty, over `max_username_len`, or contains disallowed characters |
 | 12 | `AttestationExpired` | Upgrade attestation's `expires_at` has passed |
 | 13 | `UnattestedWasm` | `upgrade` hash does not match the live attestation |
-| 14 | `InvalidBatchSize` | Batch call supplied zero items or more than the configured max |
+| 14 | `InvalidBatchSize` | Batch call supplied zero items or more than the configured max, or `get_pending_reverify` called with `limit > MAX_PAGE_LIMIT` (100) |
 | 15 | `InvalidReasonCode` | `revoke_verification` reason_code is not a known `RevokeReason` value |
 | 16 | `ZeroAddress` | Supplied Stellar address is the well-known zero/burn address |
 | 17 | `ChallengeAlreadyActive` | `start_challenge` called while a challenge is already open |
@@ -1195,6 +1195,7 @@ Merkle roots in `get_public_paginated` and exported record snapshots satisfy cro
 - **Empty Tail and Single-Record Edge Cases**: An empty registry or a cursor past the end of the registry returns an empty record set with the canonical all-zero sentinel root (`[0u8; 32]`). A single-record page root is strictly equal to that single leaf's hash.
 - **Mutation Sensitivity**: Removing a record invalidates prior roots and previous page cursors. Changing bot status via `set_bot_status` preserves leaf consistency under the v1 leaf schema.
 - **Initialization Gate**: Uninitialized contract calls fail with `ContractError::NotInitialized` rather than returning an empty root.
+- **Mid-export flag flips & Wave audit restart requirement**: `PENDING_REVERIFY_KEY` (`pend_rev`) and `is_bot` are not hashed into `leaf_hash`. In-place reverify/verification transitions (`register` address change, `execute_address_rotation`, `verify`, `batch_verify`, `verify_with_oracle_proof`, `revoke_verification`) do not bump `INDEX_GEN_KEY`, so cursors stay valid and each individual page's `merkle_root` still commits accurately to that page's returned `records` at its read ledger. However, multi-page walks are not snapshot-isolated across ledgers: if a flag flips on a record after its page was read (or between pages), pre-flip proofs fail against post-flip roots and a stitched export can diverge from a single-shot snapshot. For whole-registry Wave audits, operators must either pause writes during export or detect mid-export drift (`get_last_event_ledger()`, `get_stats()`, `export_attestation().ledger`) and restart from `cursor = None` (index-shifting `remove`/`rename` calls bump `INDEX_GEN_KEY` and enforce restart with `InvalidCursor`, code `52`). See [REGISTRY_INVARIANTS.md § Mid-export reverify flag changes](REGISTRY_INVARIANTS.md#mid-export-reverify-flag-changes-and-wave-audit-restart-requirement).
 
 #### ExportPage layout compatibility
 
@@ -1259,18 +1260,43 @@ change (`PENDING_REVERIFY_KEY`, Issue #587).
 
 | | |
 |---|---|
-| **Auth** | None (read-only) |
+| **Auth** | None (read-only; works while paused) |
 | **Mutates** | No |
-| **Errors** | `NotInitialized`, `InvalidBatchSize` (`limit > MAX_PAGE_LIMIT`) |
+| **Errors** | `NotInitialized` (code `2`), `InvalidBatchSize` (code `14`), `NetworkMismatch` (code `30`) |
+| **Events** | None emitted on `PENDING_REVERIFY_KEY` set/clear (see [EVENT_INDEXING.md](EVENT_INDEXING.md#pending-re-verification-signals-and-poll-api)) |
 | **Returns** | `Vec<String>` — flagged usernames within the scanned window |
 | **Pagination** | Offset-based over the registry index: scans entries `[offset, offset + limit)` |
-| **Limit** | `0` → `DEFAULT_PAGE_LIMIT`; `> MAX_PAGE_LIMIT` (100) → `InvalidBatchSize` |
+| **Limit** | `0` → `DEFAULT_PAGE_LIMIT` (`20`); `> MAX_PAGE_LIMIT` (`100`) → `InvalidBatchSize` (`14`) |
 
 Gas is bounded by `limit`, so a page may hold fewer than `limit` names (or
 none) while more remain. Advance `offset` by `limit` until it reaches
-`get_stats().total`. An empty registry returns an empty page. A name drops
-out once `verify` / `batch_verify` clears its flag; `rename` moves the flag
+`get_stats().total`. An empty registry or `offset >= total` returns an empty
+page. A name drops out once `verify` / `batch_verify` /
+`verify_with_oracle_proof` or `remove` clears its flag; `rename` moves the flag
 to the new name.
+
+#### Error codes & integrator notes for `get_pending_reverify`
+
+| Code | Variant | Category | When raised | Integrator handling |
+|---|---|---|---|---|
+| `2` | `NotInitialized` | `Fatal` | Contract `initialize` has not been called | Verify `CONTRACT_ID` and run `initialize` before polling |
+| `14` | `InvalidBatchSize` | `Fatal` | `limit > MAX_PAGE_LIMIT` (`100`) | Clamp client page size to `1..=100` (or pass `0` for default `20`) |
+| `30` | `NetworkMismatch` | `Fatal` | Recorded network tag differs from the executing ledger's `network_id` | Re-point client to the matching Stellar network passphrase / RPC |
+
+- **Non-error boundaries:** `limit == 0` falls back to `DEFAULT_PAGE_LIMIT` (`20`);
+  `offset >= get_stats().total` (including `u32::MAX`) returns `Ok([])` via
+  saturating arithmetic rather than `InvalidCursor` (code `52`); the read is
+  unauthenticated (never `NotAuthorized`, code `3`) and pause-exempt (never
+  `Paused`, code `7`).
+- **Mid-scan index shifts:** Because `get_pending_reverify` uses offset
+  pagination over the flat index, a concurrent `remove` or `rename` shifts later
+  positions without returning `InvalidCursor`. Check
+  `get_health_probes().index_gen` before and after multi-page walks and restart
+  from `offset = 0` if `index_gen` changed.
+- **No dedicated events:** `PENDING_REVERIFY_KEY` set/clear emits no event on
+  chain; use `get_pending_reverify` as the authoritative Wave poll API (see
+  [EVENT_INDEXING.md](EVENT_INDEXING.md#pending-re-verification-signals-and-poll-api)
+  and [docs/subgraph/README.md](subgraph/README.md)).
 
 ```bash
 stellar contract invoke --id $ID --network testnet \
@@ -2518,37 +2544,29 @@ struct AdminTransferProposal {
 
 ---
 
-## Pending Re-verification Functions (Issue #208)
+## Pending Re-verification Functions (Issues #208, #587)
 
-### `get_pending_reverify(github_username: String) -> Result<bool, ContractError>`
-
-Returns whether `github_username` has a pending re-verification flag.
-
-The flag is set automatically when a verified user re-registers to a different
-Stellar address, invalidating their prior verification. It is cleared once
-the record is `verify`'d again. Returns `false` for unknown usernames and
-removed users. Works while the contract is paused.
+The exported contract entrypoint for listing contributors awaiting
+re-verification is [`get_pending_reverify(offset: u32, limit: u32)`](#get_pending_reverifyoffset-u32-limit-u32---resultvecstring-contracterror),
+which delegates to `crate::storage::get_pending_reverify_page` (internal-only,
+not exported on the contract ABI). For checking a single username's current
+verification state, use `get_address` or `get_record_proof` (`storage::get_pending_reverify`
+is internal-only).
 
 | | |
 |---|---|
+| **Exported entrypoint** | `get_pending_reverify(offset: u32, limit: u32) -> Result<Vec<String>, ContractError>` |
 | **Auth** | None |
 | **Mutates** | No |
-| **Errors** | `NotInitialized` |
+| **Works while paused** | Yes |
+| **Errors** | `NotInitialized` (code `2`), `InvalidBatchSize` (code `14`), `NetworkMismatch` (code `30`) |
+| **Events** | None emitted on flag set/clear (poll `get_pending_reverify`) |
 
-### `get_pending_reverify_page(offset: u32, limit: u32) -> Result<Vec<String>, ContractError>`
-
-Returns a page of usernames that have a pending re-verification flag set.
-`limit` is capped at `MAX_PAGE_LIMIT` (100). Works while the contract is paused.
-
-| | |
-|---|---|
-| **Auth** | None |
-| **Mutates** | No |
-| **Errors** | `NotInitialized` |
-
-**Dashboard sync note:** Poll this endpoint to discover which contributors need
-a fresh off-chain GitHub identity check after an address change. See
-[DASHBOARD_SYNC.md § Pending Re-verification](DASHBOARD_SYNC.md#pending-re-verification-issue-208).
+**Dashboard sync note:** Poll `get_pending_reverify` to discover which contributors
+need a fresh off-chain GitHub identity check after an address change. See
+[Error codes & integrator notes](#error-codes--integrator-notes-for-get_pending_reverify),
+[EVENT_INDEXING.md § Pending Re-verification Signals and Poll API](EVENT_INDEXING.md#pending-re-verification-signals-and-poll-api),
+and [DASHBOARD_SYNC.md § Pending Re-verification](DASHBOARD_SYNC.md#pending-re-verification-issue-208).
 
 ---
 

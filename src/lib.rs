@@ -3483,13 +3483,18 @@ impl TrustBridgeContract {
     /// canonical usernames whose `PENDING_REVERIFY_KEY` flag is set. Gas is
     /// bounded by `limit`, so a page can hold fewer than `limit` names; keep
     /// advancing `offset` by `limit` until it reaches `get_stats().total`.
-    /// `limit == 0` uses `DEFAULT_PAGE_LIMIT`. An empty registry returns an
-    /// empty page. Read-only, no auth required.
+    /// `limit == 0` uses `DEFAULT_PAGE_LIMIT` (`20`). An empty registry or an
+    /// `offset >= total` returns an empty page (never `InvalidCursor`).
+    /// Read-only, no auth required, and available while paused.
     ///
     /// # Errors
     ///
-    /// - [`ContractError::NotInitialized`] if `initialize` has not been called.
-    /// - [`ContractError::InvalidBatchSize`] if `limit > MAX_PAGE_LIMIT` (100).
+    /// - [`ContractError::NotInitialized`] (code `2`, `Fatal`) if `initialize`
+    ///   has not been called.
+    /// - [`ContractError::InvalidBatchSize`] (code `14`, `Fatal`) if
+    ///   `limit > MAX_PAGE_LIMIT` (`100`).
+    /// - [`ContractError::NetworkMismatch`] (code `30`, `Fatal`) if the
+    ///   stored network tag differs from the executing ledger's network ID.
     pub fn get_pending_reverify(
         env: Env,
         offset: u32,

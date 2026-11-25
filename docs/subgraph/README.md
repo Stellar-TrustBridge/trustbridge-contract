@@ -28,6 +28,7 @@ When onboarding a new indexer (like Graph Node or Envio) using this schema, be a
 - **Idempotency & Event IDs:** Entity IDs are stable, following the format `{networkId}:{contractId}:{ledgerSequence}:{txHash}:{eventIndex}` (see [`DASHBOARD_SYNC.md`](../DASHBOARD_SYNC.md#stable-event-id-issue-283)). Using this as the primary key ensures that ingestion is replay-idempotent.
 - **Event Ordering:** The indexer must process events strictly in order of `ledgerSequence` and then `eventIndex` within the transaction to maintain the correct state in the `Contributor` aggregate.
 - **Reconciliation:** Treat the subgraph as a change-notification cache. After any indexing gap or indexer restart, you should reconcile the indexer's state against the contract's authoritative storage using `get_public_paginated` (see [`DASHBOARD_SYNC.md`](../DASHBOARD_SYNC.md)).
+- **Pending Re-verification Queue (no dedicated events):** Setting or clearing `PENDING_REVERIFY_KEY` (`pend_rev`) emits **no** contract event (`src/events.rs`) and therefore has no subgraph event or entity. Wave UIs and indexers must not rely solely on `RegisteredEvent` / `RenamedEvent` / `RotationExecutedEvent` / `VerifiedEvent` to reconstruct the reverify queue (for example, `RenamedEvent.verificationCleared` is `false` when an already-unverified record with `pend_rev = true` is renamed, even though the flag migrates to `new_username`). Poll `get_pending_reverify(offset, limit)` (e.g. `offset = 0, limit = 100` advancing until `get_stats().total`, restarting if `get_health_probes().index_gen` changes) — see [`EVENT_INDEXING.md`](../EVENT_INDEXING.md#pending-re-verification-signals-and-poll-api).
 - **Re-orgs:** While standard indexers handle ledger rollbacks, the last-write-wins approach on the `Contributor` entity helps ensure the state eventually matches the chain even if events are re-processed.
 
 ## Network & Address Configuration
@@ -303,6 +304,7 @@ missing, duplicate, stale or ambiguous entries.
 | `upgrade_proposal_cancelled_event` | Contract upgrade/attestation telemetry; available via raw event indexer |
 | `verification_configured_event` | Operational administration or RBAC telemetry; available via raw event indexer |
 | `audit_config_changed_event` | Operational administration or RBAC telemetry; available via raw event indexer |
+| `oracle_allowlist_rotated_event` | Operational administration or RBAC telemetry; available via raw event indexer |
 
 Run `make subgraph-parity` to verify the event inventory, mapping table,
 Graph schema, and waivers locally. Changes to an event name (including topic

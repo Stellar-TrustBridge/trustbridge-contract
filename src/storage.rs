@@ -1409,17 +1409,26 @@ pub fn clear_pending_reverify(env: &Env, github_username: &String) {
 /// Returns the usernames flagged for re-verification among index entries
 /// `[offset, offset + limit)` (Issue #587).
 ///
+/// Exposed on the contract ABI as `TrustBridgeContract::get_pending_reverify`.
 /// The scan touches at most `limit` index entries, so gas stays bounded no
 /// matter how large the registry is; a page may therefore hold fewer than
 /// `limit` usernames. Callers advance `offset` by `limit` until it reaches
-/// the registry count. `limit == 0` falls back to `DEFAULT_PAGE_LIMIT`.
+/// `get_stats().total`. `limit == 0` falls back to `DEFAULT_PAGE_LIMIT` (`20`).
 ///
 /// # Errors
 ///
-/// - [`ContractError::InvalidBatchSize`] if `limit > MAX_PAGE_LIMIT`.
-/// - Offsets are treated as an empty page once they reach the index length;
-///   the underlying index scan uses saturating end arithmetic so a hostile
-///   `u32::MAX` offset cannot wrap into an earlier page (Issue #757).
+/// - [`ContractError::InvalidBatchSize`] (code `14`, `Fatal`) if
+///   `limit > MAX_PAGE_LIMIT` (`100`).
+/// - [`ContractError::NotInitialized`] (code `2`, `Fatal`) and
+///   [`ContractError::NetworkMismatch`] (code `30`, `Fatal`) are enforced by
+///   `require_initialized` on the public `get_pending_reverify` entrypoint
+///   before calling this helper.
+/// - Offsets are treated as an empty page once they reach the index length
+///   (never `InvalidCursor`, code `52`); the underlying index scan uses
+///   saturating end arithmetic so a hostile `u32::MAX` offset cannot wrap into
+///   an earlier page (Issue #757).
+/// - Read-only, unauthenticated, and pause-exempt (never `NotAuthorized` / `3`
+///   or `Paused` / `7`).
 pub fn get_pending_reverify_page(
     env: &Env,
     offset: u32,
